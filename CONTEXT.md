@@ -238,13 +238,14 @@ Naming: `list_*`, `get_*`, `create_*`, `update_*`, `delete_*`, plus `search_*`. 
   `ConfirmScreen`. Each dismisses with a result; the app installs a callback.
 - Bindings: `n` new, `u` update/edit, `m` move, `c` comment, `t` task, `x`
   task toggle/edit, `o` owners, `l` labels, `f` filter, `/` search, `e` toggle
-  complete, `d` delete, `r` refresh, `q` quit. `e` toggles between a `done`
-  workflow state and `unstarted`. `u` opens `EditStoryScreen` (name/desc/type/
-  state/project/epic/iteration/group/deadline; state changes go through
-  `move_story_state` so `completed_at` stays consistent). `x` opens
-  `TaskActionScreen` (toggle a task's completion or edit its description). `o`
-  and `l` open `OwnerScreen`/`LabelScreen` to toggle a member's ownership or a
-  label on the selected story.
+  complete, `d` delete, `r` refresh, `J`/`K` move down/up (reorder by swapping
+  `position`), `q` quit. `e` toggles between a `done` workflow state and
+  `unstarted`. `u` opens `EditStoryScreen` (name/desc/type/state/project/epic/
+  iteration/group/deadline; state changes go through `move_story_state` so
+  `completed_at` stays consistent). `x` opens `TaskActionScreen` (toggle a
+  task's completion or edit its description). `o` and `l` open
+  `OwnerScreen`/`LabelScreen` to toggle a member's ownership or a label on the
+  selected story.
 - The detail pane renders the story's tasks and comments (threaded, with author).
 - The connection is opened in `on_mount` and closed in `on_unmount`.
 - `main.py` (no args) imports `tui.app.run`; if `textual` isn't installed it

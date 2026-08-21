@@ -623,6 +623,8 @@ class PlannerApp(App):
         Binding("f", "filter", "Filter"),
         Binding("slash", "search", "Search"),  # '/'
         Binding("r", "refresh", "Refresh"),
+        Binding("J", "move_down", "Down"),
+        Binding("K", "move_up", "Up"),
         Binding("d", "delete_story", "Delete"),
         Binding("e", "toggle_complete", "Complete"),
     ]
@@ -783,6 +785,59 @@ class PlannerApp(App):
     def action_refresh(self) -> None:
         """Refresh the story list based on current filters."""
         self.refresh_stories()
+
+    def _filtered_neighbors(self) -> list:
+        """Return the stories currently shown (ordered by position, id)."""
+        assert self.conn is not None
+        proj, stype, q = self.filters
+        return stories.list_stories(self.conn, project_id=proj, state_type=stype, q=q)
+
+    def _swap_positions(self, a, b) -> None:
+        """Swap the position columns of two stories."""
+        assert self.conn is not None
+        pa, pb = a.position, b.position
+        stories.update_story(self.conn, a.id, position=pb)
+        stories.update_story(self.conn, b.id, position=pa)
+
+    def action_move_down(self) -> None:
+        """Move the selected story down the list (swap with the next story)."""
+        sid = self._current_story_id()
+        if sid is None or self.conn is None:
+            self.bell()
+            return
+        nbrs = self._filtered_neighbors()
+        idx = next((i for i, s in enumerate(nbrs) if s.id == sid), None)
+        if idx is None or idx >= len(nbrs) - 1:
+            self.bell()  # already last
+            return
+        self._swap_positions(nbrs[idx], nbrs[idx + 1])
+        self.refresh_stories()
+        table = self.query_one("#stories", DataTable)
+        try:
+            table.move_cursor(row=idx + 1)
+        except Exception:
+            pass
+        self.show_current_detail()
+
+    def action_move_up(self) -> None:
+        """Move the selected story up the list (swap with the previous story)."""
+        sid = self._current_story_id()
+        if sid is None or self.conn is None:
+            self.bell()
+            return
+        nbrs = self._filtered_neighbors()
+        idx = next((i for i, s in enumerate(nbrs) if s.id == sid), None)
+        if idx is None or idx <= 0:
+            self.bell()  # already first
+            return
+        self._swap_positions(nbrs[idx - 1], nbrs[idx])
+        self.refresh_stories()
+        table = self.query_one("#stories", DataTable)
+        try:
+            table.move_cursor(row=idx - 1)
+        except Exception:
+            pass
+        self.show_current_detail()
 
     def action_new_story(self) -> None:
         """Open modal to create a new story."""

@@ -213,3 +213,37 @@ def test_tui_manage_owners_and_labels(db_path):
             assert getattr(app, "_exception", None) is None
             await pilot.press("q")
     _run(main())
+
+
+def test_tui_reorder_stories(db_path):
+    """'J'/'K' swap a story with its neighbor by updating position."""
+    from backend import db
+    from backend import stories as stories_mod
+
+    c = db.connect(db_path)
+    a = stories_mod.create_story(c, "a")
+    b = stories_mod.create_story(c, "b")
+    cc = stories_mod.create_story(c, "c")
+    c.close()
+
+    async def main():
+        app = PlannerApp(db_path)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            # initial order: a, b, c
+            assert [s.id for s in app._filtered_neighbors()] == [a.id, b.id, cc.id]
+
+            # move 'a' down -> b, a, c
+            app.query_one("#stories").move_cursor(row=0); await pilot.pause()
+            await pilot.press("J"); await pilot.pause(0.05); await pilot.pause()
+            order = [s.id for s in stories_mod.list_stories(app.conn)]
+            assert order == [b.id, a.id, cc.id], order
+
+            # move 'a' (now at index 1) back up -> a, b, c
+            await pilot.press("K"); await pilot.pause(0.05); await pilot.pause()
+            order = [s.id for s in stories_mod.list_stories(app.conn)]
+            assert order == [a.id, b.id, cc.id], order
+
+            assert getattr(app, "_exception", None) is None
+            await pilot.press("q")
+    _run(main())
