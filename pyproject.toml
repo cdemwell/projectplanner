@@ -1,7 +1,10 @@
 [project]
 name = "projectplanner"
 version = "0.1.0"
-description = "Add your description here"
+description = "Local project-planning tool (Shortcut-model-inspired) over SQLite."
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    # Backend + CLI are stdlib-only; Textual is used only by the TUI.
+    "textual>=0.80",
+]

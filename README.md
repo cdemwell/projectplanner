@@ -15,7 +15,9 @@ machine-readable output.
 ## Requirements
 
 - Python 3.12+ (stdlib `sqlite3` ships with FTS5, used for search).
-- No third-party dependencies for the backend or CLI.
+- The backend + CLI are stdlib-only. The **TUI** additionally needs
+  [Textual](https://textual.textualize.io) (`pip install textual`); without it,
+  `python main.py` (no args) prints an install hint and the CLI still works.
 
 ## Quick start
 
@@ -41,8 +43,18 @@ states.
 ## Running it
 
 - `python main.py <resource> <action> [flags]` — one-shot CLI.
-- `python main.py` (no args) — interactive TUI (**not yet built**; see
-  [CONTEXT.md §10/§15](CONTEXT.md) for the open library decision).
+- `python main.py` (no args) — interactive **TUI** (full-screen, built with
+  Textual): a filterable story list with a detail pane and modal screens for
+  create / move / comment / task / filter / search. Keyboard shortcuts are
+  shown in the footer:
+
+  | Key | Action          |   | Key | Action           |
+  |-----|-----------------|---|-----|------------------|
+  | `n` | new story       |   | `f` | filter (proj/state) |
+  | `m` | move state      |   | `/` | search           |
+  | `c` | add comment     |   | `e` | toggle complete  |
+  | `t` | add task        |   | `d` | delete story     |
+  | `r` | refresh         |   | `q` | quit             |
 
 ## CLI reference
 

@@ -24,24 +24,25 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _launch_tui() -> int:
-    """Launch the full-screen TUI.
-
-    The TUI library is the one open design decision (CONTEXT.md §10/§15). Until
-    that's confirmed we surface the situation clearly rather than guessing.
-    """
-    print(
-        "projectplanner: interactive TUI is not yet built.\n"
-        "\n"
-        "  The CLI is ready to use. Examples:\n"
-        "    python main.py story list\n"
-        "    python main.py project create --name backend\n"
-        "    python main.py story create --name \"Fix login\" --project backend --type bug\n"
-        "    python main.py search \"login\"\n"
-        "\n"
-        "  To build the TUI, decide the library per CONTEXT.md §15 (Textual vs\n"
-        "  prompt_toolkit), then implement tui/app.py."
-    )
-    return 0
+    """Launch the full-screen Textual TUI (no args)."""
+    try:
+        from tui.app import run as run_tui
+    except ImportError as e:
+        print(
+            "projectplanner: the TUI needs the 'textual' package, which isn't\n"
+            "installed in this interpreter.\n"
+            "\n"
+            "  Install it, e.g.:  pip install textual\n"
+            "  (or use the project venv: .venv/bin/python main.py)\n"
+            "\n"
+            f"  missing module: {e.name}\n"
+            "\n"
+            "  The CLI still works without Textual — e.g.\n"
+            "    python main.py story list\n"
+            "    python main.py search \"login\""
+        )
+        return 1
+    return run_tui()
 
 
 if __name__ == "__main__":

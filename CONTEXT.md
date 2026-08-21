@@ -43,9 +43,9 @@ unless the user explicitly asks.
 
 ## 3. Repository state
 
-**Backend + CLI are built and working** (TUI is the one remaining piece).
+**Backend + CLI + TUI are all built and working.**
 
-- `main.py` — dispatch: no args → TUI stub message; args → CLI.
+- `main.py` — dispatch: no args → Textual TUI; args → CLI.
 - `backend/` — `db.py`, `errors.py`, `models.py`, `_util.py`, and one module per
   entity (`members`, `groups`, `workflows`, `projects`, `labels`, `milestones`,
   `epics`, `iterations`, `stories`, `tasks`, `comments`, `story_links`,
@@ -53,12 +53,15 @@ unless the user explicitly asks.
   tables + sync triggers).
 - `cli/commands.py` — argparse subparsers for every resource; `--json` flag;
   name-to-id resolution; `run(argv)` entry point.
-- `tui/app.py` — **not yet created** (the one open item, §15).
-- `pyproject.toml` — `projectplanner` v0.1.0, `requires-python = ">=3.12"`, no deps
-  (backend + CLI are stdlib only).
+- `tui/app.py` — full-screen Textual TUI: filterable story list + detail pane,
+  modal screens for create/move/comment/task/filter/search, keyboard bindings.
+- `pyproject.toml` — `projectplanner` v0.1.0, `requires-python = ">=3.12"`,
+  dependencies: `textual>=0.80` (TUI only; backend + CLI are stdlib).
 - `README.md` — user-facing docs.
-- `.gitignore` — ignores `planner.db` and Python caches.
+- `.gitignore` — ignores `planner.db`, Python caches, `.venv/`.
 - `.python-version` — `3.12` (use Python 3.12; stdlib `sqlite3` ships with FTS5).
+- `.venv/` — local venv with Textual installed (gitignored). Recreate with
+  `python3.12 -m venv .venv && .venv/bin/pip install textual`.
 - `Shortcut Rest API, V3.html` — reference doc (model only).
 
 ## 4. Scope — build vs defer
@@ -226,18 +229,24 @@ Naming: `list_*`, `get_*`, `create_*`, `update_*`, `delete_*`, plus `search_*`. 
 
 ## 10. TUI conventions (`tui/app.py`)
 
-- Full-screen interactive UI. Shares the **same** backend functions as the CLI.
-- **Open decision (the only one):** which TUI library. Recommendation: **Textual**
-  (modern, well-maintained, good for multi-pane list+detail). Lighter alternative:
-  **prompt_toolkit** for an interactive REPL-style command loop. Flag this choice to the
-  user before building the TUI; the CLI can be built first and is independent.
-- Default view: a filterable list of stories (by project/iteration/epic/state), with a
-  detail pane and quick actions to create/move/comment/complete.
+- Full-screen interactive UI, built with **Textual** (library now decided — see
+  §15). Shares the **same** backend functions as the CLI.
+- Layout: `Header`, a `Static` filter-bar, a `Horizontal` of story `DataTable`
+  (left) + `RichLog` detail pane (right), `Footer` with the keybindings.
+- Modal screens (`ModalScreen`): `CreateStoryScreen`, `MoveStateScreen`,
+  `TextScreen` (comments/tasks), `SearchInputScreen`, `FilterScreen`,
+  `ConfirmScreen`. Each dismisses with a result; the app installs a callback.
+- Bindings: `n` new, `m` move, `c` comment, `t` task, `f` filter, `/` search,
+  `e` toggle complete, `d` delete, `r` refresh, `q` quit. `e` toggles between a
+  `done` workflow state and `unstarted`.
+- The connection is opened in `on_mount` and closed in `on_unmount`.
+- `main.py` (no args) imports `tui.app.run`; if `textual` isn't installed it
+  prints an install hint and exits 1 (the CLI still works).
 
 ## 11. Dependencies
 
 - **Stdlib only for the backend + CLI:** `sqlite3`, `argparse`, `dataclasses`, `datetime`.
-- TUI library: open (see §10); if Textual, add it to `pyproject.toml` dependencies then.
+- TUI: `textual>=0.80` (declared in `pyproject.toml`).
 - No dev/test deps required to start; add `pytest` when tests are written.
 
 ## 12. First-run / seeding (`backend/db.py`)
@@ -272,17 +281,16 @@ Seeding must be idempotent and run inside a single `BEGIN IMMEDIATE` transaction
 5. ✅ Remaining `backend` modules (epics, iterations, milestones, groups, tasks,
    comments, story_links) + their CLI subcommands.
 6. ✅ `backend/search.py` (FTS5) + `main.py search`.
-7. ⬜ TUI (`tui/app.py`) — **blocked on the §15 library decision**.
-8. ✅ README + `.gitignore`; commit pending.
+7. ✅ TUI (`tui/app.py`) — built with **Textual**; headless smoke test passes
+   (create / search / comment / move / toggle-complete / delete).
+8. ✅ README + `.gitignore`; committed.
 
-## 15. Open items (to confirm before acting)
+## 15. Open items
 
-- **TUI library** (§10): Textual vs prompt_toolkit. This is the **only** thing
-  left to build (step 7). Decide before implementing `tui/app.py`. Everything
-  else — backend, CLI, search — is done and tested end to end.
-- Nothing else is open. If something seems ambiguous, prefer the simplest
-  reading that satisfies the locked decisions, and keep field/entity names
-  Shortcut-flavored.
+- None. The TUI library decision is resolved: **Textual**. Everything in the
+  original build plan (backend, CLI, search, TUI) is done.
+- If something seems ambiguous, prefer the simplest reading that satisfies the
+  locked decisions, and keep field/entity names Shortcut-flavored.
 
 ## 16. Implementation notes (decisions made while building)
 

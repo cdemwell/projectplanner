@@ -1,0 +1,1 @@
+"""TUI package — full-screen Textual UI over the backend function-call API."""
