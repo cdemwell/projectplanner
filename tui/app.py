@@ -24,8 +24,8 @@ from textual.widgets import (Button, DataTable, Footer, Header, Input, Label,
                              RichLog, Select, Static, TextArea)
 from textual.widgets import Select as _Select
 
-from backend import (comments, db, errors, groups, labels, members, milestones,
-                     projects, stories, tasks, workflows)
+from backend import (comments, db, errors, epics, groups, iterations, labels,
+                     members, milestones, projects, stories, tasks, workflows)
 
 # Sentinels for "no selection" inside Select widgets (kept as int/str so all
 # option values share a type and we dodge the blank-selection API).
@@ -163,6 +163,100 @@ class CreateStoryScreen(ModalScreen[int]):
             self.query_one("#s-err", Label).update(f"error: {e}")
             return
         self.dismiss(sid)
+
+    @on(Button.Pressed, "#cancel")
+    def _cancel(self) -> None:
+        self.dismiss(None)
+
+
+class EditStoryScreen(ModalScreen[int]):
+    """Edit an existing story's fields.
+
+    Fields: name, description, type, state, project, epic, iteration, group,
+    deadline. Nullable parents are cleared by choosing the ``(no …)`` option
+    (which maps to None). State changes go through ``move_story_state`` so
+    ``completed_at`` stays consistent with the done-state rule.
+
+    Dismisses with:
+        int: the edited story id, or None on cancel.
+    """
+
+    def __init__(self, conn: sqlite3.Connection, story_id: int) -> None:
+        super().__init__()
+        self.conn = conn
+        self.story_id = story_id
+        self.story = stories.get_story(conn, story_id)
+
+    def compose(self) -> ComposeResult:
+        s = self.story
+        proj_opts = [("(no project)", _NONE_INT)]
+        for p in projects.list_projects(self.conn, include_archived=True):
+            proj_opts.append((p.name, p.id))
+        epic_opts = [("(no epic)", _NONE_INT)]
+        for e in epics.list_epics(self.conn):
+            epic_opts.append((e.name, e.id))
+        iter_opts = [("(no iteration)", _NONE_INT)]
+        for it in iterations.list_iterations(self.conn):
+            iter_opts.append((it.name, it.id))
+        group_opts = [("(no group)", _NONE_INT)]
+        for g in groups.list_groups(self.conn, include_archived=True):
+            group_opts.append((g.name, g.id))
+        # State: pre-select the current state; the sentinel means "leave as is".
+        state_opts = [("(leave as is)", _NONE_INT)]
+        for wf in workflows.list_workflows(self.conn):
+            for st in workflows.list_workflow_states(self.conn, wf.id):
+                state_opts.append((f"{st.name} ({st.type})", st.id))
+        cur_state = s.workflow_state_id if s.workflow_state_id is not None else _NONE_INT
+        yield Vertical(
+            Static(f"Edit story #{s.id}", classes="modal-title"),
+            Label("Name:"), Input(id="e-name", value=s.name),
+            Label("Description:"), TextArea(id="e-desc"),
+            Label("Type:"), Select([("feature", "feature"), ("bug", "bug"), ("chore", "chore")],
+                                   value=s.story_type, id="e-type"),
+            Label("State:"), Select(state_opts, value=cur_state, id="e-state"),
+            Label("Project:"), Select(proj_opts, value=s.project_id or _NONE_INT, id="e-proj"),
+            Label("Epic:"), Select(epic_opts, value=s.epic_id or _NONE_INT, id="e-epic"),
+            Label("Iteration:"), Select(iter_opts, value=s.iteration_id or _NONE_INT, id="e-iter"),
+            Label("Group:"), Select(group_opts, value=s.group_id or _NONE_INT, id="e-group"),
+            Label("Deadline:"), Input(id="e-deadline", value=s.deadline or ""),
+            Horizontal(Button("Save", id="ok", variant="primary"), Button("Cancel", id="cancel")),
+            Label("", id="e-err", classes="err"),
+            classes="modal-box",
+        )
+
+    def on_mount(self) -> None:
+        self.query_one("#e-desc", TextArea).text = self.story.description
+        self.query_one("#e-name", Input).focus()
+
+    def _save(self) -> None:
+        name = self.query_one("#e-name", Input).value.strip()
+        if not name:
+            self.query_one("#e-err", Label).update("Name is required.")
+            return
+        desc = self.query_one("#e-desc", TextArea).text
+        stype = self.query_one("#e-type", Select).value
+        state = _sel(self.query_one("#e-state", Select).value)
+        proj = _sel(self.query_one("#e-proj", Select).value)
+        epic = _sel(self.query_one("#e-epic", Select).value)
+        iteration = _sel(self.query_one("#e-iter", Select).value)
+        group = _sel(self.query_one("#e-group", Select).value)
+        deadline = self.query_one("#e-deadline", Input).value.strip() or None
+        try:
+            stories.update_story(
+                self.conn, self.story_id, name=name, description=desc,
+                story_type=stype, project_id=proj, epic_id=epic,
+                iteration_id=iteration, group_id=group, deadline=deadline)
+            # State changes go through move_story_state so completed_at is handled.
+            if state is not None and state != self.story.workflow_state_id:
+                stories.move_story_state(self.conn, self.story_id, state)
+        except errors.PlannerError as e:
+            self.query_one("#e-err", Label).update(f"error: {e}")
+            return
+        self.dismiss(self.story_id)
+
+    @on(Button.Pressed, "#ok")
+    def _ok(self) -> None:
+        self._save()
 
     @on(Button.Pressed, "#cancel")
     def _cancel(self) -> None:
@@ -318,6 +412,7 @@ class PlannerApp(App):
     BINDINGS = [
         Binding("q", "quit", "Quit"),
         Binding("n", "new_story", "New"),
+        Binding("u", "edit_story", "Update"),
         Binding("m", "move_state", "Move"),
         Binding("c", "add_comment", "Comment"),
         Binding("t", "add_task", "Task"),
@@ -486,6 +581,30 @@ class PlannerApp(App):
             return
         self.refresh_stories()
         # Select the newly created row.
+        table = self.query_one("#stories", DataTable)
+        try:
+            table.move_cursor(row=table.get_row_index(str(sid)))
+        except Exception:
+            pass
+        self.show_current_detail()
+
+    def action_edit_story(self) -> None:
+        """Open a modal to edit the selected story's fields."""
+        assert self.conn is not None
+        sid = self._current_story_id()
+        if sid is None:
+            self.bell()
+            return
+        try:
+            self.push_screen(EditStoryScreen(self.conn, sid), self._after_edit)
+        except errors.NotFound:
+            self.bell()
+
+    def _after_edit(self, sid: int | None) -> None:
+        if sid is None:
+            return
+        self.refresh_stories()
+        # Keep the cursor on the edited story.
         table = self.query_one("#stories", DataTable)
         try:
             table.move_cursor(row=table.get_row_index(str(sid)))

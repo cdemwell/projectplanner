@@ -100,3 +100,41 @@ def test_tui_create_toggle_search_delete(seeded_db):
             assert getattr(app, "_exception", None) is None
             await pilot.press("q")
     _run(main())
+
+
+def test_tui_edit_story_renames_and_clears_project(db_path):
+    """The edit modal updates fields and can clear a nullable FK (project)."""
+    from backend import db, projects, stories as stories_mod
+    from tui.app import _NONE_INT
+    from textual.widgets import Input, Select
+
+    c = db.connect(db_path)
+    p = projects.create_project(c, "backend")
+    s = stories_mod.create_story(c, "Fix login", project_id=p.id)
+    c.close()
+
+    async def main():
+        app = PlannerApp(db_path)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            app.query_one("#stories").move_cursor(row=0); await pilot.pause()
+            sid = app._current_story_id()
+            assert sid == s.id
+
+            # rename via the edit modal
+            await pilot.press("u"); await pilot.pause()
+            scr = app.screen
+            scr.query_one("#e-name", Input).value = "Renamed"
+            await _ok(pilot, app)
+            assert app.conn.execute("SELECT name FROM story WHERE id=?", (sid,)).fetchone()[0] == "Renamed"
+
+            # reopen and clear the project (choose the "(no project)" sentinel)
+            await pilot.press("u"); await pilot.pause()
+            app.screen.query_one("#e-proj", Select).value = _NONE_INT
+            await _ok(pilot, app)
+            assert app.conn.execute(
+                "SELECT project_id FROM story WHERE id=?", (sid,)).fetchone()[0] is None
+
+            assert getattr(app, "_exception", None) is None
+            await pilot.press("q")
+    _run(main())

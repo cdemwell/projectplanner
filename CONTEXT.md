@@ -236,9 +236,11 @@ Naming: `list_*`, `get_*`, `create_*`, `update_*`, `delete_*`, plus `search_*`. 
 - Modal screens (`ModalScreen`): `CreateStoryScreen`, `MoveStateScreen`,
   `TextScreen` (comments/tasks), `SearchInputScreen`, `FilterScreen`,
   `ConfirmScreen`. Each dismisses with a result; the app installs a callback.
-- Bindings: `n` new, `m` move, `c` comment, `t` task, `f` filter, `/` search,
-  `e` toggle complete, `d` delete, `r` refresh, `q` quit. `e` toggles between a
-  `done` workflow state and `unstarted`.
+- Bindings: `n` new, `u` update/edit, `m` move, `c` comment, `t` task, `f`
+  filter, `/` search, `e` toggle complete, `d` delete, `r` refresh, `q` quit.
+  `e` toggles between a `done` workflow state and `unstarted`. `u` opens
+  `EditStoryScreen` (name/desc/type/state/project/epic/iteration/group/deadline;
+  state changes go through `move_story_state` so `completed_at` stays consistent).
 - The connection is opened in `on_mount` and closed in `on_unmount`.
 - `main.py` (no args) imports `tui.app.run`; if `textual` isn't installed it
   prints an install hint and exits 1 (the CLI still works).

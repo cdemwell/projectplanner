@@ -54,18 +54,18 @@ search them — all from the command line, against a local file.
 | 3 | [Intent & Design Goals](#intent--design-goals) | 72–97 |
 | 4 | [Requirements & Setup](#requirements--setup) | 98–121 |
 | 5 | [Quick Start](#quick-start) | 122–148 |
-| 6 | [Running the Tool: CLI vs TUI](#running-the-tool-cli-vs-tui) | 149–171 |
-| 7 | [CLI Conventions](#cli-conventions) | 172–214 |
-| 8 | [CLI Reference](#cli-reference) | 215–289 |
-| 9 | [AI Agent Guide: Using the CLI During Development](#ai-agent-guide-using-the-cli-during-development) | 290–404 |
-| 10 | [Data Model](#data-model) | 405–456 |
-| 11 | [Architecture & Concurrency](#architecture--concurrency) | 457–491 |
-| 12 | [Storage & Schema](#storage--schema) | 492–510 |
-| 13 | [Exit Codes & Errors](#exit-codes--errors) | 511–529 |
-| 14 | [Examples & Recipes](#examples--recipes) | 530–563 |
-| 15 | [Non-goals & Differences from Shortcut](#non-goals--differences-from-shortcut) | 564–578 |
-| 16 | [Tests](#tests) | 579–611 |
-| 17 | [Further Reading](#further-reading) | 612–620 |
+| 6 | [Running the Tool: CLI vs TUI](#running-the-tool-cli-vs-tui) | 149–172 |
+| 7 | [CLI Conventions](#cli-conventions) | 173–215 |
+| 8 | [CLI Reference](#cli-reference) | 216–290 |
+| 9 | [AI Agent Guide: Using the CLI During Development](#ai-agent-guide-using-the-cli-during-development) | 291–405 |
+| 10 | [Data Model](#data-model) | 406–457 |
+| 11 | [Architecture & Concurrency](#architecture--concurrency) | 458–492 |
+| 12 | [Storage & Schema](#storage--schema) | 493–511 |
+| 13 | [Exit Codes & Errors](#exit-codes--errors) | 512–530 |
+| 14 | [Examples & Recipes](#examples--recipes) | 531–564 |
+| 15 | [Non-goals & Differences from Shortcut](#non-goals--differences-from-shortcut) | 565–579 |
+| 16 | [Tests](#tests) | 580–612 |
+| 17 | [Further Reading](#further-reading) | 613–621 |
 
 ---
 
@@ -159,10 +159,11 @@ python main.py search "login OR auth"
 | Key | Action | | Key | Action |
 |-----|--------|---|-----|--------|
 | `n` | new story | | `f` | filter (project/state) |
-| `m` | move state | | `/` | search |
-| `c` | add comment | | `e` | toggle complete |
-| `t` | add task | | `d` | delete story |
-| `r` | refresh | | `q` | quit |
+| `u` | update story | | `/` | search |
+| `m` | move state | | `e` | toggle complete |
+| `c` | add comment | | `d` | delete story |
+| `t` | add task | | `r` | refresh |
+| `q` | quit | | | |
 
 The TUI shares the exact same backend functions as the CLI — there is no
 separate data layer.
