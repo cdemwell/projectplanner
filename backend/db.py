@@ -1,0 +1,418 @@
+"""Connection management, schema creation/migrations, and first-run seeding.
+
+The single source of storage is ``planner.db`` in the repo root. Connections are
+created via :func:`connect`, which configures pragmas (foreign keys on, a 5s busy
+timeout so concurrent writers block rather than error) and runs any pending
+migrations. Writers go through :func:`tx_write`, which takes the write lock up
+front with ``BEGIN IMMEDIATE`` (see CONTEXT.md §6).
+"""
+
+from __future__ import annotations
+
+import contextlib
+import os
+import sqlite3
+from datetime import datetime, timezone
+from pathlib import Path
+
+# Schema version this code understands. Bump when adding a migration in MIGRATIONS.
+CURRENT_SCHEMA_VERSION = 2
+
+# Default DB location: next to main.py (repo root).
+DEFAULT_DB_PATH = Path(__file__).resolve().parent.parent / "planner.db"
+
+# 0/1 integer flags stored in TEXT-less form; constants keep call sites readable.
+ARCHIVED_FALSE = 0
+ARCHIVED_TRUE = 1
+
+
+def now() -> str:
+    """Current UTC timestamp as an ISO-8601 string (e.g. ``2026-08-20T14:03:11+00:00``).
+
+    Stored in TEXT columns; we format it ourselves rather than relying on
+    ``CURRENT_TIMESTAMP``, which yields naive local-ish strings.
+    """
+    return datetime.now(timezone.utc).isoformat()
+
+
+def connect(db_path: str | os.PathLike[str] | None = None) -> sqlite3.Connection:
+    """Open (and, if needed, create + migrate + seed) the planner database.
+
+    Returns a configured ``sqlite3.Connection`` using ``sqlite3.Row`` rows.
+    """
+    path = Path(db_path) if db_path is not None else DEFAULT_DB_PATH
+    conn = sqlite3.connect(str(path))  # check_same_thread=True is fine: callers
+    # own the connection and pass it explicitly.
+    conn.row_factory = sqlite3.Row
+    # Enforce FK constraints (off by default in SQLite) and make a second writer
+    # block for up to 5s instead of raising SQLITE_BUSY immediately.
+    conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA busy_timeout = 5000")
+    _migrate(conn)
+    return conn
+
+
+@contextlib.contextmanager
+def tx_write(conn: sqlite3.Connection):
+    """Context manager for a write transaction.
+
+    Acquires the write lock up front with ``BEGIN IMMEDIATE`` so concurrent writers
+    serialize deterministically (the second blocks until the first commits).
+    Commits on clean exit, rolls back on any exception.
+    """
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        yield conn
+    except Exception:
+        conn.rollback()
+        raise
+    else:
+        conn.commit()
+
+
+# --------------------------------------------------------------------------- #
+# Migrations
+# --------------------------------------------------------------------------- #
+# Each migration is a list of SQL statements applied inside one BEGIN IMMEDIATE
+# transaction when the stored schema_version is below the migration's version.
+# Statements should be idempotent (CREATE TABLE IF NOT EXISTS, etc.) where the
+# migration could conceivably re-run after a partial failure.
+
+_SCHEMA_V1 = [
+    """
+    CREATE TABLE IF NOT EXISTS schema_version (
+        version INTEGER PRIMARY KEY
+    )
+    """,
+    # People ---------------------------------------------------------------
+    """
+    CREATE TABLE IF NOT EXISTS member (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        name          TEXT NOT NULL,
+        mention_name  TEXT NOT NULL UNIQUE,
+        created_at    TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS "group" (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        name         TEXT NOT NULL,
+        description  TEXT NOT NULL DEFAULT '',
+        archived     INTEGER NOT NULL DEFAULT 0,
+        created_at   TEXT NOT NULL
+    )
+    """,
+    # Workflows ------------------------------------------------------------
+    """
+    CREATE TABLE IF NOT EXISTS workflow (
+        id               INTEGER PRIMARY KEY AUTOINCREMENT,
+        name             TEXT NOT NULL,
+        default_state_id INTEGER,
+        created_at       TEXT NOT NULL,
+        FOREIGN KEY (default_state_id) REFERENCES workflow_state(id) ON DELETE SET NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS workflow_state (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        workflow_id INTEGER NOT NULL,
+        name        TEXT NOT NULL,
+        type        TEXT NOT NULL CHECK (type IN ('unstarted', 'started', 'done')),
+        position    REAL NOT NULL DEFAULT 0,
+        created_at  TEXT NOT NULL,
+        FOREIGN KEY (workflow_id) REFERENCES workflow(id) ON DELETE CASCADE
+    )
+    """,
+    # Planning containers --------------------------------------------------
+    """
+    CREATE TABLE IF NOT EXISTS project (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        name         TEXT NOT NULL,
+        description  TEXT NOT NULL DEFAULT '',
+        abbreviation TEXT NOT NULL DEFAULT '',
+        color        TEXT NOT NULL DEFAULT '',
+        archived     INTEGER NOT NULL DEFAULT 0,
+        created_at   TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS label (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        name        TEXT NOT NULL,
+        color       TEXT NOT NULL DEFAULT '',
+        description TEXT NOT NULL DEFAULT '',
+        created_at  TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS milestone (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        name         TEXT NOT NULL,
+        description  TEXT NOT NULL DEFAULT '',
+        state        TEXT NOT NULL DEFAULT 'planned'
+                     CHECK (state IN ('planned', 'in_progress', 'done')),
+        created_at   TEXT NOT NULL,
+        completed_at TEXT
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS epic (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        name         TEXT NOT NULL,
+        description  TEXT NOT NULL DEFAULT '',
+        state        TEXT NOT NULL DEFAULT 'planned'
+                     CHECK (state IN ('planned', 'in_progress', 'done')),
+        milestone_id INTEGER,
+        project_id   INTEGER,
+        created_at   TEXT NOT NULL,
+        completed_at TEXT,
+        FOREIGN KEY (milestone_id) REFERENCES milestone(id) ON DELETE SET NULL,
+        FOREIGN KEY (project_id)   REFERENCES project(id)   ON DELETE SET NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS iteration (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        name        TEXT NOT NULL,
+        description TEXT NOT NULL DEFAULT '',
+        status      TEXT NOT NULL DEFAULT 'planned'
+                    CHECK (status IN ('planned', 'active', 'done')),
+        start_date  TEXT,
+        end_date    TEXT,
+        created_at  TEXT NOT NULL
+    )
+    """,
+    # Stories --------------------------------------------------------------
+    """
+    CREATE TABLE IF NOT EXISTS story (
+        id                INTEGER PRIMARY KEY AUTOINCREMENT,
+        name              TEXT NOT NULL,
+        description       TEXT NOT NULL DEFAULT '',
+        story_type        TEXT NOT NULL DEFAULT 'feature'
+                          CHECK (story_type IN ('bug', 'feature', 'chore')),
+        workflow_state_id INTEGER,
+        epic_id           INTEGER,
+        iteration_id      INTEGER,
+        project_id        INTEGER,
+        group_id          INTEGER,
+        requested_by_id   INTEGER,
+        deadline          TEXT,
+        position           REAL NOT NULL DEFAULT 0,
+        created_at        TEXT NOT NULL,
+        updated_at        TEXT NOT NULL,
+        completed_at      TEXT,
+        FOREIGN KEY (workflow_state_id) REFERENCES workflow_state(id) ON DELETE SET NULL,
+        FOREIGN KEY (epic_id)           REFERENCES epic(id)           ON DELETE SET NULL,
+        FOREIGN KEY (iteration_id)      REFERENCES iteration(id)     ON DELETE SET NULL,
+        FOREIGN KEY (project_id)        REFERENCES project(id)        ON DELETE SET NULL,
+        FOREIGN KEY (group_id)          REFERENCES "group"(id)        ON DELETE SET NULL,
+        FOREIGN KEY (requested_by_id)   REFERENCES member(id)         ON DELETE SET NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS story_owner (
+        story_id  INTEGER NOT NULL,
+        member_id INTEGER NOT NULL,
+        PRIMARY KEY (story_id, member_id),
+        FOREIGN KEY (story_id)  REFERENCES story(id)  ON DELETE CASCADE,
+        FOREIGN KEY (member_id) REFERENCES member(id) ON DELETE CASCADE
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS story_label (
+        story_id INTEGER NOT NULL,
+        label_id INTEGER NOT NULL,
+        PRIMARY KEY (story_id, label_id),
+        FOREIGN KEY (story_id) REFERENCES story(id) ON DELETE CASCADE,
+        FOREIGN KEY (label_id) REFERENCES label(id) ON DELETE CASCADE
+    )
+    """,
+    # Tasks, comments, links ------------------------------------------------
+    """
+    CREATE TABLE IF NOT EXISTS task (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        story_id    INTEGER NOT NULL,
+        description TEXT NOT NULL,
+        complete    INTEGER NOT NULL DEFAULT 0,
+        position    REAL NOT NULL DEFAULT 0,
+        created_at  TEXT NOT NULL,
+        completed_at TEXT,
+        FOREIGN KEY (story_id) REFERENCES story(id) ON DELETE CASCADE
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS story_comment (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        story_id   INTEGER NOT NULL,
+        author_id  INTEGER,
+        text       TEXT NOT NULL,
+        parent_id  INTEGER,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY (story_id)  REFERENCES story(id)          ON DELETE CASCADE,
+        FOREIGN KEY (author_id) REFERENCES member(id)         ON DELETE SET NULL,
+        FOREIGN KEY (parent_id) REFERENCES story_comment(id)  ON DELETE CASCADE
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS story_link (
+        id               INTEGER PRIMARY KEY AUTOINCREMENT,
+        subject_story_id INTEGER NOT NULL,
+        verb             TEXT NOT NULL
+                         CHECK (verb IN ('blocks', 'blocks_by', 'duplicates',
+                                         'duplicated_by', 'relates_to')),
+        object_story_id  INTEGER NOT NULL,
+        created_at       TEXT NOT NULL,
+        UNIQUE (subject_story_id, verb, object_story_id),
+        FOREIGN KEY (subject_story_id) REFERENCES story(id) ON DELETE CASCADE,
+        FOREIGN KEY (object_story_id)  REFERENCES story(id) ON DELETE CASCADE,
+        CHECK (subject_story_id <> object_story_id)
+    )
+    """,
+]
+
+def _fts_trigger(table: str) -> list[str]:
+    """Return the after-insert/update/delete trigger SQL for one FTS table.
+
+    The FTS5 ``external content`` table ``{table}_fts`` mirrors ``name`` and
+    ``description``; these triggers keep it in sync on write so the index is
+    always current regardless of which code path mutated the source row. Returns
+    three separate single statements (``execute`` only runs one at a time).
+    """
+    fts = f"{table}_fts"
+    cols = ["name", "description"]
+    new_vals = ", ".join(f"NEW.{c}" for c in cols)
+    old_vals = ", ".join(f"OLD.{c}" for c in cols)
+    col_list = ", ".join(cols)
+    return [
+        f"""CREATE TRIGGER IF NOT EXISTS {table}_fts_ai AFTER INSERT ON {table} BEGIN
+            INSERT INTO {fts}(rowid, {col_list}) VALUES (NEW.id, {new_vals});
+        END""",
+        f"""CREATE TRIGGER IF NOT EXISTS {table}_fts_ad AFTER DELETE ON {table} BEGIN
+            INSERT INTO {fts}({fts}, rowid, {col_list}) VALUES ('delete', OLD.id, {old_vals});
+        END""",
+        f"""CREATE TRIGGER IF NOT EXISTS {table}_fts_au AFTER UPDATE ON {table} BEGIN
+            INSERT INTO {fts}({fts}, rowid, {col_list}) VALUES ('delete', OLD.id, {old_vals});
+            INSERT INTO {fts}(rowid, {col_list}) VALUES (NEW.id, {new_vals});
+        END""",
+    ]
+
+
+# v2: full-text search over stories, epics, projects, milestones, iterations,
+# labels. External-content FTS5 tables kept in sync by triggers.
+_SCHEMA_V2 = [
+    """
+    CREATE VIRTUAL TABLE IF NOT EXISTS story_fts USING fts5(
+        name, description, content='story', content_rowid='id'
+    )
+    """,
+    """
+    CREATE VIRTUAL TABLE IF NOT EXISTS epic_fts USING fts5(
+        name, description, content='epic', content_rowid='id'
+    )
+    """,
+    """
+    CREATE VIRTUAL TABLE IF NOT EXISTS project_fts USING fts5(
+        name, description, content='project', content_rowid='id'
+    )
+    """,
+    """
+    CREATE VIRTUAL TABLE IF NOT EXISTS milestone_fts USING fts5(
+        name, description, content='milestone', content_rowid='id'
+    )
+    """,
+    """
+    CREATE VIRTUAL TABLE IF NOT EXISTS iteration_fts USING fts5(
+        name, description, content='iteration', content_rowid='id'
+    )
+    """,
+    """
+    CREATE VIRTUAL TABLE IF NOT EXISTS label_fts USING fts5(
+        name, description, content='label', content_rowid='id'
+    )
+    """,
+    # Keep each FTS table in sync with its source via after-insert/update/delete
+    # triggers. (The owning backend modules still call these indirectly; the
+    # triggers are the single source of truth so a direct SQL edit also stays
+    # indexed.)
+    _fts_trigger("story"),
+    _fts_trigger("epic"),
+    _fts_trigger("project"),
+    _fts_trigger("milestone"),
+    _fts_trigger("iteration"),
+    _fts_trigger("label"),
+]
+
+_MIGRATIONS = [
+    (1, _SCHEMA_V1),
+    (2, _SCHEMA_V2),
+]
+
+
+def _schema_version(conn: sqlite3.Connection) -> int:
+    """Return the stored schema version, or 0 if the table is absent/empty."""
+    row = conn.execute("SELECT MAX(version) AS v FROM schema_version").fetchone()
+    if row is None or row["v"] is None:
+        return 0
+    return int(row["v"])
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Apply any pending migrations up to CURRENT_SCHEMA_VERSION."""
+    # schema_version table is created by v1; make sure it exists before reading.
+    conn.execute("CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY)")
+    current = _schema_version(conn)
+    for version, statements in _MIGRATIONS:
+        if current >= version:
+            continue
+        with tx_write(conn):
+            for stmt in statements:
+                # An entry may itself be a list of single statements
+                # (e.g. several trigger definitions) — flatten them.
+                stmts = stmt if isinstance(stmt, list) else [stmt]
+                for s in stmts:
+                    conn.execute(s)
+            conn.execute("INSERT INTO schema_version(version) VALUES (?)", (version,))
+        current = version
+
+    # First-run seeding: idempotent, only when the DB is otherwise empty.
+    if conn.execute("SELECT COUNT(*) AS c FROM member").fetchone()["c"] == 0:
+        _seed(conn)
+
+
+def _seed(conn: sqlite3.Connection) -> None:
+    """Seed the single local member and the default workflow with standard states.
+
+    Idempotent by guard (only called when no member exists) and runs in one
+    ``BEGIN IMMEDIATE`` transaction.
+    """
+    name = os.environ.get("USER") or "me"
+    mention_name = name.lower().replace(" ", "_")
+    ts = now()
+    with tx_write(conn):
+        conn.execute(
+            "INSERT INTO member(name, mention_name, created_at) VALUES (?, ?, ?)",
+            (name, mention_name, ts),
+        )
+        cur = conn.execute(
+            "INSERT INTO workflow(name, default_state_id, created_at) VALUES (?, NULL, ?)",
+            ("Default", ts),
+        )
+        workflow_id = cur.lastrowid
+        states = [("Unstarted", "unstarted", 0.0),
+                  ("Started", "started", 1.0),
+                  ("Done", "done", 2.0)]
+        started_id = None
+        for sname, stype, pos in states:
+            cur = conn.execute(
+                "INSERT INTO workflow_state(workflow_id, name, type, position, created_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (workflow_id, sname, stype, pos, ts),
+            )
+            if stype == "started":
+                started_id = cur.lastrowid
+        # Point the workflow at its default (Started) state.
+        conn.execute(
+            "UPDATE workflow SET default_state_id = ? WHERE id = ?",
+            (started_id, workflow_id),
+        )

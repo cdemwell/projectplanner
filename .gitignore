@@ -1,0 +1,15 @@
+# Local SQLite database (created on first run)
+/planner.db
+/planner.db-journal
+/planner.db-wal
+/planner.db-shm
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Testing
+.pytest_cache/

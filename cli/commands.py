@@ -1,0 +1,675 @@
+"""Argparse-driven CLI over the backend.
+
+Layout: ``python main.py <resource> <action> [flags]`` (or ``--json`` anywhere,
+inherited via the common parent). Each action handler calls the matching
+backend function and returns a value; :func:`run` formats it as text (default)
+or JSON (``--json``). Human names are resolved to ids where a person would type
+a name (projects, epics, iterations, milestones, groups, labels, members,
+workflow states). Mutating commands print the resulting entity so an agent can
+read back the assigned id.
+"""
+
+from __future__ import annotations
+
+import argparse
+import dataclasses
+import json as _json
+import shlex
+import sys
+from typing import Any
+
+from backend import (db, errors, members, groups, workflows, projects, labels,
+                      milestones, epics, iterations, stories, tasks, comments,
+                      story_links, search, _util)
+
+# --------------------------------------------------------------------------- #
+# Output helpers
+# --------------------------------------------------------------------------- #
+
+def _jsonable(x: Any) -> Any:
+    if isinstance(x, (list, tuple)):
+        return [_jsonable(i) for i in x]
+    if dataclasses.is_dataclass(x):
+        if hasattr(x, "to_dict"):
+            return x.to_dict()
+        return dataclasses.asdict(x)
+    return x
+
+
+def _print_table(rows: list[dict], columns: list[str]) -> None:
+    if not rows:
+        print("(none)")
+        return
+    str_rows = [{c: str(r.get(c, "")) for c in columns} for r in rows]
+    widths = {c: max(len(c), max((len(sr[c]) for sr in str_rows), default=0))
+              for c in columns}
+    print("  ".join(c.ljust(widths[c]) for c in columns))
+    print("  ".join("-" * widths[c] for c in columns))
+    for sr in str_rows:
+        print("  ".join(sr[c].ljust(widths[c]) for c in columns))
+
+
+def _print_kv(d: dict) -> None:
+    for k, v in d.items():
+        print(f"{k}: {v}")
+
+
+def emit(args: argparse.Namespace, value: Any, *, text_fn=None) -> None:
+    """Render ``value`` as JSON (``--json``) or via ``text_fn`` (default: tables)."""
+    if getattr(args, "json", False):
+        print(_json.dumps(_jsonable(value), indent=2, default=str))
+    elif text_fn is not None:
+        text_fn(value)
+    elif value is None:
+        pass
+    else:
+        # Fallback: dump as key/value or table depending on shape.
+        if isinstance(value, list) and value and isinstance(value[0], dict):
+            _print_table(value, list(value[0]))
+        else:
+            print(_json.dumps(_jsonable(value), indent=2, default=str))
+
+
+# --------------------------------------------------------------------------- #
+# Name -> id resolution
+# --------------------------------------------------------------------------- #
+
+def _looks_like_id(val: Any) -> bool:
+    return isinstance(val, str) and val.strip().lstrip("-").isdigit()
+
+
+def _resolve_named(conn, table: str, val: Any, *, entity: str,
+                   cols=("name",)) -> int:
+    if _looks_like_id(val):
+        return int(val)
+    cond = " OR ".join(f"LOWER({c}) = LOWER(?)" for c in cols)
+    rows = conn.execute(f"SELECT id FROM {_util._q(table)} WHERE {cond}",
+                        tuple([val] * len(cols))).fetchall()
+    if not rows:
+        raise errors.NotFound(entity, val)
+    if len(rows) > 1:
+        raise errors.ValidationError(
+            f"ambiguous {entity} name {val!r}; use an id (matches: {[r[0] for r in rows]})")
+    return rows[0][0]
+
+
+def resolve_project(conn, v): return _resolve_named(conn, "project", v, entity="project")
+def resolve_epic(conn, v):     return _resolve_named(conn, "epic", v, entity="epic")
+def resolve_iteration(conn, v): return _resolve_named(conn, "iteration", v, entity="iteration")
+def resolve_milestone(conn, v): return _resolve_named(conn, "milestone", v, entity="milestone")
+def resolve_group(conn, v):    return _resolve_named(conn, "group", v, entity="group")
+def resolve_label(conn, v):    return _resolve_named(conn, "label", v, entity="label")
+def resolve_member(conn, v):   return _resolve_named(conn, "member", v, entity="member",
+                                                    cols=("name", "mention_name"))
+
+
+def resolve_workflow_state(conn, val: Any) -> int:
+    """Resolve a state by id, by name, or by type ('unstarted'/'started'/'done').
+
+    By-type falls back to the first state of that type, so ``--state done``
+    works against the seeded default workflow.
+    """
+    if _looks_like_id(val):
+        return int(val)
+    # By name (case-insensitive).
+    rows = conn.execute("SELECT id FROM workflow_state WHERE LOWER(name) = LOWER(?)",
+                        (val,)).fetchall()
+    if len(rows) == 1:
+        return rows[0][0]
+    if len(rows) > 1:
+        raise errors.ValidationError(
+            f"ambiguous state name {val!r}; use an id (matches: {[r[0] for r in rows]})")
+    # By type.
+    if val in workflows.STATE_TYPES:
+        row = conn.execute("SELECT id FROM workflow_state WHERE type = ? ORDER BY id LIMIT 1",
+                           (val,)).fetchone()
+        if row is not None:
+            return row[0]
+    raise errors.NotFound("workflow_state", val)
+
+
+def _split_csv(val: str | None) -> list[str] | None:
+    if val is None:
+        return None
+    return [p.strip() for p in val.split(",") if p.strip()]
+
+
+def _opt_id(conn, val, resolver):
+    return resolver(conn, val) if val is not None else None
+
+
+# --------------------------------------------------------------------------- #
+# Text formatters
+# --------------------------------------------------------------------------- #
+
+def _story_rows(conn, items) -> list[dict]:
+    rows = []
+    for s in items:
+        state = ""
+        if s.workflow_state_id is not None:
+            r = conn.execute("SELECT name FROM workflow_state WHERE id = ?",
+                             (s.workflow_state_id,)).fetchone()
+            state = r["name"] if r else ""
+        proj = ""
+        if s.project_id is not None:
+            r = conn.execute("SELECT name FROM project WHERE id = ?",
+                             (s.project_id,)).fetchone()
+            proj = r["name"] if r else ""
+        owners = ",".join(m["mention_name"] for m in conn.execute(
+            "SELECT m.mention_name AS mention_name FROM member m "
+            "JOIN story_owner so ON so.member_id = m.id WHERE so.story_id = ?", (s.id,)))
+        rows.append({"id": s.id, "name": s.name, "type": s.story_type,
+                      "state": state, "project": proj, "owners": owners,
+                      "done": "✓" if s.completed_at else ""})
+    return rows
+
+
+def _fmt_stories(conn, items):
+    _print_table(_story_rows(conn, items),
+                 ["id", "name", "type", "state", "project", "owners", "done"])
+
+
+def _fmt_one(conn, obj):
+    d = (obj.to_dict() if hasattr(obj, "to_dict")
+         else dataclasses.asdict(obj) if dataclasses.is_dataclass(obj) else obj)
+    _print_kv(d) if isinstance(d, dict) else print(d)
+
+
+def _fmt_list_simple(items, columns):
+    rows = [dataclasses.asdict(i) if dataclasses.is_dataclass(i) else i for i in items]
+    _print_table(rows, columns)
+
+
+def _fmt_story_detail(conn, detail):
+    s = detail.story
+    state = detail.workflow_state
+    state_str = f"{state.name} ({state.type})" if state else "(none)"
+    print(f"#{s.id}  {s.name}  [{s.story_type}]")
+    print(f"  state:      {state_str}")
+    print(f"  project:    {s.project_id}    epic: {s.epic_id}    "
+          f"iteration: {s.iteration_id}    group: {s.group_id}")
+    print(f"  owners:     {', '.join(o.name for o in detail.owners) or '(none)'}")
+    print(f"  labels:     {', '.join(l.name for l in detail.labels) or '(none)'}")
+    if s.description:
+        print(f"  description: {s.description}")
+    print(f"  tasks:")
+    if detail.tasks:
+        for t in detail.tasks:
+            mark = "x" if t.complete else " "
+            print(f"    [{mark}] #{t.id} {t.description}")
+    else:
+        print(f"    (none)")
+    if s.completed_at:
+        print(f"  completed_at: {s.completed_at}")
+
+
+# --------------------------------------------------------------------------- #
+# Handlers — one per action. Each takes (conn, args) and returns a value.
+# --------------------------------------------------------------------------- #
+
+# -- stories -------------------------------------------------------------- #
+def h_story_list(conn, a):
+    return stories.list_stories(
+        conn,
+        project_id=resolve_project(conn, a.project) if a.project else None,
+        epic_id=resolve_epic(conn, a.epic) if a.epic else None,
+        iteration_id=resolve_iteration(conn, a.iteration) if a.iteration else None,
+        state_type=a.state_type, group_id=resolve_group(conn, a.group) if a.group else None,
+        owner_id=resolve_member(conn, a.owner) if a.owner else None,
+        label_id=resolve_label(conn, a.label) if a.label else None,
+        q=a.q, include_completed=a.include_completed)
+
+
+def h_story_get(conn, a): return stories.get_story(conn, int(a.id))
+
+
+def h_story_detail(conn, a): return stories.get_story_detail(conn, int(a.id))
+
+
+def h_story_create(conn, a):
+    owner_ids = [resolve_member(conn, o) for o in (_split_csv(a.owners) or [])]
+    label_ids = [resolve_label(conn, l) for l in (_split_csv(a.labels) or [])]
+    return stories.create_story(
+        conn, a.name, description=a.desc or "", story_type=a.type,
+        workflow_state_id=resolve_workflow_state(conn, a.state) if a.state else None,
+        epic_id=_opt_id(conn, a.epic, resolve_epic),
+        iteration_id=_opt_id(conn, a.iteration, resolve_iteration),
+        project_id=_opt_id(conn, a.project, resolve_project),
+        group_id=_opt_id(conn, a.group, resolve_group),
+        requested_by_id=_opt_id(conn, a.requested_by, resolve_member),
+        deadline=a.deadline, owner_ids=owner_ids, label_ids=label_ids)
+
+
+def h_story_update(conn, a):
+    fields = {}
+    if a.name is not None: fields["name"] = a.name
+    if a.desc is not None: fields["description"] = a.desc
+    if a.type is not None: fields["story_type"] = a.type
+    if a.project is not None: fields["project_id"] = resolve_project(conn, a.project)
+    if a.epic is not None: fields["epic_id"] = resolve_epic(conn, a.epic)
+    if a.iteration is not None: fields["iteration_id"] = resolve_iteration(conn, a.iteration)
+    if a.group is not None: fields["group_id"] = resolve_group(conn, a.group)
+    if a.deadline is not None: fields["deadline"] = a.deadline
+    if a.position is not None: fields["position"] = a.position
+    return stories.update_story(conn, int(a.id), **fields)
+
+
+def h_story_move(conn, a):
+    return stories.move_story_state(conn, int(a.id), resolve_workflow_state(conn, a.state))
+
+
+def h_story_assign(conn, a):
+    stories.assign_owner(conn, int(a.id), resolve_member(conn, a.owner))
+    return stories.get_story(conn, int(a.id))
+
+
+def h_story_unassign(conn, a):
+    stories.remove_owner(conn, int(a.id), resolve_member(conn, a.owner))
+    return stories.get_story(conn, int(a.id))
+
+
+def h_story_label(conn, a):
+    stories.add_label(conn, int(a.id), resolve_label(conn, a.label))
+    return stories.get_story(conn, int(a.id))
+
+
+def h_story_unlabel(conn, a):
+    stories.remove_label(conn, int(a.id), resolve_label(conn, a.label))
+    return stories.get_story(conn, int(a.id))
+
+
+def h_story_delete(conn, a):
+    stories.delete_story(conn, int(a.id))
+    return {"deleted": "story", "id": int(a.id)}
+
+
+# -- epics ---------------------------------------------------------------- #
+def h_epic_list(conn, a):
+    return epics.list_epics(
+        conn,
+        project_id=resolve_project(conn, a.project) if a.project else None,
+        milestone_id=resolve_milestone(conn, a.milestone) if a.milestone else None)
+
+
+def h_epic_create(conn, a):
+    return epics.create_epic(conn, a.name, description=a.desc or "", state=a.state,
+                             milestone_id=_opt_id(conn, a.milestone, resolve_milestone),
+                             project_id=_opt_id(conn, a.project, resolve_project))
+
+
+def h_epic_update(conn, a):
+    fields = {k: v for k, v in dict(name=a.name, description=a.desc, state=a.state,
+             project_id=resolve_project(conn, a.project) if a.project else None,
+             milestone_id=resolve_milestone(conn, a.milestone) if a.milestone else None).items()
+             if v is not None}
+    return epics.update_epic(conn, int(a.id), **fields)
+
+
+# -- iterations ----------------------------------------------------------- #
+def h_iteration_list(conn, a): return iterations.list_iterations(conn, status=a.status)
+def h_iteration_create(conn, a):
+    return iterations.create_iteration(conn, a.name, description=a.desc or "",
+                                        status=a.status, start_date=a.start,
+                                        end_date=a.end)
+def h_iteration_update(conn, a):
+    fields = {k: v for k, v in dict(name=a.name, description=a.desc, status=a.status,
+             start_date=a.start, end_date=a.end).items() if v is not None}
+    return iterations.update_iteration(conn, int(a.id), **fields)
+
+
+# -- milestones ------------------------------------------------------------ #
+def h_milestone_list(conn, a): return milestones.list_milestones(conn, state=a.state)
+def h_milestone_create(conn, a):
+    return milestones.create_milestone(conn, a.name, description=a.desc or "", state=a.state)
+def h_milestone_update(conn, a):
+    fields = {k: v for k, v in dict(name=a.name, description=a.desc, state=a.state).items()
+             if v is not None}
+    return milestones.update_milestone(conn, int(a.id), **fields)
+
+
+# -- projects -------------------------------------------------------------- #
+def h_project_list(conn, a): return projects.list_projects(conn, include_archived=a.archived)
+def h_project_create(conn, a):
+    return projects.create_project(conn, a.name, description=a.desc or "",
+                                   abbreviation=a.abbr or "", color=a.color or "")
+def h_project_update(conn, a):
+    fields = {k: v for k, v in dict(name=a.name, description=a.desc, abbreviation=a.abbr,
+             color=a.color, archived=1 if a.archive else 0 if a.archive is False else None).items()
+             if v is not None}
+    return projects.update_project(conn, int(a.id), **fields)
+
+
+# -- labels ---------------------------------------------------------------- #
+def h_label_list(conn, a): return labels.list_labels(conn)
+def h_label_create(conn, a):
+    return labels.create_label(conn, a.name, color=a.color or "", description=a.desc or "")
+def h_label_update(conn, a):
+    fields = {k: v for k, v in dict(name=a.name, color=a.color, description=a.desc).items()
+             if v is not None}
+    return labels.update_label(conn, int(a.id), **fields)
+
+
+# -- members --------------------------------------------------------------- #
+def h_member_list(conn, a): return members.list_members(conn)
+def h_member_create(conn, a): return members.create_member(conn, a.name, mention_name=a.mention)
+def h_member_update(conn, a):
+    fields = {k: v for k, v in dict(name=a.name, mention_name=a.mention).items() if v is not None}
+    return members.update_member(conn, int(a.id), **fields)
+
+
+# -- groups ---------------------------------------------------------------- #
+def h_group_list(conn, a): return groups.list_groups(conn, include_archived=a.archived)
+def h_group_create(conn, a): return groups.create_group(conn, a.name, description=a.desc or "")
+def h_group_update(conn, a):
+    fields = {k: v for k, v in dict(name=a.name, description=a.desc,
+             archived=1 if a.archive else 0 if a.archive is False else None).items() if v is not None}
+    return groups.update_group(conn, int(a.id), **fields)
+
+
+# -- workflows ------------------------------------------------------------- #
+def h_workflow_list(conn, a): return workflows.list_workflows(conn)
+def h_workflow_create(conn, a):
+    states = []
+    for item in (_split_csv(a.states) or []):
+        name, _, stype = item.partition(":")
+        states.append({"name": name, "type": stype or "unstarted"})
+    return workflows.create_workflow(conn, a.name, states=states or None)
+def h_workflow_states(conn, a):
+    return workflows.list_workflow_states(conn, int(a.id))
+def h_workflow_add_state(conn, a):
+    return workflows.create_workflow_state(conn, int(a.id), a.name, a.type, position=a.position)
+
+
+# -- tasks ----------------------------------------------------------------- #
+def h_task_list(conn, a): return tasks.list_tasks(conn, int(a.story))
+def h_task_add(conn, a):
+    return tasks.create_task(conn, int(a.story), a.desc, complete=a.complete)
+def h_task_update(conn, a):
+    fields = {k: v for k, v in dict(description=a.desc, complete=1 if a.complete else 0 if a.complete is False else None,
+             position=a.position).items() if v is not None}
+    return tasks.update_task(conn, int(a.id), **fields)
+def h_task_complete(conn, a): return tasks.complete_task(conn, int(a.id), True)
+def h_task_uncomplete(conn, a): return tasks.complete_task(conn, int(a.id), False)
+
+
+# -- comments -------------------------------------------------------------- #
+def h_comment_list(conn, a): return comments.list_comments(conn, int(a.story))
+def h_comment_add(conn, a):
+    return comments.create_comment(conn, int(a.story), a.text, author_id=_opt_id(conn, a.author, resolve_member),
+                                    parent_id=int(a.parent) if a.parent else None)
+def h_comment_update(conn, a): return comments.update_comment(conn, int(a.id), text=a.text)
+
+
+# -- links ----------------------------------------------------------------- #
+def h_link_list(conn, a):
+    return story_links.list_links(conn, int(a.story) if a.story else None)
+def h_link_add(conn, a):
+    return story_links.create_link(conn, int(a.subject), a.verb, int(a.object))
+
+
+# -- search --------------------------------------------------------------- #
+def h_search(conn, a):
+    return search.search(conn, " ".join(a.query), entity=a.entity)
+
+
+# --------------------------------------------------------------------------- #
+# Parser construction
+# --------------------------------------------------------------------------- #
+
+COMMON = argparse.ArgumentParser(add_help=False)
+# SUPPRESS default so a subparser doesn't clobber a --json given on the top
+# parser (e.g. `main.py --json story list`); the flag is only set when present.
+COMMON.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
+                    help="emit JSON (machine-readable)")
+
+
+def _sp(parent, name, **kw):
+    return parent.add_parser(name, parents=[COMMON], **kw)
+
+
+def _id_arg(p): p.add_argument("id", help="entity id")
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="projectplanner",
+                                     description="Local project planner (Shortcut-model-based).")
+    parser.add_argument("--json", action="store_true", default=False)
+    parser.add_argument("--db", help="path to planner.db (default: ./planner.db)")
+    sub = parser.add_subparsers(dest="resource", required=True)
+
+    # story ------------------------------------------------------------------
+    sp = sub.add_parser("story", parents=[COMMON])
+    asp = sp.add_subparsers(dest="action", required=True)
+    p = _sp(asp, "list")
+    p.add_argument("--project"); p.add_argument("--epic"); p.add_argument("--iteration")
+    p.add_argument("--state-type", choices=list(workflows.STATE_TYPES))
+    p.add_argument("--group"); p.add_argument("--owner"); p.add_argument("--label")
+    p.add_argument("--q"); p.add_argument("--no-completed", dest="include_completed",
+                                          action="store_false", default=True)
+    p.set_defaults(func=h_story_list, fmt=lambda c, v: _fmt_stories(c, v))
+    p = _sp(asp, "get"); _id_arg(p); p.set_defaults(func=h_story_get, fmt=_fmt_one)
+    p = _sp(asp, "detail"); _id_arg(p); p.set_defaults(func=h_story_detail, fmt=_fmt_story_detail)
+    p = _sp(asp, "create")
+    p.add_argument("--name", required=True); p.add_argument("--desc"); p.add_argument("--type",
+            choices=list(stories.STORY_TYPES), default="feature")
+    p.add_argument("--state"); p.add_argument("--project"); p.add_argument("--epic")
+    p.add_argument("--iteration"); p.add_argument("--group"); p.add_argument("--requested-by")
+    p.add_argument("--deadline"); p.add_argument("--owners", help="comma-separated member names/ids")
+    p.add_argument("--labels", help="comma-separated label names/ids")
+    p.set_defaults(func=h_story_create, fmt=_fmt_one)
+    p = _sp(asp, "update"); _id_arg(p)
+    for f in ("--name", "--desc", "--project", "--epic", "--iteration", "--group", "--deadline"):
+        p.add_argument(f)
+    p.add_argument("--type", choices=list(stories.STORY_TYPES))
+    p.add_argument("--position", type=float)
+    p.set_defaults(func=h_story_update, fmt=_fmt_one)
+    p = _sp(asp, "move"); _id_arg(p); p.add_argument("--state", required=True)
+    p.set_defaults(func=h_story_move, fmt=_fmt_one)
+    p = _sp(asp, "assign"); _id_arg(p); p.add_argument("--owner", required=True)
+    p.set_defaults(func=h_story_assign, fmt=_fmt_one)
+    p = _sp(asp, "unassign"); _id_arg(p); p.add_argument("--owner", required=True)
+    p.set_defaults(func=h_story_unassign, fmt=_fmt_one)
+    p = _sp(asp, "label"); _id_arg(p); p.add_argument("--label", required=True)
+    p.set_defaults(func=h_story_label, fmt=_fmt_one)
+    p = _sp(asp, "unlabel"); _id_arg(p); p.add_argument("--label", required=True)
+    p.set_defaults(func=h_story_unlabel, fmt=_fmt_one)
+    p = _sp(asp, "delete"); _id_arg(p); p.set_defaults(func=h_story_delete, fmt=_fmt_one)
+
+    # epic -------------------------------------------------------------------
+    sp = sub.add_parser("epic", parents=[COMMON])
+    asp = sp.add_subparsers(dest="action", required=True)
+    p = _sp(asp, "list"); p.add_argument("--project"); p.add_argument("--milestone")
+    p.set_defaults(func=h_epic_list, fmt=lambda c, v: _fmt_list_simple(v, ["id", "name", "state", "project_id", "milestone_id"]))
+    p = _sp(asp, "get"); _id_arg(p); p.set_defaults(func=lambda c, a: epics.get_epic(c, int(a.id)), fmt=_fmt_one)
+    p = _sp(asp, "create"); p.add_argument("--name", required=True); p.add_argument("--desc")
+    p.add_argument("--state", default="planned"); p.add_argument("--project"); p.add_argument("--milestone")
+    p.set_defaults(func=h_epic_create, fmt=_fmt_one)
+    p = _sp(asp, "update"); _id_arg(p); p.add_argument("--name"); p.add_argument("--desc")
+    p.add_argument("--state"); p.add_argument("--project"); p.add_argument("--milestone")
+    p.set_defaults(func=h_epic_update, fmt=_fmt_one)
+    p = _sp(asp, "delete"); _id_arg(p)
+    p.set_defaults(func=lambda c, a: (epics.delete_epic(c, int(a.id)), {"deleted": "epic", "id": int(a.id)})[1], fmt=_fmt_one)
+    p = _sp(asp, "stories"); _id_arg(p)
+    p.set_defaults(func=lambda c, a: epics.list_epic_stories(c, int(a.id)), fmt=lambda c, v: _fmt_stories(c, v))
+
+    # iteration --------------------------------------------------------------
+    sp = sub.add_parser("iteration", parents=[COMMON])
+    asp = sp.add_subparsers(dest="action", required=True)
+    p = _sp(asp, "list"); p.add_argument("--status", choices=list(iterations.STATUSES))
+    p.set_defaults(func=h_iteration_list, fmt=lambda c, v: _fmt_list_simple(v, ["id", "name", "status", "start_date", "end_date"]))
+    p = _sp(asp, "get"); _id_arg(p); p.set_defaults(func=lambda c, a: iterations.get_iteration(c, int(a.id)), fmt=_fmt_one)
+    p = _sp(asp, "create"); p.add_argument("--name", required=True); p.add_argument("--desc")
+    p.add_argument("--status", default="planned"); p.add_argument("--start"); p.add_argument("--end")
+    p.set_defaults(func=h_iteration_create, fmt=_fmt_one)
+    p = _sp(asp, "update"); _id_arg(p); p.add_argument("--name"); p.add_argument("--desc")
+    p.add_argument("--status"); p.add_argument("--start"); p.add_argument("--end")
+    p.set_defaults(func=h_iteration_update, fmt=_fmt_one)
+    p = _sp(asp, "delete"); _id_arg(p)
+    p.set_defaults(func=lambda c, a: (iterations.delete_iteration(c, int(a.id)), {"deleted": "iteration", "id": int(a.id)})[1], fmt=_fmt_one)
+    p = _sp(asp, "stories"); _id_arg(p)
+    p.set_defaults(func=lambda c, a: iterations.list_iteration_stories(c, int(a.id)), fmt=lambda c, v: _fmt_stories(c, v))
+
+    # milestone --------------------------------------------------------------
+    sp = sub.add_parser("milestone", parents=[COMMON])
+    asp = sp.add_subparsers(dest="action", required=True)
+    p = _sp(asp, "list"); p.add_argument("--state", choices=list(milestones.STATES))
+    p.set_defaults(func=h_milestone_list, fmt=lambda c, v: _fmt_list_simple(v, ["id", "name", "state", "completed_at"]))
+    p = _sp(asp, "get"); _id_arg(p); p.set_defaults(func=lambda c, a: milestones.get_milestone(c, int(a.id)), fmt=_fmt_one)
+    p = _sp(asp, "create"); p.add_argument("--name", required=True); p.add_argument("--desc")
+    p.add_argument("--state", default="planned")
+    p.set_defaults(func=h_milestone_create, fmt=_fmt_one)
+    p = _sp(asp, "update"); _id_arg(p); p.add_argument("--name"); p.add_argument("--desc"); p.add_argument("--state")
+    p.set_defaults(func=h_milestone_update, fmt=_fmt_one)
+    p = _sp(asp, "delete"); _id_arg(p)
+    p.set_defaults(func=lambda c, a: (milestones.delete_milestone(c, int(a.id)), {"deleted": "milestone", "id": int(a.id)})[1], fmt=_fmt_one)
+    p = _sp(asp, "epics"); _id_arg(p)
+    p.set_defaults(func=lambda c, a: milestones.list_milestone_epics(c, int(a.id)), fmt=lambda c, v: _fmt_list_simple(v, ["id", "name", "state", "project_id"]))
+
+    # project ---------------------------------------------------------------
+    sp = sub.add_parser("project", parents=[COMMON])
+    asp = sp.add_subparsers(dest="action", required=True)
+    p = _sp(asp, "list"); p.add_argument("--archived", action="store_true")
+    p.set_defaults(func=h_project_list, fmt=lambda c, v: _fmt_list_simple(v, ["id", "name", "abbreviation", "color", "archived"]))
+    p = _sp(asp, "get"); _id_arg(p); p.set_defaults(func=lambda c, a: projects.get_project(c, int(a.id)), fmt=_fmt_one)
+    p = _sp(asp, "create"); p.add_argument("--name", required=True); p.add_argument("--desc")
+    p.add_argument("--abbr"); p.add_argument("--color")
+    p.set_defaults(func=h_project_create, fmt=_fmt_one)
+    p = _sp(asp, "update"); _id_arg(p); p.add_argument("--name"); p.add_argument("--desc")
+    p.add_argument("--abbr"); p.add_argument("--color")
+    p.add_argument("--archive", dest="archive", action="store_true", default=None)
+    p.add_argument("--no-archive", dest="archive", action="store_false")
+    p.set_defaults(func=h_project_update, fmt=_fmt_one)
+    p = _sp(asp, "archive"); _id_arg(p)
+    p.set_defaults(func=lambda c, a: projects.archive_project(c, int(a.id), True), fmt=_fmt_one)
+    p = _sp(asp, "delete"); _id_arg(p)
+    p.set_defaults(func=lambda c, a: (projects.delete_project(c, int(a.id)), {"deleted": "project", "id": int(a.id)})[1], fmt=_fmt_one)
+    p = _sp(asp, "stories"); _id_arg(p)
+    p.set_defaults(func=lambda c, a: projects.list_project_stories(c, int(a.id)), fmt=lambda c, v: _fmt_stories(c, v))
+
+    # label -----------------------------------------------------------------
+    sp = sub.add_parser("label", parents=[COMMON])
+    asp = sp.add_subparsers(dest="action", required=True)
+    p = _sp(asp, "list"); p.set_defaults(func=h_label_list, fmt=lambda c, v: _fmt_list_simple(v, ["id", "name", "color", "description"]))
+    p = _sp(asp, "get"); _id_arg(p); p.set_defaults(func=lambda c, a: labels.get_label(c, int(a.id)), fmt=_fmt_one)
+    p = _sp(asp, "create"); p.add_argument("--name", required=True); p.add_argument("--color"); p.add_argument("--desc")
+    p.set_defaults(func=h_label_create, fmt=_fmt_one)
+    p = _sp(asp, "update"); _id_arg(p); p.add_argument("--name"); p.add_argument("--color"); p.add_argument("--desc")
+    p.set_defaults(func=h_label_update, fmt=_fmt_one)
+    p = _sp(asp, "delete"); _id_arg(p)
+    p.set_defaults(func=lambda c, a: (labels.delete_label(c, int(a.id)), {"deleted": "label", "id": int(a.id)})[1], fmt=_fmt_one)
+
+    # member ----------------------------------------------------------------
+    sp = sub.add_parser("member", parents=[COMMON])
+    asp = sp.add_subparsers(dest="action", required=True)
+    p = _sp(asp, "list"); p.set_defaults(func=h_member_list, fmt=lambda c, v: _fmt_list_simple(v, ["id", "name", "mention_name"]))
+    p = _sp(asp, "get"); _id_arg(p); p.set_defaults(func=lambda c, a: members.get_member(c, int(a.id)), fmt=_fmt_one)
+    p = _sp(asp, "create"); p.add_argument("--name", required=True); p.add_argument("--mention")
+    p.set_defaults(func=h_member_create, fmt=_fmt_one)
+    p = _sp(asp, "update"); _id_arg(p); p.add_argument("--name"); p.add_argument("--mention")
+    p.set_defaults(func=h_member_update, fmt=_fmt_one)
+    p = _sp(asp, "delete"); _id_arg(p)
+    p.set_defaults(func=lambda c, a: (members.delete_member(c, int(a.id)), {"deleted": "member", "id": int(a.id)})[1], fmt=_fmt_one)
+
+    # group -----------------------------------------------------------------
+    sp = sub.add_parser("group", parents=[COMMON])
+    asp = sp.add_subparsers(dest="action", required=True)
+    p = _sp(asp, "list"); p.add_argument("--archived", action="store_true")
+    p.set_defaults(func=h_group_list, fmt=lambda c, v: _fmt_list_simple(v, ["id", "name", "description", "archived"]))
+    p = _sp(asp, "get"); _id_arg(p); p.set_defaults(func=lambda c, a: groups.get_group(c, int(a.id)), fmt=_fmt_one)
+    p = _sp(asp, "create"); p.add_argument("--name", required=True); p.add_argument("--desc")
+    p.set_defaults(func=h_group_create, fmt=_fmt_one)
+    p = _sp(asp, "update"); _id_arg(p); p.add_argument("--name"); p.add_argument("--desc")
+    p.add_argument("--archive", dest="archive", action="store_true", default=None)
+    p.add_argument("--no-archive", dest="archive", action="store_false")
+    p.set_defaults(func=h_group_update, fmt=_fmt_one)
+    p = _sp(asp, "archive"); _id_arg(p)
+    p.set_defaults(func=lambda c, a: groups.archive_group(c, int(a.id), True), fmt=_fmt_one)
+    p = _sp(asp, "delete"); _id_arg(p)
+    p.set_defaults(func=lambda c, a: (groups.delete_group(c, int(a.id)), {"deleted": "group", "id": int(a.id)})[1], fmt=_fmt_one)
+    p = _sp(asp, "stories"); _id_arg(p)
+    p.set_defaults(func=lambda c, a: groups.list_group_stories(c, int(a.id)), fmt=lambda c, v: _fmt_stories(c, v))
+
+    # workflow --------------------------------------------------------------
+    sp = sub.add_parser("workflow", parents=[COMMON])
+    asp = sp.add_subparsers(dest="action", required=True)
+    p = _sp(asp, "list"); p.set_defaults(func=h_workflow_list, fmt=lambda c, v: _fmt_list_simple(v, ["id", "name", "default_state_id"]))
+    p = _sp(asp, "get"); _id_arg(p); p.set_defaults(func=lambda c, a: workflows.get_workflow(c, int(a.id)), fmt=_fmt_one)
+    p = _sp(asp, "create"); p.add_argument("--name", required=True)
+    p.add_argument("--states", help="comma list of name:type (e.g. Todo:unstarted,Doing:started,Done:done)")
+    p.set_defaults(func=h_workflow_create, fmt=_fmt_one)
+    p = _sp(asp, "states"); _id_arg(p); p.set_defaults(func=h_workflow_states, fmt=lambda c, v: _fmt_list_simple(v, ["id", "name", "type", "position"]))
+    p = _sp(asp, "add-state"); _id_arg(p); p.add_argument("--name", required=True)
+    p.add_argument("--type", required=True, choices=list(workflows.STATE_TYPES)); p.add_argument("--position", type=float)
+    p.set_defaults(func=h_workflow_add_state, fmt=_fmt_one)
+    p = _sp(asp, "delete"); _id_arg(p)
+    p.set_defaults(func=lambda c, a: (workflows.delete_workflow(c, int(a.id)), {"deleted": "workflow", "id": int(a.id)})[1], fmt=_fmt_one)
+
+    # task ------------------------------------------------------------------
+    sp = sub.add_parser("task", parents=[COMMON])
+    asp = sp.add_subparsers(dest="action", required=True)
+    p = _sp(asp, "list"); p.add_argument("--story", required=True); p.set_defaults(func=h_task_list, fmt=lambda c, v: _fmt_list_simple(v, ["id", "description", "complete", "position", "completed_at"]))
+    p = _sp(asp, "add"); p.add_argument("--story", required=True); p.add_argument("--desc", required=True)
+    p.add_argument("--complete", action="store_true"); p.set_defaults(func=h_task_add, fmt=_fmt_one)
+    p = _sp(asp, "update"); _id_arg(p); p.add_argument("--desc"); p.add_argument("--complete", dest="complete", action="store_true", default=None)
+    p.add_argument("--no-complete", dest="complete", action="store_false"); p.add_argument("--position", type=float)
+    p.set_defaults(func=h_task_update, fmt=_fmt_one)
+    p = _sp(asp, "complete"); _id_arg(p); p.set_defaults(func=h_task_complete, fmt=_fmt_one)
+    p = _sp(asp, "uncomplete"); _id_arg(p); p.set_defaults(func=h_task_uncomplete, fmt=_fmt_one)
+    p = _sp(asp, "delete"); _id_arg(p)
+    p.set_defaults(func=lambda c, a: (tasks.delete_task(c, int(a.id)), {"deleted": "task", "id": int(a.id)})[1], fmt=_fmt_one)
+
+    # comment ---------------------------------------------------------------
+    sp = sub.add_parser("comment", parents=[COMMON])
+    asp = sp.add_subparsers(dest="action", required=True)
+    p = _sp(asp, "list"); p.add_argument("--story", required=True); p.set_defaults(func=h_comment_list, fmt=lambda c, v: _fmt_list_simple(v, ["id", "story_id", "author_id", "text", "parent_id", "created_at"]))
+    p = _sp(asp, "add"); p.add_argument("--story", required=True); p.add_argument("--text", required=True)
+    p.add_argument("--author"); p.add_argument("--parent", type=int); p.set_defaults(func=h_comment_add, fmt=_fmt_one)
+    p = _sp(asp, "update"); _id_arg(p); p.add_argument("--text", required=True); p.set_defaults(func=h_comment_update, fmt=_fmt_one)
+    p = _sp(asp, "delete"); _id_arg(p)
+    p.set_defaults(func=lambda c, a: (comments.delete_comment(c, int(a.id)), {"deleted": "comment", "id": int(a.id)})[1], fmt=_fmt_one)
+
+    # link ------------------------------------------------------------------
+    sp = sub.add_parser("link", parents=[COMMON])
+    asp = sp.add_subparsers(dest="action", required=True)
+    p = _sp(asp, "list"); p.add_argument("--story", type=int); p.set_defaults(func=h_link_list, fmt=lambda c, v: _fmt_list_simple(v, ["id", "subject_story_id", "verb", "object_story_id"]))
+    p = _sp(asp, "add"); p.add_argument("--subject", required=True, type=int)
+    p.add_argument("--verb", required=True, choices=list(story_links.VERBS)); p.add_argument("--object", required=True, type=int)
+    p.set_defaults(func=h_link_add, fmt=_fmt_one)
+    p = _sp(asp, "delete"); _id_arg(p)
+    p.set_defaults(func=lambda c, a: (story_links.delete_link(c, int(a.id)), {"deleted": "link", "id": int(a.id)})[1], fmt=_fmt_one)
+
+    # search ----------------------------------------------------------------
+    sp = sub.add_parser("search", parents=[COMMON])
+    sp.add_argument("query", nargs="+", help="search terms (FTS5 syntax, e.g. 'login bug')")
+    sp.add_argument("--entity", choices=["story", "epic", "project", "milestone", "iteration", "label"])
+    sp.set_defaults(func=h_search, fmt=lambda c, v: _fmt_list_simple(v, ["entity", "id", "name", "rank"]))
+
+    return parser
+
+
+# --------------------------------------------------------------------------- #
+# Entry point
+# --------------------------------------------------------------------------- #
+
+def run(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    conn = db.connect(args.db) if getattr(args, "db", None) else db.connect()
+    try:
+        value = args.func(conn, args)
+        if getattr(args, "json", False):
+            emit(args, value)                      # JSON via emit()
+        elif getattr(args, "fmt", None) is not None:
+            args.fmt(conn, value)                 # custom text formatter
+        else:
+            emit(args, value)                     # fallback
+    except errors.PlannerError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    finally:
+        conn.close()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(run())
