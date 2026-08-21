@@ -1,8 +1,10 @@
 """Full-text search across the major entities via FTS5.
 
-FTS5 tables (``story_fts`` etc.) and their sync triggers are created in the v2
-schema migration (``db.py``); this module only queries them. Results are ranked
-by FTS5's bm25 score and carry their entity type + id + name.
+FTS5 tables (``story_fts`` etc.) and their sync triggers are created by schema
+migrations in ``db.py`` (v2: story/epic/project/milestone/iteration/label over
+name+description; v3: comment over text and task over description). This module
+only queries them. Results are ranked by FTS5's bm25 score and carry their
+entity type + id + a display name.
 """
 
 from __future__ import annotations
@@ -10,14 +12,18 @@ from __future__ import annotations
 import sqlite3
 from dataclasses import dataclass
 
-# Maps an entity name -> (fts table, source table, display label).
+# Maps an entity name -> (fts table, source table, display label, mirrored cols).
+# The first mirrored column is used as the result ``name``; a second (if any) as
+# ``description``. Comments and tasks have a single indexed column.
 _ENTITIES = {
-    "story": ("story_fts", "story", "story"),
-    "epic": ("epic_fts", "epic", "epic"),
-    "project": ("project_fts", "project", "project"),
-    "milestone": ("milestone_fts", "milestone", "milestone"),
-    "iteration": ("iteration_fts", "iteration", "iteration"),
-    "label": ("label_fts", "label", "label"),
+    "story": ("story_fts", "story", "story", ("name", "description")),
+    "epic": ("epic_fts", "epic", "epic", ("name", "description")),
+    "project": ("project_fts", "project", "project", ("name", "description")),
+    "milestone": ("milestone_fts", "milestone", "milestone", ("name", "description")),
+    "iteration": ("iteration_fts", "iteration", "iteration", ("name", "description")),
+    "label": ("label_fts", "label", "label", ("name", "description")),
+    "comment": ("story_comment_fts", "story_comment", "comment", ("text",)),
+    "task": ("task_fts", "task", "task", ("description",)),
 }
 
 
@@ -67,7 +73,7 @@ def search(conn: sqlite3.Connection, query: str, *, entity: str | None = None) -
     Raises:
         ValueError: if an unknown entity is provided or the MATCH syntax is invalid.
     """
-    targets: list[tuple[str, str, str]]
+    targets: list[tuple[str, str, str, tuple[str, ...]]]
     if entity is not None:
         if entity not in _ENTITIES:
             raise ValueError(
@@ -77,9 +83,10 @@ def search(conn: sqlite3.Connection, query: str, *, entity: str | None = None) -
         targets = list(_ENTITIES.values())
 
     results: list[SearchResult] = []
-    for fts_table, src_table, label in targets:
+    for fts_table, _src_table, label, cols in targets:
+        col_select = ", ".join(f"f.{c}" for c in cols)
         # bm25() returns lower scores for better matches; negate so bigger=better.
-        sql = (f"SELECT f.rowid, f.name, f.description, bm25({fts_table}) AS score "
+        sql = (f"SELECT f.rowid, {col_select}, bm25({fts_table}) AS score "
                f"FROM {fts_table} f WHERE {fts_table} MATCH ? ORDER BY score")
         try:
             rows = conn.execute(sql, (query,)).fetchall()
@@ -87,8 +94,10 @@ def search(conn: sqlite3.Connection, query: str, *, entity: str | None = None) -
             # Bad MATCH syntax (e.g. bare ':') — surface a clear error.
             raise ValueError(f"invalid search query {query!r}")
         for r in rows:
+            name = r[1] or ""
+            desc = (r[2] or "") if len(cols) > 1 else ""
             results.append(SearchResult(
-                entity=label, id=r[0], name=r[1], description=r[2] or "",
-                rank=-r[3]))
+                entity=label, id=r[0], name=name, description=desc,
+                rank=-r[1 + len(cols)]))
     results.sort(key=lambda x: x.rank, reverse=True)
     return results

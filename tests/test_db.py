@@ -46,11 +46,16 @@ def test_fts_tables_and_triggers_exist(conn):
     tables = {r[0] for r in conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE '%_fts'")}
     assert tables == {"story_fts", "epic_fts", "project_fts",
-                      "milestone_fts", "iteration_fts", "label_fts"}
+                      "milestone_fts", "iteration_fts", "label_fts",
+                      "story_comment_fts", "task_fts"}
     n_triggers = conn.execute(
         "SELECT COUNT(*) FROM sqlite_master WHERE type='trigger'").fetchone()[0]
-    # 6 tables x 3 triggers (insert/delete/update) = 18.
-    assert n_triggers == 18
+    # 8 FTS tables x 3 triggers (insert/delete/update) = 24.
+    assert n_triggers == 24
+
+
+def test_schema_version_is_3(conn):
+    assert conn.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == 3
 
 
 def test_tx_write_commits_and_rolls_back(conn):

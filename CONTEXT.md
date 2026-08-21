@@ -49,8 +49,9 @@ unless the user explicitly asks.
 - `backend/` — `db.py`, `errors.py`, `models.py`, `_util.py`, and one module per
   entity (`members`, `groups`, `workflows`, `projects`, `labels`, `milestones`,
   `epics`, `iterations`, `stories`, `tasks`, `comments`, `story_links`,
-  `search.py`). Schema is at version 2 (v1 = core tables + seed; v2 = FTS5
-  tables + sync triggers).
+  `search.py`). Schema is at version 3 (v1 = core tables + seed; v2 = FTS5
+  over name+description for story/epic/project/milestone/iteration/label; v3 =
+  FTS5 over comment text and task description).
 - `cli/commands.py` — argparse subparsers for every resource; `--json` flag;
   name-to-id resolution; `run(argv)` entry point.
 - `tui/app.py` — full-screen Textual TUI: filterable story list + detail pane,
@@ -175,11 +176,13 @@ Tables and key columns (abbreviated — `created_at`/`updated_at` implied on mos
   `UNIQUE(subject_story_id, verb, object_story_id)`.
 
 ### Search
-Use **FTS5** virtual tables mirroring `name` + `description` for stories, epics,
-projects, milestones, iterations, and labels. Keep external-content tables pointing at
-the source tables via rowid; rebuild index on insert/update/delete of those entities.
-`search.search(conn, query, entity=None)` returns ranked results across entities (or
-filtered to one). FTS5 is compiled into the stdlib `sqlite3` on CPython 3.12.
+Use **FTS5** external-content virtual tables kept in sync by triggers: `name` +
+`description` for stories, epics, projects, milestones, iterations, and labels;
+`text` for comments; `description` for tasks. `search.search(conn, query,
+entity=None)` returns ranked results across all eight entity types (or filtered
+to one — `entity` ∈ story/epic/project/milestone/iteration/label/comment/task).
+For comment/task results the `name` field holds the indexed text. FTS5 is
+compiled into the stdlib `sqlite3` on CPython 3.12.
 
 ## 8. Function-call API surface (REST → function)
 
@@ -294,7 +297,8 @@ Seeding must be idempotent and run inside a single `BEGIN IMMEDIATE` transaction
 ## 14. Build order & status
 
 1. ✅ `backend/db.py` — connect, pragmas, busy_timeout, `tx_write`, schema create +
-   seed, `schema_version` (now at v2; FTS5 added in v2).
+   seed, `schema_version` (now at v3; v2 FTS5 over name+description, v3 FTS5 over
+   comment text + task description).
 2. ✅ `backend/errors.py` + `backend/models.py` — error types + dataclasses.
 3. ✅ `backend/stories.py` + parents (`projects.py`, `workflows.py`, `members.py`,
    `labels.py`) — full CRUD + `move_story_state` (auto `completed_at`).

@@ -16,7 +16,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 # Schema version this code understands. Bump when adding a migration in MIGRATIONS.
-CURRENT_SCHEMA_VERSION = 2
+CURRENT_SCHEMA_VERSION = 3
 
 # Default DB location: next to main.py (repo root).
 DEFAULT_DB_PATH = Path(__file__).resolve().parent.parent / "planner.db"
@@ -290,21 +290,22 @@ _SCHEMA_V1 = [
     """,
 ]
 
-def _fts_trigger(table: str) -> list[str]:
+def _fts_trigger(table: str, cols=("name", "description")) -> list[str]:
     """Return the trigger SQL to keep an FTS5 external-content table in sync.
 
-    The FTS5 table ``{table}_fts`` mirrors the ``name`` and ``description`` columns.
-    These triggers ensure the index is updated on every insert, update, or delete
-    on the source table.
+    The FTS5 table ``{table}_fts`` mirrors the given ``cols`` of the source
+    table. Triggers update the index on every insert, update, or delete.
 
     Args:
         table: The name of the source table.
+        cols: The columns to mirror (e.g. ``("name", "description")`` for
+            stories, ``("text",)`` for comments, ``("description",)`` for tasks).
 
     Returns:
-        list[str]: A list of three SQL statements for the AI, AD, and AU triggers.
+        list[str]: Three SQL statements for the AI, AD, and AU triggers.
     """
     fts = f"{table}_fts"
-    cols = ["name", "description"]
+    cols = list(cols)
     new_vals = ", ".join(f"NEW.{c}" for c in cols)
     old_vals = ", ".join(f"OLD.{c}" for c in cols)
     col_list = ", ".join(cols)
@@ -367,9 +368,31 @@ _SCHEMA_V2 = [
     _fts_trigger("label"),
 ]
 
+# v3: full-text search over comments (text) and tasks (description). External-
+# content FTS5 tables kept in sync by triggers; existing rows are indexed via a
+# rebuild so the migration works on databases that already have data.
+_SCHEMA_V3 = [
+    """
+    CREATE VIRTUAL TABLE IF NOT EXISTS story_comment_fts USING fts5(
+        text, content='story_comment', content_rowid='id'
+    )
+    """,
+    """
+    CREATE VIRTUAL TABLE IF NOT EXISTS task_fts USING fts5(
+        description, content='task', content_rowid='id'
+    )
+    """,
+    # Backfill indexes from any pre-existing rows.
+    "INSERT INTO story_comment_fts(story_comment_fts) VALUES ('rebuild')",
+    "INSERT INTO task_fts(task_fts) VALUES ('rebuild')",
+    _fts_trigger("story_comment", ("text",)),
+    _fts_trigger("task", ("description",)),
+]
+
 _MIGRATIONS = [
     (1, _SCHEMA_V1),
     (2, _SCHEMA_V2),
+    (3, _SCHEMA_V3),
 ]
 
 

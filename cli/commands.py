@@ -921,7 +921,8 @@ def build_parser() -> argparse.ArgumentParser:
     # search ----------------------------------------------------------------
     sp = sub.add_parser("search", parents=[COMMON])
     sp.add_argument("query", nargs="+", help="search terms (FTS5 syntax, e.g. 'login bug')")
-    sp.add_argument("--entity", choices=["story", "epic", "project", "milestone", "iteration", "label"])
+    sp.add_argument("--entity", choices=["story", "epic", "project", "milestone",
+                                          "iteration", "label", "comment", "task"])
     sp.set_defaults(func=h_search, fmt=lambda c, v: _fmt_list_simple(v, ["entity", "id", "name", "rank"]))
 
     return parser
