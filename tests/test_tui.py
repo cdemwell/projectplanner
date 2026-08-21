@@ -14,8 +14,10 @@ textual = pytest.importorskip("textual")  # noqa: F841
 
 from textual.widgets import Button  # noqa: E402
 
+from backend import comments as comments_mod
+from backend import projects  # noqa: E402
+from backend import stories as stories_mod
 from tui.app import PlannerApp  # noqa: E402
-from backend import projects, stories as stories_mod, comments as comments_mod  # noqa: E402
 
 
 def _run(coro):
@@ -104,9 +106,11 @@ def test_tui_create_toggle_search_delete(seeded_db):
 
 def test_tui_edit_story_renames_and_clears_project(db_path):
     """The edit modal updates fields and can clear a nullable FK (project)."""
-    from backend import db, projects, stories as stories_mod
-    from tui.app import _NONE_INT
     from textual.widgets import Input, Select
+
+    from backend import db, projects
+    from backend import stories as stories_mod
+    from tui.app import _NONE_INT
 
     c = db.connect(db_path)
     p = projects.create_project(c, "backend")
@@ -142,8 +146,11 @@ def test_tui_edit_story_renames_and_clears_project(db_path):
 
 def test_tui_task_action_toggle_and_edit(db_path):
     """The 'x' task-action modal toggles completion and edits a description."""
-    from backend import db, stories as stories_mod, tasks as tasks_mod
     from textual.widgets import Select, TextArea
+
+    from backend import db
+    from backend import stories as stories_mod
+    from backend import tasks as tasks_mod
 
     c = db.connect(db_path)
     s = stories_mod.create_story(c, "x")

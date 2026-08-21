@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from backend import search, stories, epics, projects, labels
+from backend import epics, labels, projects, search, stories
 
 
 def test_search_finds_by_name_and_description(conn):

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from backend import comments, stories, errors
+from backend import comments, errors, stories
 
 
 def test_create_list_update_delete(conn):

@@ -8,7 +8,7 @@ from __future__ import annotations
 import sqlite3
 
 from . import _util, db, errors, workflows
-from .models import Story, StoryDetail, Member, Label, Task, WorkflowState
+from .models import Label, Member, Story, StoryDetail, Task, WorkflowState
 
 STORY_TYPES = ("bug", "feature", "chore")
 

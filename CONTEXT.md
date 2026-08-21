@@ -252,10 +252,15 @@ Naming: `list_*`, `get_*`, `create_*`, `update_*`, `delete_*`, plus `search_*`. 
 
 - **Stdlib only for the backend + CLI:** `sqlite3`, `argparse`, `dataclasses`, `datetime`.
 - TUI: `textual>=0.80` (declared in `pyproject.toml` `dependencies`).
-- Tests: `pytest>=8` (declared in `pyproject.toml` `[project.optional-dependencies] dev`).
-  Run with `.venv/bin/python -m pytest -q` (81 tests; fresh temp DB per test).
-  TUI tests use Textual's headless `App.run_test()` pilot and are skipped if
-  `textual` isn't installed.
+- Tests: `pytest>=8`; lint: `ruff>=0.6` (both in
+  `[project.optional-dependencies] dev`). Run tests with
+  `.venv/bin/python -m pytest -q` (83 tests; fresh temp DB per test; TUI tests
+  use Textual's headless `App.run_test()` pilot and are skipped if `textual`
+  isn't installed). Lint with `.venv/bin/ruff check backend cli tui main.py tests`
+  (config in `[tool.ruff]`; E501/E701/E702 ignored to permit long DDL lines and
+  compact one-liners).
+- CI: `.github/workflows/ci.yml` runs ruff + pytest on Python 3.12 for every
+  push/PR.
 
 ## 12. First-run / seeding (`backend/db.py`)
 

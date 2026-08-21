@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from backend import story_links, stories, errors
+from backend import errors, stories, story_links
 
 
 def test_create_and_list(conn):

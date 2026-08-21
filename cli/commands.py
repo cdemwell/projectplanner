@@ -14,13 +14,27 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import json as _json
-import shlex
 import sys
 from typing import Any
 
-from backend import (db, errors, members, groups, workflows, projects, labels,
-                      milestones, epics, iterations, stories, tasks, comments,
-                      story_links, search, _util)
+from backend import (
+    _util,
+    comments,
+    db,
+    epics,
+    errors,
+    groups,
+    iterations,
+    labels,
+    members,
+    milestones,
+    projects,
+    search,
+    stories,
+    story_links,
+    tasks,
+    workflows,
+)
 
 # --------------------------------------------------------------------------- #
 # Output helpers
@@ -276,16 +290,16 @@ def _fmt_story_detail(conn, detail):
     print(f"  project:    {s.project_id}    epic: {s.epic_id}    "
           f"iteration: {s.iteration_id}    group: {s.group_id}")
     print(f"  owners:     {', '.join(o.name for o in detail.owners) or '(none)'}")
-    print(f"  labels:     {', '.join(l.name for l in detail.labels) or '(none)'}")
+    print(f"  labels:     {', '.join(lb.name for lb in detail.labels) or '(none)'}")
     if s.description:
         print(f"  description: {s.description}")
-    print(f"  tasks:")
+    print("  tasks:")
     if detail.tasks:
         for t in detail.tasks:
             mark = "x" if t.complete else " "
             print(f"    [{mark}] #{t.id} {t.description}")
     else:
-        print(f"    (none)")
+        print("    (none)")
     if s.completed_at:
         print(f"  completed_at: {s.completed_at}")
 
@@ -324,7 +338,7 @@ def h_story_detail(conn, a):
 def h_story_create(conn, a):
     """Handle ``story create``; resolve owners/labels/parents and return the new story."""
     owner_ids = [resolve_member(conn, o) for o in (_split_csv(a.owners) or [])]
-    label_ids = [resolve_label(conn, l) for l in (_split_csv(a.labels) or [])]
+    label_ids = [resolve_label(conn, lb) for lb in (_split_csv(a.labels) or [])]
     return stories.create_story(
         conn, a.name, description=a.desc or "", story_type=a.type,
         workflow_state_id=resolve_workflow_state(conn, a.state) if a.state else None,

@@ -1,0 +1,28 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        # Backend + CLI are stdlib-only; textual is needed for TUI tests,
+        # pytest for the suite, ruff for linting.
+        run: pip install textual pytest ruff
+
+      - name: Lint (ruff)
+        run: ruff check backend cli tui main.py tests
+
+      - name: Test (pytest)
+        run: python -m pytest -q

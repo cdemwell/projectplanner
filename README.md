@@ -64,8 +64,8 @@ search them — all from the command line, against a local file.
 | 13 | [Exit Codes & Errors](#exit-codes--errors) | 512–530 |
 | 14 | [Examples & Recipes](#examples--recipes) | 531–564 |
 | 15 | [Non-goals & Differences from Shortcut](#non-goals--differences-from-shortcut) | 565–579 |
-| 16 | [Tests](#tests) | 580–612 |
-| 17 | [Further Reading](#further-reading) | 613–621 |
+| 16 | [Tests](#tests) | 580–620 |
+| 17 | [Further Reading](#further-reading) | 621–629 |
 
 ---
 
@@ -586,6 +586,14 @@ setup.
 ```bash
 .venv/bin/pip install pytest          # one-time (or: pip install -e '.[dev]')
 .venv/bin/python -m pytest -q
+```
+
+Linting uses [ruff](https://docs.astral.sh/ruff/) (config in `pyproject.toml`);
+CI (`.github/workflows/ci.yml`) runs both on every push/PR:
+
+```bash
+.venv/bin/pip install ruff            # one-time
+.venv/bin/ruff check backend cli tui main.py tests
 ```
 
 Coverage:

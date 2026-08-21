@@ -8,10 +8,10 @@ extra columns the query returned.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, fields as _dc_fields
-from typing import Any
-
 import sqlite3
+from dataclasses import dataclass
+from dataclasses import fields as _dc_fields
+from typing import Any
 
 
 @dataclass
@@ -19,7 +19,7 @@ class Model:
     """Base: provides ``from_row`` to build a dataclass from a ``sqlite3.Row``."""
 
     @classmethod
-    def from_row(cls, row: sqlite3.Row) -> "Model":
+    def from_row(cls, row: sqlite3.Row) -> Model:
         """Build a dataclass from a ``sqlite3.Row``.
 
         Maps row columns by name to the matching dataclass fields, ignoring
@@ -265,7 +265,7 @@ class StoryDetail:
         return {
             "story": dataclasses.asdict(self.story),
             "owners": [dataclasses.asdict(o) for o in self.owners],
-            "labels": [dataclasses.asdict(l) for l in self.labels],
+            "labels": [dataclasses.asdict(lb) for lb in self.labels],
             "tasks": [dataclasses.asdict(t) for t in self.tasks],
             "workflow_state": dataclasses.asdict(self.workflow_state) if self.workflow_state else None,
         }

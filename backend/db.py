@@ -12,7 +12,7 @@ from __future__ import annotations
 import contextlib
 import os
 import sqlite3
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 # Schema version this code understands. Bump when adding a migration in MIGRATIONS.
@@ -35,7 +35,7 @@ def now() -> str:
     Returns:
         str: The ISO-8601 UTC timestamp (e.g. ``2026-08-20T14:03:11+00:00``).
     """
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def connect(db_path: str | os.PathLike[str] | None = None) -> sqlite3.Connection:

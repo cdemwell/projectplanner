@@ -4,8 +4,19 @@ from __future__ import annotations
 
 import pytest
 
-from backend import (db, errors, epics, milestones, iterations, projects,
-                     groups, labels, members, workflows, stories)
+from backend import (
+    db,
+    epics,
+    errors,
+    groups,
+    iterations,
+    labels,
+    members,
+    milestones,
+    projects,
+    stories,
+    workflows,
+)
 
 
 # --- epics ---------------------------------------------------------------- #

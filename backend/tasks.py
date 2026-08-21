@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 
-from . import _util, db, errors, stories
+from . import _util, db, stories
 from .models import Task
 
 EDITABLE = {"description", "complete", "position"}

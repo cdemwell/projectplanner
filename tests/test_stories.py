@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from backend import db, errors, stories, projects, labels, members, epics, iterations, groups
+from backend import db, epics, errors, groups, iterations, labels, members, projects, stories
 
 
 def _done_state_id(conn) -> int:
@@ -45,7 +45,7 @@ def test_create_story_with_owners_and_labels(conn):
     owners = stories.list_owners(conn, s.id)
     assert [o.id for o in owners] == [1]
     labs = stories.list_story_labels(conn, s.id)
-    assert [l.id for l in labs] == [lbl.id]
+    assert [lb.id for lb in labs] == [lbl.id]
 
 
 def test_invalid_story_type(conn):
@@ -130,7 +130,7 @@ def test_get_story_detail_shape(conn):
     d = stories.get_story_detail(conn, s.id)
     assert d.story.id == s.id
     assert [o.id for o in d.owners] == [1]
-    assert [l.id for l in d.labels] == [lbl.id]
+    assert [lb.id for lb in d.labels] == [lbl.id]
     assert len(d.tasks) == 1
     assert d.workflow_state is not None
     assert d.workflow_state.type == "started"
@@ -161,7 +161,7 @@ def test_delete_story_cascades(conn):
     p = projects.create_project(conn, "backend")
     lbl = labels.create_label(conn, "auth")
     s = stories.create_story(conn, "x", project_id=p.id, owner_ids=[1], label_ids=[lbl.id])
-    from backend import tasks, comments, story_links
+    from backend import comments, story_links, tasks
     tasks.create_task(conn, s.id, "t1")
     comments.create_comment(conn, s.id, "c1")
     other = stories.create_story(conn, "y")

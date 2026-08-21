@@ -13,19 +13,38 @@ from __future__ import annotations
 import sqlite3
 from typing import Any
 
-from rich.table import Table as RichTable
-from rich.text import Text as RichText
 from textual import on
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
-from textual.widgets import (Button, DataTable, Footer, Header, Input, Label,
-                             RichLog, Select, Static, TextArea)
+from textual.widgets import (
+    Button,
+    DataTable,
+    Footer,
+    Header,
+    Input,
+    Label,
+    RichLog,
+    Select,
+    Static,
+    TextArea,
+)
 from textual.widgets import Select as _Select
 
-from backend import (comments, db, errors, epics, groups, iterations, labels,
-                     members, milestones, projects, stories, tasks, workflows)
+from backend import (
+    comments,
+    db,
+    epics,
+    errors,
+    groups,
+    iterations,
+    members,
+    projects,
+    stories,
+    tasks,
+    workflows,
+)
 
 # Sentinels for "no selection" inside Select widgets (kept as int/str so all
 # option values share a type and we dodge the blank-selection API).
@@ -615,7 +634,7 @@ class PlannerApp(App):
                   f"   epic: {self.name_of('epic', s.epic_id) if s.epic_id else '-'}"
                   f"   iteration: {self.name_of('iteration', s.iteration_id) if s.iteration_id else '-'}")
         log.write(f"owners: {', '.join(o.name for o in detail.owners) or '-'}"
-                  f"   labels: {', '.join(l.name for l in detail.labels) or '-'}")
+                  f"   labels: {', '.join(lb.name for lb in detail.labels) or '-'}")
         if s.description:
             log.write(f"desc: {s.description}")
         log.write("tasks:")
