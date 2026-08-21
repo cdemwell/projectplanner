@@ -14,7 +14,11 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import json as _json
+import os
+import shlex
+import subprocess
 import sys
+import tempfile
 from typing import Any
 
 from backend import (
@@ -221,6 +225,71 @@ def _opt_id(conn, val, resolver):
 
 
 # --------------------------------------------------------------------------- #
+# $EDITOR flow for long-form text
+# --------------------------------------------------------------------------- #
+def _editor_command() -> list[str]:
+    """Return the editor command (from $VISUAL, $EDITOR, or `vi`) as a list."""
+    editor = os.environ.get("VISUAL") or os.environ.get("EDITOR") or "vi"
+    return shlex.split(editor)
+
+
+def edit_text(initial: str = "", suffix: str = ".md") -> str | None:
+    """Open $EDITOR on a temp file pre-filled with ``initial``; return the result.
+
+    Returns the edited file content, or None if the editor exited non-zero or
+    no editor is available. The temp file is removed afterwards.
+
+    Args:
+        initial: Text to pre-fill the editor with.
+        suffix: Temp-file suffix (affects editor syntax highlighting).
+    """
+    cmd = _editor_command()
+    fd, path = tempfile.mkstemp(suffix=suffix)
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(initial)
+        try:
+            rc = subprocess.call(cmd + [path])
+        except FileNotFoundError:
+            print(f"error: editor not found: {' '.join(cmd)}", file=sys.stderr)
+            return None
+        if rc != 0:
+            return None
+        with open(path) as f:
+            return f.read()
+    finally:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+
+def parse_story_edit_template(content: str) -> tuple[str, str]:
+    """Parse the ``story edit`` template: line 1 = name, blank line, rest = desc.
+
+    Args:
+        content: The full text returned from the editor.
+    Returns:
+        (name, description) — description may be "" and may span multiple lines.
+    Raises:
+        ValidationError: if the name (first non-empty line) is empty.
+    """
+    lines = content.splitlines()
+    # Drop a single leading blank line so the user can leave line 1 empty safely.
+    while lines and not lines[0].strip():
+        lines.pop(0)
+    if not lines or not lines[0].strip():
+        raise errors.ValidationError("name is required (first line of the edit buffer)")
+    name = lines[0].strip()
+    rest = lines[1:]
+    # Drop one separating blank line between name and description.
+    if rest and not rest[0].strip():
+        rest = rest[1:]
+    description = "\n".join(rest).strip()
+    return name, description
+
+
+# --------------------------------------------------------------------------- #
 # Text formatters
 # --------------------------------------------------------------------------- #
 
@@ -363,6 +432,17 @@ def h_story_update(conn, a):
     if a.deadline is not None: fields["deadline"] = a.deadline
     if a.position is not None: fields["position"] = a.position
     return stories.update_story(conn, int(a.id), **fields)
+
+
+def h_story_edit(conn, a):
+    """Handle ``story edit``; open $EDITOR on name+description and update them."""
+    s = stories.get_story(conn, int(a.id))
+    template = f"{s.name}\n\n{s.description}\n"
+    content = edit_text(template, suffix=".md")
+    if content is None:
+        return {"aborted": "story edit", "id": int(a.id)}
+    name, description = parse_story_edit_template(content)
+    return stories.update_story(conn, int(a.id), name=name, description=description)
 
 
 def h_story_move(conn, a):
@@ -536,8 +616,19 @@ def h_task_list(conn, a):
     """Handle ``task list``; return tasks for a story."""
     return tasks.list_tasks(conn, int(a.story))
 def h_task_add(conn, a):
-    """Handle ``task add``; create a task on a story and return it."""
-    return tasks.create_task(conn, int(a.story), a.desc, complete=a.complete)
+    """Handle ``task add``; create a task on a story and return it.
+
+    With no ``--desc``, opens $EDITOR for the task description.
+    """
+    desc = a.desc
+    if desc is None:
+        desc = edit_text("", suffix=".md")
+        if desc is None:
+            return {"aborted": "task add", "story": int(a.story)}
+        desc = desc.strip()
+    if not desc:
+        raise errors.ValidationError("task description is required")
+    return tasks.create_task(conn, int(a.story), desc, complete=a.complete)
 def h_task_update(conn, a):
     """Handle ``task update``; map provided flags to fields and return the task."""
     fields = {k: v for k, v in dict(description=a.desc, complete=1 if a.complete else 0 if a.complete is False else None,
@@ -556,8 +647,20 @@ def h_comment_list(conn, a):
     """Handle ``comment list``; return comments for a story."""
     return comments.list_comments(conn, int(a.story))
 def h_comment_add(conn, a):
-    """Handle ``comment add``; create a comment (optionally threaded) and return it."""
-    return comments.create_comment(conn, int(a.story), a.text, author_id=_opt_id(conn, a.author, resolve_member),
+    """Handle ``comment add``; create a comment (optionally threaded) and return it.
+
+    With no ``--text``, opens $EDITOR for the comment body.
+    """
+    text = a.text
+    if text is None:
+        text = edit_text("", suffix=".md")
+        if text is None:
+            return {"aborted": "comment add", "story": int(a.story)}
+        text = text.strip()
+    if not text:
+        raise errors.ValidationError("comment text is required")
+    return comments.create_comment(conn, int(a.story), text,
+                                    author_id=_opt_id(conn, a.author, resolve_member),
                                     parent_id=int(a.parent) if a.parent else None)
 def h_comment_update(conn, a):
     """Handle ``comment update``; update comment text and return it."""
@@ -638,6 +741,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--type", choices=list(stories.STORY_TYPES))
     p.add_argument("--position", type=float)
     p.set_defaults(func=h_story_update, fmt=_fmt_one)
+    p = _sp(asp, "edit"); _id_arg(p)
+    p.set_defaults(func=h_story_edit, fmt=_fmt_one)
     p = _sp(asp, "move"); _id_arg(p); p.add_argument("--state", required=True)
     p.set_defaults(func=h_story_move, fmt=_fmt_one)
     p = _sp(asp, "assign"); _id_arg(p); p.add_argument("--owner", required=True)
@@ -783,7 +888,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("task", parents=[COMMON])
     asp = sp.add_subparsers(dest="action", required=True)
     p = _sp(asp, "list"); p.add_argument("--story", required=True); p.set_defaults(func=h_task_list, fmt=lambda c, v: _fmt_list_simple(v, ["id", "description", "complete", "position", "completed_at"]))
-    p = _sp(asp, "add"); p.add_argument("--story", required=True); p.add_argument("--desc", required=True)
+    p = _sp(asp, "add"); p.add_argument("--story", required=True); p.add_argument("--desc", help="task description (opens $EDITOR if omitted)")
     p.add_argument("--complete", action="store_true"); p.set_defaults(func=h_task_add, fmt=_fmt_one)
     p = _sp(asp, "update"); _id_arg(p); p.add_argument("--desc"); p.add_argument("--complete", dest="complete", action="store_true", default=None)
     p.add_argument("--no-complete", dest="complete", action="store_false"); p.add_argument("--position", type=float)
@@ -797,7 +902,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("comment", parents=[COMMON])
     asp = sp.add_subparsers(dest="action", required=True)
     p = _sp(asp, "list"); p.add_argument("--story", required=True); p.set_defaults(func=h_comment_list, fmt=lambda c, v: _fmt_list_simple(v, ["id", "story_id", "author_id", "text", "parent_id", "created_at"]))
-    p = _sp(asp, "add"); p.add_argument("--story", required=True); p.add_argument("--text", required=True)
+    p = _sp(asp, "add"); p.add_argument("--story", required=True); p.add_argument("--text", help="comment text (opens $EDITOR if omitted)")
     p.add_argument("--author"); p.add_argument("--parent", type=int); p.set_defaults(func=h_comment_add, fmt=_fmt_one)
     p = _sp(asp, "update"); _id_arg(p); p.add_argument("--text", required=True); p.set_defaults(func=h_comment_update, fmt=_fmt_one)
     p = _sp(asp, "delete"); _id_arg(p)

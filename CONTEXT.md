@@ -219,6 +219,11 @@ Naming: `list_*`, `get_*`, `create_*`, `update_*`, `delete_*`, plus `search_*`. 
   - `main.py task add --story 42 --desc "Write tests"`
   - `main.py comment add --story 42 --text "..."`
   - `main.py search "login bug"`
+- `$EDITOR` flow for long-form text: `story edit <id>` opens `$VISUAL`/`$EDITOR`
+  (fallback `vi`) on a buffer of `name`/blank/`description` and updates them;
+  `comment add` and `task add` with no `--text`/`--desc` open the editor for the
+  body. A non-zero editor exit aborts with no change. `--text`/`--desc` still
+  work for the non-editor path.
 - Use `argparse` subparsers. Resource = subparser group, action = nested subparser.
 - Output is plain text / simple tables (stdlib only — no rich dependency required unless
   chosen). Keep it greppable and agent-friendly (stable, parseable output).

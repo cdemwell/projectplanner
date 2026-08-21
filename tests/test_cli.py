@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sys
 
 import pytest
 
@@ -17,6 +18,24 @@ def run_cli(db_path, capsys):
         out, err = capsys.readouterr()
         return rc, out, err
     return _invoke
+
+
+@pytest.fixture
+def fake_editor(monkeypatch, tmp_path):
+    """Provide a fake $EDITOR that writes $EDITOR_CONTENT to the temp file.
+
+    Returns a callable ``set_content(text)``. ``VISUAL`` is cleared so ``EDITOR``
+    is used.
+    """
+    monkeypatch.delenv("VISUAL", raising=False)
+    script = tmp_path / "fake_editor.py"
+    script.write_text(
+        'import os, sys\nopen(sys.argv[1], "w").write(os.environ.get("EDITOR_CONTENT", ""))\n')
+    monkeypatch.setenv("EDITOR", f"{sys.executable} {script}")
+
+    def set_content(content: str) -> None:
+        monkeypatch.setenv("EDITOR_CONTENT", content)
+    return set_content
 
 
 def test_text_and_json_create(run_cli):
@@ -122,3 +141,44 @@ def test_ambiguous_name_error(run_cli):
     rc, out, err = run_cli("story", "create", "--name", "x", "--labels", "auth")
     assert rc == 1
     assert "ambiguous" in err
+
+
+# --- $EDITOR flow --------------------------------------------------------- #
+def test_comment_add_via_editor(run_cli, fake_editor):
+    run_cli("story", "create", "--name", "x")
+    fake_editor("editor body")
+    rc, out, err = run_cli("--json", "comment", "add", "--story", "1")
+    assert rc == 0, err
+    rc, out, err = run_cli("--json", "comment", "list", "--story", "1")
+    arr = json.loads(out)
+    assert arr[0]["text"] == "editor body"
+
+
+def test_task_add_via_editor(run_cli, fake_editor):
+    run_cli("story", "create", "--name", "x")
+    fake_editor("do the thing")
+    rc, out, err = run_cli("--json", "task", "add", "--story", "1")
+    assert rc == 0, err
+    rc, out, err = run_cli("--json", "task", "list", "--story", "1")
+    arr = json.loads(out)
+    assert arr[0]["description"] == "do the thing"
+
+
+def test_story_edit_via_editor(run_cli, fake_editor):
+    run_cli("story", "create", "--name", "old", "--desc", "olddesc")
+    fake_editor("new name\n\nnew desc")
+    rc, out, err = run_cli("--json", "story", "edit", "1")
+    assert rc == 0, err
+    s = json.loads(out)
+    assert s["name"] == "new name"
+    assert s["description"] == "new desc"
+
+
+def test_story_edit_abort(run_cli, monkeypatch):
+    """A non-zero editor exit aborts the edit (no change), exit 0."""
+    monkeypatch.delenv("VISUAL", raising=False)
+    monkeypatch.setenv("EDITOR", f'{sys.executable} -c "import sys; sys.exit(1)"')
+    run_cli("story", "create", "--name", "x")
+    rc, out, err = run_cli("--json", "story", "edit", "1")
+    assert rc == 0
+    assert json.loads(out) == {"aborted": "story edit", "id": 1}
