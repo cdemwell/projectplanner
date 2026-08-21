@@ -8,3 +8,12 @@ dependencies = [
     # Backend + CLI are stdlib-only; Textual is used only by the TUI.
     "textual>=0.80",
 ]
+
+[project.optional-dependencies]
+# Backend + CLI tests need pytest; TUI tests also need textual (already above).
+dev = [
+    "pytest>=8",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

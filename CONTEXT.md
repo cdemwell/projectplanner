@@ -246,8 +246,11 @@ Naming: `list_*`, `get_*`, `create_*`, `update_*`, `delete_*`, plus `search_*`. 
 ## 11. Dependencies
 
 - **Stdlib only for the backend + CLI:** `sqlite3`, `argparse`, `dataclasses`, `datetime`.
-- TUI: `textual>=0.80` (declared in `pyproject.toml`).
-- No dev/test deps required to start; add `pytest` when tests are written.
+- TUI: `textual>=0.80` (declared in `pyproject.toml` `dependencies`).
+- Tests: `pytest>=8` (declared in `pyproject.toml` `[project.optional-dependencies] dev`).
+  Run with `.venv/bin/python -m pytest -q` (81 tests; fresh temp DB per test).
+  TUI tests use Textual's headless `App.run_test()` pilot and are skipped if
+  `textual` isn't installed.
 
 ## 12. First-run / seeding (`backend/db.py`)
 

@@ -50,21 +50,22 @@ search them — all from the command line, against a local file.
 | # | Section | Lines |
 |---|---------|-------|
 | 1 | [Executive Summary](#executive-summary) | 18–47 |
-| 2 | [Table of Contents](#table-of-contents) | 48–70 |
-| 3 | [Intent & Design Goals](#intent--design-goals) | 71–96 |
-| 4 | [Requirements & Setup](#requirements--setup) | 97–120 |
-| 5 | [Quick Start](#quick-start) | 121–147 |
-| 6 | [Running the Tool: CLI vs TUI](#running-the-tool-cli-vs-tui) | 148–170 |
-| 7 | [CLI Conventions](#cli-conventions) | 171–213 |
-| 8 | [CLI Reference](#cli-reference) | 214–288 |
-| 9 | [AI Agent Guide: Using the CLI During Development](#ai-agent-guide-using-the-cli-during-development) | 289–403 |
-| 10 | [Data Model](#data-model) | 404–455 |
-| 11 | [Architecture & Concurrency](#architecture--concurrency) | 456–490 |
-| 12 | [Storage & Schema](#storage--schema) | 491–509 |
-| 13 | [Exit Codes & Errors](#exit-codes--errors) | 510–528 |
-| 14 | [Examples & Recipes](#examples--recipes) | 529–562 |
-| 15 | [Non-goals & Differences from Shortcut](#non-goals--differences-from-shortcut) | 563–577 |
-| 16 | [Further Reading](#further-reading) | 578–586 |
+| 2 | [Table of Contents](#table-of-contents) | 48–71 |
+| 3 | [Intent & Design Goals](#intent--design-goals) | 72–97 |
+| 4 | [Requirements & Setup](#requirements--setup) | 98–121 |
+| 5 | [Quick Start](#quick-start) | 122–148 |
+| 6 | [Running the Tool: CLI vs TUI](#running-the-tool-cli-vs-tui) | 149–171 |
+| 7 | [CLI Conventions](#cli-conventions) | 172–214 |
+| 8 | [CLI Reference](#cli-reference) | 215–289 |
+| 9 | [AI Agent Guide: Using the CLI During Development](#ai-agent-guide-using-the-cli-during-development) | 290–404 |
+| 10 | [Data Model](#data-model) | 405–456 |
+| 11 | [Architecture & Concurrency](#architecture--concurrency) | 457–491 |
+| 12 | [Storage & Schema](#storage--schema) | 492–510 |
+| 13 | [Exit Codes & Errors](#exit-codes--errors) | 511–529 |
+| 14 | [Examples & Recipes](#examples--recipes) | 530–563 |
+| 15 | [Non-goals & Differences from Shortcut](#non-goals--differences-from-shortcut) | 564–578 |
+| 16 | [Tests](#tests) | 579–611 |
+| 17 | [Further Reading](#further-reading) | 612–620 |
 
 ---
 
@@ -572,6 +573,39 @@ python main.py comment add --story 17 --text "agreed, see PR #42" --parent 5
 - **No caching, async, or server.** In-process library + two front-ends.
 - **Trimmed shapes.** Field/entity *names* are Shortcut-flavored where carried,
   but JSON shapes are our own, not Shortcut's.
+
+---
+
+## Tests
+
+The test suite uses [pytest](https://docs.pytest.org) with a fresh temp
+database per test (via `tmp_path`), so tests are isolated and need no manual
+setup.
+
+```bash
+.venv/bin/pip install pytest          # one-time (or: pip install -e '.[dev]')
+.venv/bin/python -m pytest -q
+```
+
+Coverage:
+
+- `tests/test_db.py` — connect/migrate/seed idempotency, pragmas, FTS tables +
+  triggers, `tx_write` commit/rollback.
+- `tests/test_stories.py` — story CRUD, `completed_at` automation, position
+  defaults, all `list_stories` filters, `StoryDetail` shape, owner/label
+  helpers, delete cascade, SET NULL on parent delete.
+- `tests/test_parents.py` — epics/milestones/iterations `completed_at` and
+  filters; project/group archive; label/member/workflow CRUD + state rules.
+- `tests/test_tasks.py`, `test_comments.py`, `test_story_links.py` — child
+  entities, threading, verb/self-link/UNIQUE rules, cascade.
+- `tests/test_search.py` — FTS5 insert/update/delete sync, entity filter,
+  ranking, boolean/prefix, error cases.
+- `tests/test_cli.py` — `run()` with `--json` shapes, name resolution +
+  ambiguity, `--state` by id/name/type, exit codes (1 backend, 2 argparse).
+- `tests/test_tui.py` — headless Textual pilot (create/toggle/search/comment/
+  delete); skipped if `textual` isn't installed.
+- `tests/test_concurrency.py` — two writers serialize (the second blocks until
+  the first commits).
 
 ---
 
