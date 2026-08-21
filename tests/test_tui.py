@@ -179,3 +179,37 @@ def test_tui_task_action_toggle_and_edit(db_path):
             assert getattr(app, "_exception", None) is None
             await pilot.press("q")
     _run(main())
+
+
+def test_tui_manage_owners_and_labels(db_path):
+    """'o' and 'l' modals toggle owners and labels on the selected story."""
+    from backend import db
+    from backend import labels as labels_mod
+    from backend import stories as stories_mod
+
+    c = db.connect(db_path)
+    s = stories_mod.create_story(c, "x")
+    labels_mod.create_label(c, "auth")
+    c.close()
+
+    async def main():
+        app = PlannerApp(db_path)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            app.query_one("#stories").move_cursor(row=0); await pilot.pause()
+
+            # add an owner via 'o' (first member is the seeded user)
+            await pilot.press("o"); await pilot.pause()
+            app.screen.query_one("#toggle", Button).focus(); await pilot.pause()
+            await pilot.press("enter"); await pilot.pause(0.05); await pilot.pause()
+            assert len(stories_mod.list_owners(app.conn, s.id)) == 1
+
+            # add a label via 'l' (first label is "auth")
+            await pilot.press("l"); await pilot.pause()
+            app.screen.query_one("#toggle", Button).focus(); await pilot.pause()
+            await pilot.press("enter"); await pilot.pause(0.05); await pilot.pause()
+            assert len(stories_mod.list_story_labels(app.conn, s.id)) == 1
+
+            assert getattr(app, "_exception", None) is None
+            await pilot.press("q")
+    _run(main())

@@ -39,6 +39,7 @@ from backend import (
     errors,
     groups,
     iterations,
+    labels,
     members,
     projects,
     stories,
@@ -473,6 +474,122 @@ class TaskActionScreen(ModalScreen[bool]):
         self.dismiss(None)
 
 
+class OwnerScreen(ModalScreen[bool]):
+    """Toggle a member's ownership of the selected story.
+
+    Lists every member, marking current owners. "Toggle" adds the selected
+    member if they aren't an owner, or removes them if they are.
+
+    Dismisses with:
+        bool: True if a change was made, None on cancel/Done.
+    """
+
+    def __init__(self, conn: sqlite3.Connection, story_id: int) -> None:
+        super().__init__()
+        self.conn = conn
+        self.story_id = story_id
+
+    def _owner_ids(self) -> set[int]:
+        return {o.id for o in stories.list_owners(self.conn, self.story_id)}
+
+    def compose(self) -> ComposeResult:
+        ids = self._owner_ids()
+        opts = [(f"{m.name}{' (owner)' if m.id in ids else ''}", m.id)
+                for m in members.list_members(self.conn)]
+        if not opts:
+            opts = [("(no members)", _NONE_INT)]
+        yield Vertical(
+            Static("Manage owners", classes="modal-title"),
+            Select(opts, value=opts[0][1], id="o-member"),
+            Horizontal(Button("Toggle", id="toggle", variant="primary"), Button("Done", id="cancel")),
+            Label("", id="o-status", classes="err"),
+            classes="modal-box",
+        )
+
+    def on_mount(self) -> None:
+        self.query_one("#o-member", Select).focus()
+
+    @on(Button.Pressed, "#toggle")
+    def _toggle(self) -> None:
+        mid = _sel(self.query_one("#o-member", Select).value)
+        if mid is None:
+            return
+        name = self.name_of_member(mid)
+        if mid in self._owner_ids():
+            stories.remove_owner(self.conn, self.story_id, mid)
+            self.query_one("#o-status", Label).update(f"Removed owner: {name}")
+        else:
+            stories.assign_owner(self.conn, self.story_id, mid)
+            self.query_one("#o-status", Label).update(f"Added owner: {name}")
+        self.dismiss(True)
+
+    def name_of_member(self, mid: int) -> str:
+        row = self.conn.execute('SELECT name FROM "member" WHERE id = ?', (mid,)).fetchone()
+        return row["name"] if row else str(mid)
+
+    @on(Button.Pressed, "#cancel")
+    def _done(self) -> None:
+        self.dismiss(None)
+
+
+class LabelScreen(ModalScreen[bool]):
+    """Toggle a label on the selected story.
+
+    Lists every label, marking those already applied. "Toggle" adds or removes
+    the selected label.
+
+    Dismisses with:
+        bool: True if a change was made, None on cancel/Done.
+    """
+
+    def __init__(self, conn: sqlite3.Connection, story_id: int) -> None:
+        super().__init__()
+        self.conn = conn
+        self.story_id = story_id
+
+    def _label_ids(self) -> set[int]:
+        return {lb.id for lb in stories.list_story_labels(self.conn, self.story_id)}
+
+    def compose(self) -> ComposeResult:
+        ids = self._label_ids()
+        opts = [(f"{lb.name}{' (on)' if lb.id in ids else ''}", lb.id)
+                for lb in labels.list_labels(self.conn)]
+        if not opts:
+            opts = [("(no labels)", _NONE_INT)]
+        yield Vertical(
+            Static("Manage labels", classes="modal-title"),
+            Select(opts, value=opts[0][1], id="lb-label"),
+            Horizontal(Button("Toggle", id="toggle", variant="primary"), Button("Done", id="cancel")),
+            Label("", id="lb-status", classes="err"),
+            classes="modal-box",
+        )
+
+    def on_mount(self) -> None:
+        self.query_one("#lb-label", Select).focus()
+
+    @on(Button.Pressed, "#toggle")
+    def _toggle(self) -> None:
+        lid = _sel(self.query_one("#lb-label", Select).value)
+        if lid is None:
+            return
+        name = self.name_of_label(lid)
+        if lid in self._label_ids():
+            stories.remove_label(self.conn, self.story_id, lid)
+            self.query_one("#lb-status", Label).update(f"Removed label: {name}")
+        else:
+            stories.add_label(self.conn, self.story_id, lid)
+            self.query_one("#lb-status", Label).update(f"Added label: {name}")
+        self.dismiss(True)
+
+    def name_of_label(self, lid: int) -> str:
+        row = self.conn.execute('SELECT name FROM "label" WHERE id = ?', (lid,)).fetchone()
+        return row["name"] if row else str(lid)
+
+    @on(Button.Pressed, "#cancel")
+    def _done(self) -> None:
+        self.dismiss(None)
+
+
 # --------------------------------------------------------------------------- #
 # Main app
 # --------------------------------------------------------------------------- #
@@ -501,6 +618,8 @@ class PlannerApp(App):
         Binding("c", "add_comment", "Comment"),
         Binding("t", "add_task", "Task"),
         Binding("x", "task_action", "Task⇄"),
+        Binding("o", "manage_owners", "Owners"),
+        Binding("l", "manage_labels", "Labels"),
         Binding("f", "filter", "Filter"),
         Binding("slash", "search", "Search"),  # '/'
         Binding("r", "refresh", "Refresh"),
@@ -740,6 +859,24 @@ class PlannerApp(App):
             self.bell()
             return
         self.push_screen(TaskActionScreen(self.conn, sid),
+                         lambda changed: self.show_current_detail() if changed else None)
+
+    def action_manage_owners(self) -> None:
+        """Open modal to add/remove owners on the selected story."""
+        sid = self._current_story_id()
+        if sid is None or self.conn is None:
+            self.bell()
+            return
+        self.push_screen(OwnerScreen(self.conn, sid),
+                         lambda changed: self.show_current_detail() if changed else None)
+
+    def action_manage_labels(self) -> None:
+        """Open modal to add/remove labels on the selected story."""
+        sid = self._current_story_id()
+        if sid is None or self.conn is None:
+            self.bell()
+            return
+        self.push_screen(LabelScreen(self.conn, sid),
                          lambda changed: self.show_current_detail() if changed else None)
 
     def _do_comment(self, sid: int, text: str | None) -> None:
