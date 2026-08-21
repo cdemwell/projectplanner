@@ -389,6 +389,71 @@ class ConfirmScreen(ModalScreen[bool]):
         self.dismiss(False)
 
 
+class TaskActionScreen(ModalScreen[bool]):
+    """Toggle completion or edit the description of a task on a story.
+
+    The task is chosen from a Select of the story's tasks. "Toggle" flips
+    ``complete`` (stamping/clearing ``completed_at``); "Save Desc" updates the
+    description from the TextArea.
+
+    Dismisses with:
+        bool: True if a change was made, None on cancel.
+    """
+
+    def __init__(self, conn: sqlite3.Connection, story_id: int) -> None:
+        super().__init__()
+        self.conn = conn
+        self.story_id = story_id
+
+    def compose(self) -> ComposeResult:
+        opts = [(f"[{'x' if t.complete else ' '}] #{t.id} {t.description}", t.id)
+                for t in tasks.list_tasks(self.conn, self.story_id)]
+        if not opts:
+            opts = [("(no tasks)", _NONE_INT)]
+        yield Vertical(
+            Static("Task actions", classes="modal-title"),
+            Label("Task:"), Select(opts, value=opts[0][1], id="ta-task"),
+            Label("New description:"), TextArea(id="ta-desc"),
+            Horizontal(Button("Toggle", id="toggle", variant="primary"),
+                       Button("Save Desc", id="save"), Button("Cancel", id="cancel")),
+            Label("", id="ta-err", classes="err"),
+            classes="modal-box",
+        )
+
+    def on_mount(self) -> None:
+        self.query_one("#ta-task", Select).focus()
+
+    def _task_id(self) -> int | None:
+        return _sel(self.query_one("#ta-task", Select).value)
+
+    @on(Button.Pressed, "#toggle")
+    def _toggle(self) -> None:
+        tid = self._task_id()
+        if tid is None:
+            self.query_one("#ta-err", Label).update("No task to toggle.")
+            return
+        t = tasks.get_task(self.conn, tid)
+        tasks.complete_task(self.conn, tid, complete=not bool(t.complete))
+        self.dismiss(True)
+
+    @on(Button.Pressed, "#save")
+    def _save(self) -> None:
+        tid = self._task_id()
+        if tid is None:
+            self.query_one("#ta-err", Label).update("No task to edit.")
+            return
+        desc = self.query_one("#ta-desc", TextArea).text.strip()
+        if not desc:
+            self.query_one("#ta-err", Label).update("Description is required.")
+            return
+        tasks.update_task(self.conn, tid, description=desc)
+        self.dismiss(True)
+
+    @on(Button.Pressed, "#cancel")
+    def _cancel(self) -> None:
+        self.dismiss(None)
+
+
 # --------------------------------------------------------------------------- #
 # Main app
 # --------------------------------------------------------------------------- #
@@ -416,6 +481,7 @@ class PlannerApp(App):
         Binding("m", "move_state", "Move"),
         Binding("c", "add_comment", "Comment"),
         Binding("t", "add_task", "Task"),
+        Binding("x", "task_action", "Task⇄"),
         Binding("f", "filter", "Filter"),
         Binding("slash", "search", "Search"),  # '/'
         Binding("r", "refresh", "Refresh"),
@@ -558,6 +624,15 @@ class PlannerApp(App):
                 log.write(f"  [{'x' if t.complete else ' '}] #{t.id} {t.description}")
         else:
             log.write("  (none)")
+        log.write("comments:")
+        cms = comments.list_comments(self.conn, sid)
+        if cms:
+            for cm in cms:
+                author = self.name_of("member", cm.author_id) if cm.author_id else "-"
+                indent = "    " if cm.parent_id else "  "
+                log.write(f"{indent}#{cm.id} {author}: {cm.text}")
+        else:
+            log.write("  (none)")
         if s.completed_at:
             log.write(f"[green]completed: {s.completed_at}[/green]")
 
@@ -638,6 +713,15 @@ class PlannerApp(App):
             return
         self.push_screen(TextScreen("Add task"),
                          lambda text: self._do_task(sid, text))
+
+    def action_task_action(self) -> None:
+        """Open modal to toggle completion or edit a task on the selected story."""
+        sid = self._current_story_id()
+        if sid is None or self.conn is None:
+            self.bell()
+            return
+        self.push_screen(TaskActionScreen(self.conn, sid),
+                         lambda changed: self.show_current_detail() if changed else None)
 
     def _do_comment(self, sid: int, text: str | None) -> None:
         if not text or not text.strip() or self.conn is None:

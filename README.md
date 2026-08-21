@@ -161,9 +161,9 @@ python main.py search "login OR auth"
 | `n` | new story | | `f` | filter (project/state) |
 | `u` | update story | | `/` | search |
 | `m` | move state | | `e` | toggle complete |
-| `c` | add comment | | `d` | delete story |
-| `t` | add task | | `r` | refresh |
-| `q` | quit | | | |
+| `c` | add comment | | `x` | task toggle/edit |
+| `t` | add task | | `d` | delete story |
+| `r` | refresh | | `q` | quit |
 
 The TUI shares the exact same backend functions as the CLI — there is no
 separate data layer.

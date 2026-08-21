@@ -138,3 +138,37 @@ def test_tui_edit_story_renames_and_clears_project(db_path):
             assert getattr(app, "_exception", None) is None
             await pilot.press("q")
     _run(main())
+
+
+def test_tui_task_action_toggle_and_edit(db_path):
+    """The 'x' task-action modal toggles completion and edits a description."""
+    from backend import db, stories as stories_mod, tasks as tasks_mod
+    from textual.widgets import Select, TextArea
+
+    c = db.connect(db_path)
+    s = stories_mod.create_story(c, "x")
+    t = tasks_mod.create_task(c, s.id, "write tests")
+    c.close()
+
+    async def main():
+        app = PlannerApp(db_path)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            app.query_one("#stories").move_cursor(row=0); await pilot.pause()
+
+            # toggle the task complete via 'x' -> Toggle
+            await pilot.press("x"); await pilot.pause()
+            app.screen.query_one("#toggle", Button).focus(); await pilot.pause()
+            await pilot.press("enter"); await pilot.pause(0.05); await pilot.pause()
+            assert tasks_mod.get_task(app.conn, t.id).complete == 1
+
+            # edit the task description via 'x' -> set desc -> Save Desc
+            await pilot.press("x"); await pilot.pause()
+            app.screen.query_one("#ta-desc", TextArea).text = "write unit tests"
+            app.screen.query_one("#save", Button).focus(); await pilot.pause()
+            await pilot.press("enter"); await pilot.pause(0.05); await pilot.pause()
+            assert tasks_mod.get_task(app.conn, t.id).description == "write unit tests"
+
+            assert getattr(app, "_exception", None) is None
+            await pilot.press("q")
+    _run(main())
