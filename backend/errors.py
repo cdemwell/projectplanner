@@ -9,7 +9,14 @@ from __future__ import annotations
 
 
 class PlannerError(Exception):
-    """Base class for all backend errors."""
+    """Base class for all backend errors.
+
+    All backend errors derive from this class so callers can catch them
+    collectively.
+
+    Attributes:
+        message: str — a human-readable explanation of the error.
+    """
 
     def __init__(self, message: str = ""):
         super().__init__(message)
@@ -20,7 +27,12 @@ class PlannerError(Exception):
 
 
 class NotFound(PlannerError):
-    """A referenced entity does not exist."""
+    """Raised when a referenced entity does not exist in the database.
+
+    Attributes:
+        resource: str — the name of the entity type (e.g. 'Story').
+        id: object — the identifier of the missing entity.
+    """
 
     def __init__(self, resource: str, id: object):
         self.resource = resource
@@ -29,8 +41,8 @@ class NotFound(PlannerError):
 
 
 class ValidationError(PlannerError):
-    """Invalid arguments or a CHECK/constraint violation."""
+    """Raised on invalid arguments or a database CHECK/constraint violation."""
 
 
 class Conflict(PlannerError):
-    """A uniqueness or state conflict (e.g. a duplicate story link)."""
+    """Raised on uniqueness or state conflicts, such as duplicate story links."""

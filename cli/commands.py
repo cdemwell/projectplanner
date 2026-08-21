@@ -27,6 +27,16 @@ from backend import (db, errors, members, groups, workflows, projects, labels,
 # --------------------------------------------------------------------------- #
 
 def _jsonable(x: Any) -> Any:
+    """Convert a backend return value into a JSON-serializable structure.
+
+    Recurses through lists/tuples; dataclasses use ``to_dict`` when available
+    (e.g. ``StoryDetail``), else ``dataclasses.asdict``.
+
+    Args:
+        x: A backend value (dataclass, list of dataclasses, dict, or scalar).
+    Returns:
+        A JSON-serializable representation of ``x``.
+    """
     if isinstance(x, (list, tuple)):
         return [_jsonable(i) for i in x]
     if dataclasses.is_dataclass(x):
@@ -37,6 +47,12 @@ def _jsonable(x: Any) -> Any:
 
 
 def _print_table(rows: list[dict], columns: list[str]) -> None:
+    """Print a list of dicts as a left-justified text table (or ``(none)``).
+
+    Args:
+        rows: Row dicts (only ``columns`` keys are shown).
+        columns: Column order to display.
+    """
     if not rows:
         print("(none)")
         return
@@ -50,12 +66,20 @@ def _print_table(rows: list[dict], columns: list[str]) -> None:
 
 
 def _print_kv(d: dict) -> None:
+    """Print a dict as ``key: value`` lines (used for single-entity detail)."""
     for k, v in d.items():
         print(f"{k}: {v}")
 
 
 def emit(args: argparse.Namespace, value: Any, *, text_fn=None) -> None:
-    """Render ``value`` as JSON (``--json``) or via ``text_fn`` (default: tables)."""
+    """Render ``value`` as JSON (``--json``) or via ``text_fn`` (default: tables).
+
+    Args:
+        args: Namespace; ``args.json`` selects JSON output.
+        value: The backend return value to render.
+        text_fn: Optional ``(conn, value)`` text formatter. If absent and not
+            JSON, a list of dicts is printed as a table, else as JSON.
+    """
     if getattr(args, "json", False):
         print(_json.dumps(_jsonable(value), indent=2, default=str))
     elif text_fn is not None:
@@ -75,11 +99,26 @@ def emit(args: argparse.Namespace, value: Any, *, text_fn=None) -> None:
 # --------------------------------------------------------------------------- #
 
 def _looks_like_id(val: Any) -> bool:
+    """True if ``val`` is a string that parses as an integer (a bare id)."""
     return isinstance(val, str) and val.strip().lstrip("-").isdigit()
 
 
 def _resolve_named(conn, table: str, val: Any, *, entity: str,
                    cols=("name",)) -> int:
+    """Resolve a human name (case-insensitive) or a bare id to a row id.
+
+    Args:
+        conn: sqlite3.Connection.
+        table: Table to search (identifier is quoted via ``_util._q``).
+        val: A name to look up, or a numeric id string.
+        entity: Entity label for error messages.
+        cols: Columns to match against (e.g. ``("name", "mention_name")``).
+    Returns:
+        The resolved integer id.
+    Raises:
+        NotFound: if no row matches the name.
+        ValidationError: if the name matches more than one row (ambiguous).
+    """
     if _looks_like_id(val):
         return int(val)
     cond = " OR ".join(f"LOWER({c}) = LOWER(?)" for c in cols)
@@ -93,21 +132,45 @@ def _resolve_named(conn, table: str, val: Any, *, entity: str,
     return rows[0][0]
 
 
-def resolve_project(conn, v): return _resolve_named(conn, "project", v, entity="project")
-def resolve_epic(conn, v):     return _resolve_named(conn, "epic", v, entity="epic")
-def resolve_iteration(conn, v): return _resolve_named(conn, "iteration", v, entity="iteration")
-def resolve_milestone(conn, v): return _resolve_named(conn, "milestone", v, entity="milestone")
-def resolve_group(conn, v):    return _resolve_named(conn, "group", v, entity="group")
-def resolve_label(conn, v):    return _resolve_named(conn, "label", v, entity="label")
-def resolve_member(conn, v):   return _resolve_named(conn, "member", v, entity="member",
-                                                    cols=("name", "mention_name"))
+def resolve_project(conn, v):   # noqa: E701
+    """Resolve a project by name (case-insensitive) or id."""
+    return _resolve_named(conn, "project", v, entity="project")
+def resolve_epic(conn, v):
+    """Resolve an epic by name (case-insensitive) or id."""
+    return _resolve_named(conn, "epic", v, entity="epic")
+def resolve_iteration(conn, v):
+    """Resolve an iteration by name (case-insensitive) or id."""
+    return _resolve_named(conn, "iteration", v, entity="iteration")
+def resolve_milestone(conn, v):
+    """Resolve a milestone by name (case-insensitive) or id."""
+    return _resolve_named(conn, "milestone", v, entity="milestone")
+def resolve_group(conn, v):
+    """Resolve a group by name (case-insensitive) or id."""
+    return _resolve_named(conn, "group", v, entity="group")
+def resolve_label(conn, v):
+    """Resolve a label by name (case-insensitive) or id."""
+    return _resolve_named(conn, "label", v, entity="label")
+def resolve_member(conn, v):
+    """Resolve a member by name or mention_name (case-insensitive) or id."""
+    return _resolve_named(conn, "member", v, entity="member",
+                          cols=("name", "mention_name"))
 
 
 def resolve_workflow_state(conn, val: Any) -> int:
     """Resolve a state by id, by name, or by type ('unstarted'/'started'/'done').
 
-    By-type falls back to the first state of that type, so ``--state done``
-    works against the seeded default workflow.
+    Resolution order: numeric id → unique state name (case-insensitive) →
+    state type (first state of that type). By-type lets ``--state done`` work
+    against the seeded default workflow.
+
+    Args:
+        conn: sqlite3.Connection.
+        val: An id, a state name, or a state type.
+    Returns:
+        The resolved state id.
+    Raises:
+        NotFound: if nothing matches.
+        ValidationError: if the name matches more than one state.
     """
     if _looks_like_id(val):
         return int(val)
@@ -129,12 +192,17 @@ def resolve_workflow_state(conn, val: Any) -> int:
 
 
 def _split_csv(val: str | None) -> list[str] | None:
+    """Split a comma-separated string into trimmed, non-empty parts (or None)."""
     if val is None:
         return None
     return [p.strip() for p in val.split(",") if p.strip()]
 
 
 def _opt_id(conn, val, resolver):
+    """Resolve ``val`` via ``resolver`` only when it is not None; else return None.
+
+    Used for optional ``--project``/``--owner``/etc. flags.
+    """
     return resolver(conn, val) if val is not None else None
 
 
@@ -143,6 +211,17 @@ def _opt_id(conn, val, resolver):
 # --------------------------------------------------------------------------- #
 
 def _story_rows(conn, items) -> list[dict]:
+    """Build text-table row dicts for a list of stories, resolving names.
+
+    State, project, and owners are looked up by id so the table is human-readable
+    while stories themselves are still referenced by id.
+
+    Args:
+        conn: sqlite3.Connection.
+        items: list[Story] to render.
+    Returns:
+        list[dict] with keys id, name, type, state, project, owners, done.
+    """
     rows = []
     for s in items:
         state = ""
@@ -165,22 +244,30 @@ def _story_rows(conn, items) -> list[dict]:
 
 
 def _fmt_stories(conn, items):
+    """Text formatter for ``story list`` / ``epic stories`` / etc."""
     _print_table(_story_rows(conn, items),
                  ["id", "name", "type", "state", "project", "owners", "done"])
 
 
 def _fmt_one(conn, obj):
+    """Text formatter for a single entity: prints ``key: value`` lines."""
     d = (obj.to_dict() if hasattr(obj, "to_dict")
          else dataclasses.asdict(obj) if dataclasses.is_dataclass(obj) else obj)
     _print_kv(d) if isinstance(d, dict) else print(d)
 
 
 def _fmt_list_simple(items, columns):
+    """Text formatter for a list of dataclasses: ``asdict`` each, then table."""
     rows = [dataclasses.asdict(i) if dataclasses.is_dataclass(i) else i for i in items]
     _print_table(rows, columns)
 
 
 def _fmt_story_detail(conn, detail):
+    """Text formatter for ``story detail`` (a :class:`StoryDetail`).
+
+    Renders the story header, resolved state, parent ids, owners, labels,
+    tasks (with completion marks), and ``completed_at`` if set.
+    """
     s = detail.story
     state = detail.workflow_state
     state_str = f"{state.name} ({state.type})" if state else "(none)"
@@ -204,11 +291,15 @@ def _fmt_story_detail(conn, detail):
 
 
 # --------------------------------------------------------------------------- #
-# Handlers — one per action. Each takes (conn, args) and returns a value.
+# Handlers — one per action. Each takes (conn, args: argparse.Namespace) and
+# returns a backend value (entity, list, or a small status dict). They resolve
+# human names to ids, call the matching backend function, and return the result
+# for ``run`` to render.
 # --------------------------------------------------------------------------- #
 
 # -- stories -------------------------------------------------------------- #
 def h_story_list(conn, a):
+    """Handle ``story list``; resolve filter names and return matching stories."""
     return stories.list_stories(
         conn,
         project_id=resolve_project(conn, a.project) if a.project else None,
@@ -220,13 +311,18 @@ def h_story_list(conn, a):
         q=a.q, include_completed=a.include_completed)
 
 
-def h_story_get(conn, a): return stories.get_story(conn, int(a.id))
+def h_story_get(conn, a):
+    """Handle ``story get``; return the story with the given id."""
+    return stories.get_story(conn, int(a.id))
 
 
-def h_story_detail(conn, a): return stories.get_story_detail(conn, int(a.id))
+def h_story_detail(conn, a):
+    """Handle ``story detail``; return a StoryDetail (story + relations)."""
+    return stories.get_story_detail(conn, int(a.id))
 
 
 def h_story_create(conn, a):
+    """Handle ``story create``; resolve owners/labels/parents and return the new story."""
     owner_ids = [resolve_member(conn, o) for o in (_split_csv(a.owners) or [])]
     label_ids = [resolve_label(conn, l) for l in (_split_csv(a.labels) or [])]
     return stories.create_story(
@@ -241,6 +337,7 @@ def h_story_create(conn, a):
 
 
 def h_story_update(conn, a):
+    """Handle ``story update``; map provided flags to editable fields and return the story."""
     fields = {}
     if a.name is not None: fields["name"] = a.name
     if a.desc is not None: fields["description"] = a.desc
@@ -255,36 +352,43 @@ def h_story_update(conn, a):
 
 
 def h_story_move(conn, a):
+    """Handle ``story move``; resolve the target state and move the story."""
     return stories.move_story_state(conn, int(a.id), resolve_workflow_state(conn, a.state))
 
 
 def h_story_assign(conn, a):
+    """Handle ``story assign``; add an owner and return the story."""
     stories.assign_owner(conn, int(a.id), resolve_member(conn, a.owner))
     return stories.get_story(conn, int(a.id))
 
 
 def h_story_unassign(conn, a):
+    """Handle ``story unassign``; remove an owner and return the story."""
     stories.remove_owner(conn, int(a.id), resolve_member(conn, a.owner))
     return stories.get_story(conn, int(a.id))
 
 
 def h_story_label(conn, a):
+    """Handle ``story label``; add a label and return the story."""
     stories.add_label(conn, int(a.id), resolve_label(conn, a.label))
     return stories.get_story(conn, int(a.id))
 
 
 def h_story_unlabel(conn, a):
+    """Handle ``story unlabel``; remove a label and return the story."""
     stories.remove_label(conn, int(a.id), resolve_label(conn, a.label))
     return stories.get_story(conn, int(a.id))
 
 
 def h_story_delete(conn, a):
+    """Handle ``story delete``; delete and return a ``{deleted, id}`` status."""
     stories.delete_story(conn, int(a.id))
     return {"deleted": "story", "id": int(a.id)}
 
 
 # -- epics ---------------------------------------------------------------- #
 def h_epic_list(conn, a):
+    """Handle ``epic list``; resolve project/milestone filters and return epics."""
     return epics.list_epics(
         conn,
         project_id=resolve_project(conn, a.project) if a.project else None,
@@ -292,12 +396,14 @@ def h_epic_list(conn, a):
 
 
 def h_epic_create(conn, a):
+    """Handle ``epic create``; resolve project/milestone and return the new epic."""
     return epics.create_epic(conn, a.name, description=a.desc or "", state=a.state,
                              milestone_id=_opt_id(conn, a.milestone, resolve_milestone),
                              project_id=_opt_id(conn, a.project, resolve_project))
 
 
 def h_epic_update(conn, a):
+    """Handle ``epic update``; map provided flags to fields and return the epic."""
     fields = {k: v for k, v in dict(name=a.name, description=a.desc, state=a.state,
              project_id=resolve_project(conn, a.project) if a.project else None,
              milestone_id=resolve_milestone(conn, a.milestone) if a.milestone else None).items()
@@ -306,33 +412,45 @@ def h_epic_update(conn, a):
 
 
 # -- iterations ----------------------------------------------------------- #
-def h_iteration_list(conn, a): return iterations.list_iterations(conn, status=a.status)
+def h_iteration_list(conn, a):
+    """Handle ``iteration list``; optionally filter by status."""
+    return iterations.list_iterations(conn, status=a.status)
 def h_iteration_create(conn, a):
+    """Handle ``iteration create``; return the new iteration."""
     return iterations.create_iteration(conn, a.name, description=a.desc or "",
                                         status=a.status, start_date=a.start,
                                         end_date=a.end)
 def h_iteration_update(conn, a):
+    """Handle ``iteration update``; map provided flags to fields and return it."""
     fields = {k: v for k, v in dict(name=a.name, description=a.desc, status=a.status,
              start_date=a.start, end_date=a.end).items() if v is not None}
     return iterations.update_iteration(conn, int(a.id), **fields)
 
 
 # -- milestones ------------------------------------------------------------ #
-def h_milestone_list(conn, a): return milestones.list_milestones(conn, state=a.state)
+def h_milestone_list(conn, a):
+    """Handle ``milestone list``; optionally filter by state."""
+    return milestones.list_milestones(conn, state=a.state)
 def h_milestone_create(conn, a):
+    """Handle ``milestone create``; return the new milestone."""
     return milestones.create_milestone(conn, a.name, description=a.desc or "", state=a.state)
 def h_milestone_update(conn, a):
+    """Handle ``milestone update``; map provided flags to fields and return it."""
     fields = {k: v for k, v in dict(name=a.name, description=a.desc, state=a.state).items()
              if v is not None}
     return milestones.update_milestone(conn, int(a.id), **fields)
 
 
 # -- projects -------------------------------------------------------------- #
-def h_project_list(conn, a): return projects.list_projects(conn, include_archived=a.archived)
+def h_project_list(conn, a):
+    """Handle ``project list``; include archived only if ``--archived``."""
+    return projects.list_projects(conn, include_archived=a.archived)
 def h_project_create(conn, a):
+    """Handle ``project create``; return the new project."""
     return projects.create_project(conn, a.name, description=a.desc or "",
                                    abbreviation=a.abbr or "", color=a.color or "")
 def h_project_update(conn, a):
+    """Handle ``project update``; map provided flags (incl. archive) and return it."""
     fields = {k: v for k, v in dict(name=a.name, description=a.desc, abbreviation=a.abbr,
              color=a.color, archived=1 if a.archive else 0 if a.archive is False else None).items()
              if v is not None}
@@ -340,75 +458,110 @@ def h_project_update(conn, a):
 
 
 # -- labels ---------------------------------------------------------------- #
-def h_label_list(conn, a): return labels.list_labels(conn)
+def h_label_list(conn, a):
+    """Handle ``label list``; return all labels."""
+    return labels.list_labels(conn)
 def h_label_create(conn, a):
+    """Handle ``label create``; return the new label."""
     return labels.create_label(conn, a.name, color=a.color or "", description=a.desc or "")
 def h_label_update(conn, a):
+    """Handle ``label update``; map provided flags to fields and return it."""
     fields = {k: v for k, v in dict(name=a.name, color=a.color, description=a.desc).items()
              if v is not None}
     return labels.update_label(conn, int(a.id), **fields)
 
 
 # -- members --------------------------------------------------------------- #
-def h_member_list(conn, a): return members.list_members(conn)
-def h_member_create(conn, a): return members.create_member(conn, a.name, mention_name=a.mention)
+def h_member_list(conn, a):
+    """Handle ``member list``; return all members."""
+    return members.list_members(conn)
+def h_member_create(conn, a):
+    """Handle ``member create``; return the new member."""
+    return members.create_member(conn, a.name, mention_name=a.mention)
 def h_member_update(conn, a):
+    """Handle ``member update``; map provided flags to fields and return it."""
     fields = {k: v for k, v in dict(name=a.name, mention_name=a.mention).items() if v is not None}
     return members.update_member(conn, int(a.id), **fields)
 
 
 # -- groups ---------------------------------------------------------------- #
-def h_group_list(conn, a): return groups.list_groups(conn, include_archived=a.archived)
-def h_group_create(conn, a): return groups.create_group(conn, a.name, description=a.desc or "")
+def h_group_list(conn, a):
+    """Handle ``group list``; include archived only if ``--archived``."""
+    return groups.list_groups(conn, include_archived=a.archived)
+def h_group_create(conn, a):
+    """Handle ``group create``; return the new group."""
+    return groups.create_group(conn, a.name, description=a.desc or "")
 def h_group_update(conn, a):
+    """Handle ``group update``; map provided flags (incl. archive) and return it."""
     fields = {k: v for k, v in dict(name=a.name, description=a.desc,
              archived=1 if a.archive else 0 if a.archive is False else None).items() if v is not None}
     return groups.update_group(conn, int(a.id), **fields)
 
 
 # -- workflows ------------------------------------------------------------- #
-def h_workflow_list(conn, a): return workflows.list_workflows(conn)
+def h_workflow_list(conn, a):
+    """Handle ``workflow list``; return all workflows."""
+    return workflows.list_workflows(conn)
 def h_workflow_create(conn, a):
+    """Handle ``workflow create``; parse ``--states name:type,...`` and return the workflow."""
     states = []
     for item in (_split_csv(a.states) or []):
         name, _, stype = item.partition(":")
         states.append({"name": name, "type": stype or "unstarted"})
     return workflows.create_workflow(conn, a.name, states=states or None)
 def h_workflow_states(conn, a):
+    """Handle ``workflow states``; list the states of a workflow."""
     return workflows.list_workflow_states(conn, int(a.id))
 def h_workflow_add_state(conn, a):
+    """Handle ``workflow add-state``; add a state to a workflow and return it."""
     return workflows.create_workflow_state(conn, int(a.id), a.name, a.type, position=a.position)
 
 
 # -- tasks ----------------------------------------------------------------- #
-def h_task_list(conn, a): return tasks.list_tasks(conn, int(a.story))
+def h_task_list(conn, a):
+    """Handle ``task list``; return tasks for a story."""
+    return tasks.list_tasks(conn, int(a.story))
 def h_task_add(conn, a):
+    """Handle ``task add``; create a task on a story and return it."""
     return tasks.create_task(conn, int(a.story), a.desc, complete=a.complete)
 def h_task_update(conn, a):
+    """Handle ``task update``; map provided flags to fields and return the task."""
     fields = {k: v for k, v in dict(description=a.desc, complete=1 if a.complete else 0 if a.complete is False else None,
              position=a.position).items() if v is not None}
     return tasks.update_task(conn, int(a.id), **fields)
-def h_task_complete(conn, a): return tasks.complete_task(conn, int(a.id), True)
-def h_task_uncomplete(conn, a): return tasks.complete_task(conn, int(a.id), False)
+def h_task_complete(conn, a):
+    """Handle ``task complete``; mark a task complete."""
+    return tasks.complete_task(conn, int(a.id), True)
+def h_task_uncomplete(conn, a):
+    """Handle ``task uncomplete``; mark a task incomplete."""
+    return tasks.complete_task(conn, int(a.id), False)
 
 
 # -- comments -------------------------------------------------------------- #
-def h_comment_list(conn, a): return comments.list_comments(conn, int(a.story))
+def h_comment_list(conn, a):
+    """Handle ``comment list``; return comments for a story."""
+    return comments.list_comments(conn, int(a.story))
 def h_comment_add(conn, a):
+    """Handle ``comment add``; create a comment (optionally threaded) and return it."""
     return comments.create_comment(conn, int(a.story), a.text, author_id=_opt_id(conn, a.author, resolve_member),
                                     parent_id=int(a.parent) if a.parent else None)
-def h_comment_update(conn, a): return comments.update_comment(conn, int(a.id), text=a.text)
+def h_comment_update(conn, a):
+    """Handle ``comment update``; update comment text and return it."""
+    return comments.update_comment(conn, int(a.id), text=a.text)
 
 
 # -- links ----------------------------------------------------------------- #
 def h_link_list(conn, a):
+    """Handle ``link list``; return links, optionally filtered to one story."""
     return story_links.list_links(conn, int(a.story) if a.story else None)
 def h_link_add(conn, a):
+    """Handle ``link add``; create a directed story link and return it."""
     return story_links.create_link(conn, int(a.subject), a.verb, int(a.object))
 
 
 # -- search --------------------------------------------------------------- #
 def h_search(conn, a):
+    """Handle ``search``; join query terms and return ranked SearchResults."""
     return search.search(conn, " ".join(a.query), entity=a.entity)
 
 
@@ -419,18 +572,26 @@ def h_search(conn, a):
 COMMON = argparse.ArgumentParser(add_help=False)
 # SUPPRESS default so a subparser doesn't clobber a --json given on the top
 # parser (e.g. `main.py --json story list`); the flag is only set when present.
+# This is what makes `--json` work both before and after the subcommand.
 COMMON.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
                     help="emit JSON (machine-readable)")
 
 
 def _sp(parent, name, **kw):
+    """Add an action subparser that inherits the common ``--json`` flag."""
     return parent.add_parser(name, parents=[COMMON], **kw)
 
 
-def _id_arg(p): p.add_argument("id", help="entity id")
+def _id_arg(p):
+    """Add the standard positional ``id`` argument to an action subparser."""
+    p.add_argument("id", help="entity id")
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """Construct the full argparse CLI: one subparser per resource, one nested
+    subparser per action, each wiring ``func`` (a handler) and ``fmt`` (a text
+    formatter). The top parser also carries ``--json`` (default False) and
+    ``--db``. Returns the parser."""
     parser = argparse.ArgumentParser(prog="projectplanner",
                                      description="Local project planner (Shortcut-model-based).")
     parser.add_argument("--json", action="store_true", default=False)
@@ -652,6 +813,16 @@ def build_parser() -> argparse.ArgumentParser:
 # --------------------------------------------------------------------------- #
 
 def run(argv: list[str] | None = None) -> int:
+    """Parse ``argv``, open a connection, run the action, and render output.
+
+    A ``PlannerError`` is caught and printed to stderr as ``error: <msg>`` with
+    exit code 1; the connection is always closed.
+
+    Args:
+        argv: Argument list (defaults to ``sys.argv[1:]`` via parse_args).
+    Returns:
+        0 on success, 1 on a backend error.
+    """
     parser = build_parser()
     args = parser.parse_args(argv)
     conn = db.connect(args.db) if getattr(args, "db", None) else db.connect()

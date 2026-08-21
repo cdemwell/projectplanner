@@ -24,8 +24,26 @@ def list_stories(conn: sqlite3.Connection, *, project_id=None, epic_id=None,
                  iteration_id=None, state_type=None, group_id=None,
                  owner_id=None, label_id=None, q: str | None = None,
                  include_completed: bool = True) -> list[Story]:
-    """List stories with optional filters. ``state_type`` is a workflow-state
-    type ('unstarted'/'started'/'done'); ``q`` is a LIKE over name+description."""
+    """List stories with optional filters.
+
+    Builds a dynamic WHERE clause. For owners, labels, and state type, it uses
+    EXISTS subqueries to check junction tables or workflow state types.
+    Results are ordered by position, then ID.
+
+    Args:
+        conn: sqlite3.Connection from db.connect().
+        project_id: int | None — filter by project.
+        epic_id: int | None — filter by epic.
+        iteration_id: int | None — filter by iteration.
+        state_type: str | None — filter by state type ('unstarted'/'started'/'done').
+        group_id: int | None — filter by group.
+        owner_id: int | None — filter by member assigned.
+        label_id: int | None — filter by label.
+        q: str | None — keyword search over name and description.
+        include_completed: bool — whether to include stories where completed_at is set.
+    Returns:
+        list[Story] — the filtered list of stories.
+    """
     where: list[str] = []
     params: list = []
     if project_id is not None:
@@ -61,6 +79,16 @@ def list_stories(conn: sqlite3.Connection, *, project_id=None, epic_id=None,
 
 
 def get_story(conn: sqlite3.Connection, id) -> Story:
+    """Fetch a single story by ID.
+
+    Args:
+        conn: sqlite3.Connection from db.connect().
+        id: int — the story ID.
+    Returns:
+        Story — the story.
+    Raises:
+        NotFound: if the story does not exist.
+    """
     return _util.get(conn, Story, "story", id, resource="story")
 
 
@@ -83,6 +111,17 @@ def _load_detail(conn: sqlite3.Connection, story: Story) -> StoryDetail:
 
 
 def get_story_detail(conn: sqlite3.Connection, id) -> StoryDetail:
+    """Fetch detailed story information including relations.
+
+    Args:
+        conn: sqlite3.Connection from db.connect().
+        id: int — the story ID.
+    Returns:
+        StoryDetail — a container holding the story, its owners, labels, tasks,
+        and current workflow state.
+    Raises:
+        NotFound: if the story does not exist.
+    """
     return _load_detail(conn, get_story(conn, id))
 
 
@@ -104,6 +143,35 @@ def create_story(conn: sqlite3.Connection, name: str, *, description: str = "",
                  requested_by_id=None, deadline: str | None = None,
                  owner_ids: list | None = None, label_ids: list | None = None,
                  position: float | None = None) -> Story:
+    """Create a new story.
+
+    Validates story_type and determines position. If no workflow_state_id is
+    provided, falls back to the default state of the first available workflow.
+    Inserts owner and label associations into junction tables.
+
+    Args:
+        conn: sqlite3.Connection from db.connect().
+        name: str — the story name.
+        description: str — optional description.
+        story_type: str — 'bug' | 'feature' | 'chore'.
+        workflow_state_id: int | None — the initial state.
+        epic_id: int | None — parent epic.
+        iteration_id: int | None — parent iteration.
+        project_id: int | None — parent project.
+        group_id: int | None — parent group.
+        requested_by_id: int | None — member who requested it.
+        deadline: str | None — ISO date string.
+        owner_ids: list[int] | None — members to assign.
+        label_ids: list[int] | None — labels to apply.
+        position: float | None — custom sort position.
+    Returns:
+        Story — the created story.
+    Raises:
+        ValidationError: if the story_type is unknown.
+    Invariants:
+        If position is None, it defaults to max(position) + 1 within the project
+        (or globally if project_id is None).
+    """
     if story_type not in STORY_TYPES:
         raise errors.ValidationError(f"unknown story_type {story_type!r}")
     ts = db.now()
@@ -130,7 +198,20 @@ def create_story(conn: sqlite3.Connection, name: str, *, description: str = "",
 
 
 def update_story(conn: sqlite3.Connection, id, **fields) -> Story:
-    """Update editable fields. Passing a nullable FK as None clears it."""
+    """Update a story's editable fields.
+
+    Only fields defined in the EDITABLE whitelist are updated. Passing a
+    nullable foreign key as None clears the association.
+
+    Args:
+        conn: sqlite3.Connection from db.connect().
+        id: int — the story ID.
+        fields: dict — fields to update.
+    Returns:
+        Story — the updated story.
+    Raises:
+        NotFound: if the story does not exist.
+    """
     get_story(conn, id)  # raises NotFound if absent
     fields = {k: v for k, v in fields.items() if k in EDITABLE}
     if fields:
@@ -141,8 +222,23 @@ def update_story(conn: sqlite3.Connection, id, **fields) -> Story:
 
 
 def move_story_state(conn: sqlite3.Connection, id, new_state_id) -> Story:
-    """Move a story to a workflow state. Stamps ``completed_at`` when entering a
-    ``done`` state and clears it when leaving."""
+    """Move a story to a new workflow state.
+
+    Validates the target state exists. Automatically updates completed_at
+    based on whether the target state's type is 'done'.
+
+    Args:
+        conn: sqlite3.Connection from db.connect().
+        id: int — the story ID.
+        new_state_id: int — the target workflow state ID.
+    Returns:
+        Story — the updated story.
+    Raises:
+        NotFound: if the story or the target state does not exist.
+    Invariants:
+        completed_at is stamped with the current time when moving into a
+        'done' state and cleared otherwise.
+    """
     state = workflows.get_workflow_state(conn, new_state_id)
     with db.tx_write(conn):
         fields = {"workflow_state_id": new_state_id, "updated_at": db.now()}
@@ -153,12 +249,28 @@ def move_story_state(conn: sqlite3.Connection, id, new_state_id) -> Story:
 
 
 def delete_story(conn: sqlite3.Connection, id) -> None:
+    """Delete a story by ID.
+
+    Args:
+        conn: sqlite3.Connection from db.connect().
+        id: int — the story ID.
+    """
     with db.tx_write(conn):
         _util.delete(conn, "story", id, resource="story")
 
 
 # --- owners -------------------------------------------------------------- #
 def list_owners(conn: sqlite3.Connection, story_id) -> list[Member]:
+    """List all members assigned to a story.
+
+    Args:
+        conn: sqlite3.Connection from db.connect().
+        story_id: int — the story ID.
+    Returns:
+        list[Member] — the assigned members.
+    Raises:
+        NotFound: if the story does not exist.
+    """
     get_story(conn, story_id)
     rows = conn.execute(
         "SELECT m.* FROM member m JOIN story_owner so ON so.member_id = m.id "
@@ -167,6 +279,19 @@ def list_owners(conn: sqlite3.Connection, story_id) -> list[Member]:
 
 
 def assign_owner(conn: sqlite3.Connection, story_id, member_id) -> None:
+    """Assign a member to a story via the story_owner junction table.
+
+    Args:
+        conn: sqlite3.Connection from db.connect().
+        story_id: int — the story ID.
+        member_id: int — the member ID.
+    Raises:
+        NotFound: if the story or member does not exist.
+        ValidationError: on database constraint failure.
+    Note:
+        If the member is already assigned, the duplicate insert is ignored
+        silently.
+    """
     get_story(conn, story_id)
     # Validate member exists -> raises NotFound
     from . import members
@@ -183,6 +308,15 @@ def assign_owner(conn: sqlite3.Connection, story_id, member_id) -> None:
 
 
 def remove_owner(conn: sqlite3.Connection, story_id, member_id) -> None:
+    """Remove a member from a story via the story_owner junction table.
+
+    Args:
+        conn: sqlite3.Connection from db.connect().
+        story_id: int — the story ID.
+        member_id: int — the member ID.
+    Raises:
+        NotFound: if the story does not exist.
+    """
     get_story(conn, story_id)
     with db.tx_write(conn):
         conn.execute("DELETE FROM story_owner WHERE story_id = ? AND member_id = ?",
@@ -191,6 +325,16 @@ def remove_owner(conn: sqlite3.Connection, story_id, member_id) -> None:
 
 # --- labels -------------------------------------------------------------- #
 def list_story_labels(conn: sqlite3.Connection, story_id) -> list[Label]:
+    """List all labels applied to a story.
+
+    Args:
+        conn: sqlite3.Connection from db.connect().
+        story_id: int — the story ID.
+    Returns:
+        list[Label] — the labels applied to the story.
+    Raises:
+        NotFound: if the story does not exist.
+    """
     get_story(conn, story_id)
     rows = conn.execute(
         "SELECT l.* FROM label l JOIN story_label sl ON sl.label_id = l.id "
@@ -199,6 +343,19 @@ def list_story_labels(conn: sqlite3.Connection, story_id) -> list[Label]:
 
 
 def add_label(conn: sqlite3.Connection, story_id, label_id) -> None:
+    """Apply a label to a story via the story_label junction table.
+
+    Args:
+        conn: sqlite3.Connection from db.connect().
+        story_id: int — the story ID.
+        label_id: int — the label ID.
+    Raises:
+        NotFound: if the story or label does not exist.
+        ValidationError: on database constraint failure.
+    Note:
+        If the label is already applied, the duplicate insert is ignored
+        silently.
+    """
     get_story(conn, story_id)
     from . import labels
     labels.get_label(conn, label_id)
@@ -213,6 +370,15 @@ def add_label(conn: sqlite3.Connection, story_id, label_id) -> None:
 
 
 def remove_label(conn: sqlite3.Connection, story_id, label_id) -> None:
+    """Remove a label from a story via the story_label junction table.
+
+    Args:
+        conn: sqlite3.Connection from db.connect().
+        story_id: int — the story ID.
+        label_id: int — the label ID.
+    Raises:
+        NotFound: if the story does not exist.
+    """
     get_story(conn, story_id)
     with db.tx_write(conn):
         conn.execute("DELETE FROM story_label WHERE story_id = ? AND label_id = ?",

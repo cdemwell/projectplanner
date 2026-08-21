@@ -23,6 +23,15 @@ _ENTITIES = {
 
 @dataclass
 class SearchResult:
+    """A result from an FTS5 search.
+
+    Attributes:
+        entity: str — the type of entity (e.g., "story", "project").
+        id: int — the entity id.
+        name: str — the entity name.
+        description: str — the entity description.
+        rank: float — the relevance score (higher is better).
+    """
     entity: str
     id: int
     name: str
@@ -30,6 +39,11 @@ class SearchResult:
     rank: float
 
     def to_dict(self) -> dict:
+        """Convert the result to a dictionary.
+
+        Returns:
+            dict — result fields.
+        """
         return {
             "entity": self.entity, "id": self.id, "name": self.name,
             "description": self.description, "rank": self.rank,
@@ -40,8 +54,18 @@ def search(conn: sqlite3.Connection, query: str, *, entity: str | None = None) -
     """Search ``name`` + ``description`` across entities (or one ``entity``).
 
     ``query`` is passed straight to FTS5's MATCH, so it supports terms, prefix
-    (``log*``), and boolean (``login AND bug``) syntax. Results are sorted by
-    relevance (bm25, lower is better).
+    (``log*``), and boolean (``login AND bug``) syntax. a "phrase" in quotes
+    matches exactly. Results are sorted by relevance (bm25, negated so
+    bigger is better).
+
+    Args:
+        conn: sqlite3.Connection from db.connect().
+        query: str — FTS5 MATCH query.
+        entity: str | None — optional filter by entity type.
+    Returns:
+        list[SearchResult] — results ranked by relevance.
+    Raises:
+        ValueError: if an unknown entity is provided or the MATCH syntax is invalid.
     """
     targets: list[tuple[str, str, str]]
     if entity is not None:

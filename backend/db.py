@@ -4,7 +4,7 @@ The single source of storage is ``planner.db`` in the repo root. Connections are
 created via :func:`connect`, which configures pragmas (foreign keys on, a 5s busy
 timeout so concurrent writers block rather than error) and runs any pending
 migrations. Writers go through :func:`tx_write`, which takes the write lock up
-front with ``BEGIN IMMEDIATE`` (see CONTEXT.md §6).
+front with ``BEGIN IMMEDIATE`` to ensure deterministic serialization.
 """
 
 from __future__ import annotations
@@ -27,10 +27,13 @@ ARCHIVED_TRUE = 1
 
 
 def now() -> str:
-    """Current UTC timestamp as an ISO-8601 string (e.g. ``2026-08-20T14:03:11+00:00``).
+    """Return the current UTC timestamp as an ISO-8601 string.
 
-    Stored in TEXT columns; we format it ourselves rather than relying on
-    ``CURRENT_TIMESTAMP``, which yields naive local-ish strings.
+    Stored in TEXT columns to avoid relying on SQLite's ``CURRENT_TIMESTAMP``,
+    which can yield naive local-ish strings.
+
+    Returns:
+        str: The ISO-8601 UTC timestamp (e.g. ``2026-08-20T14:03:11+00:00``).
     """
     return datetime.now(timezone.utc).isoformat()
 
@@ -38,7 +41,14 @@ def now() -> str:
 def connect(db_path: str | os.PathLike[str] | None = None) -> sqlite3.Connection:
     """Open (and, if needed, create + migrate + seed) the planner database.
 
-    Returns a configured ``sqlite3.Connection`` using ``sqlite3.Row`` rows.
+    Configures the connection with ``sqlite3.Row``, enables foreign keys,
+    and sets a 5-second busy timeout to handle concurrent writers.
+
+    Args:
+        db_path: Optional path to the database file. Defaults to ``DEFAULT_DB_PATH``.
+
+    Returns:
+        sqlite3.Connection: A configured SQLite connection.
     """
     path = Path(db_path) if db_path is not None else DEFAULT_DB_PATH
     conn = sqlite3.connect(str(path))  # check_same_thread=True is fine: callers
@@ -56,9 +66,18 @@ def connect(db_path: str | os.PathLike[str] | None = None) -> sqlite3.Connection
 def tx_write(conn: sqlite3.Connection):
     """Context manager for a write transaction.
 
-    Acquires the write lock up front with ``BEGIN IMMEDIATE`` so concurrent writers
-    serialize deterministically (the second blocks until the first commits).
-    Commits on clean exit, rolls back on any exception.
+    Acquires the write lock up front using ``BEGIN IMMEDIATE`` so concurrent
+    writers serialize deterministically. The second writer blocks until the
+    first commits or rolls back.
+
+    Args:
+        conn: sqlite3.Connection from db.connect().
+
+    Yields:
+        sqlite3.Connection: The connection within the transaction.
+
+    Invariants:
+        Commits on clean exit, rolls back on any exception.
     """
     conn.execute("BEGIN IMMEDIATE")
     try:
@@ -272,12 +291,17 @@ _SCHEMA_V1 = [
 ]
 
 def _fts_trigger(table: str) -> list[str]:
-    """Return the after-insert/update/delete trigger SQL for one FTS table.
+    """Return the trigger SQL to keep an FTS5 external-content table in sync.
 
-    The FTS5 ``external content`` table ``{table}_fts`` mirrors ``name`` and
-    ``description``; these triggers keep it in sync on write so the index is
-    always current regardless of which code path mutated the source row. Returns
-    three separate single statements (``execute`` only runs one at a time).
+    The FTS5 table ``{table}_fts`` mirrors the ``name`` and ``description`` columns.
+    These triggers ensure the index is updated on every insert, update, or delete
+    on the source table.
+
+    Args:
+        table: The name of the source table.
+
+    Returns:
+        list[str]: A list of three SQL statements for the AI, AD, and AU triggers.
     """
     fts = f"{table}_fts"
     cols = ["name", "description"]
@@ -350,7 +374,14 @@ _MIGRATIONS = [
 
 
 def _schema_version(conn: sqlite3.Connection) -> int:
-    """Return the stored schema version, or 0 if the table is absent/empty."""
+    """Return the stored schema version, or 0 if the table is absent or empty.
+
+    Args:
+        conn: sqlite3.Connection from db.connect().
+
+    Returns:
+        int: The current schema version stored in the database.
+    """
     row = conn.execute("SELECT MAX(version) AS v FROM schema_version").fetchone()
     if row is None or row["v"] is None:
         return 0
@@ -358,7 +389,17 @@ def _schema_version(conn: sqlite3.Connection) -> int:
 
 
 def _migrate(conn: sqlite3.Connection) -> None:
-    """Apply any pending migrations up to CURRENT_SCHEMA_VERSION."""
+    """Apply any pending migrations up to CURRENT_SCHEMA_VERSION.
+
+    Iterates through ``_MIGRATIONS`` and applies any that are newer than the
+    stored version. Each migration is wrapped in a ``tx_write`` transaction.
+
+    Args:
+        conn: sqlite3.Connection from db.connect().
+
+    Invariants:
+        Runs first-run seeding if the database is empty.
+    """
     # schema_version table is created by v1; make sure it exists before reading.
     conn.execute("CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY)")
     current = _schema_version(conn)
@@ -381,10 +422,16 @@ def _migrate(conn: sqlite3.Connection) -> None:
 
 
 def _seed(conn: sqlite3.Connection) -> None:
-    """Seed the single local member and the default workflow with standard states.
+    """Seed the database with a local member and a default workflow.
 
-    Idempotent by guard (only called when no member exists) and runs in one
-    ``BEGIN IMMEDIATE`` transaction.
+    Creates one member based on the current system user and a 'Default' workflow
+    containing Unstarted, Started, and Done states.
+
+    Args:
+        conn: sqlite3.Connection from db.connect().
+
+    Invariants:
+        Runs in a single ``BEGIN IMMEDIATE`` transaction.
     """
     name = os.environ.get("USER") or "me"
     mention_name = name.lower().replace(" ", "_")

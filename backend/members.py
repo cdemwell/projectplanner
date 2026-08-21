@@ -11,14 +11,42 @@ EDITABLE = {"name", "mention_name"}
 
 
 def list_members(conn: sqlite3.Connection) -> list[Member]:
+    """List all members.
+
+    Args:
+        conn: sqlite3.Connection from db.connect().
+    Returns:
+        A list of Member dataclasses.
+    """
     return _util.list_rows(conn, Member, "member", order="id")
 
 
 def get_member(conn: sqlite3.Connection, id) -> Member:
+    """Get a member by ID.
+
+    Args:
+        conn: sqlite3.Connection from db.connect().
+        id: Member ID.
+    Returns:
+        The Member dataclass.
+    Raises:
+        NotFound: if the member does not exist.
+    """
     return _util.get(conn, Member, "member", id, resource="member")
 
 
 def create_member(conn: sqlite3.Connection, name: str, *, mention_name: str | None = None) -> Member:
+    """Create a new member.
+
+    Mention name is derived from name if not provided.
+
+    Args:
+        conn: sqlite3.Connection from db.connect().
+        name: str — display name.
+        mention_name: Optional override for the mention identifier.
+    Returns:
+        The created Member.
+    """
     mention_name = (mention_name or name).strip().lower().replace(" ", "_")
     with db.tx_write(conn):
         new_id = _util.insert(conn, "member", {
@@ -30,6 +58,17 @@ def create_member(conn: sqlite3.Connection, name: str, *, mention_name: str | No
 
 
 def update_member(conn: sqlite3.Connection, id, **fields) -> Member:
+    """Update member fields.
+
+    Args:
+        conn: sqlite3.Connection from db.connect().
+        id: Member ID.
+        fields: Fields to update (name, mention_name).
+    Returns:
+        The updated Member.
+    Raises:
+        NotFound: if the member does not exist.
+    """
     get_member(conn, id)  # raises NotFound if absent
     fields = {k: v for k, v in fields.items() if k in EDITABLE}
     if fields:
@@ -39,5 +78,11 @@ def update_member(conn: sqlite3.Connection, id, **fields) -> Member:
 
 
 def delete_member(conn: sqlite3.Connection, id) -> None:
+    """Delete a member.
+
+    Args:
+        conn: sqlite3.Connection from db.connect().
+        id: Member ID.
+    """
     with db.tx_write(conn):
         _util.delete(conn, "member", id, resource="member")

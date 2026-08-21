@@ -1,113 +1,587 @@
 # projectplanner
 
-A local, personal project-planning tool. It uses [Shortcut]'s (formerly
+A local, personal project-planning tool that uses [Shortcut]'s (formerly
 Clubhouse) v3 data model as **inspiration only** — not a contract — and stores
 everything in a single local SQLite database (`planner.db`). There is no server
-and no network; you talk to it via a scriptable CLI (and, eventually, a TUI).
+and no network. You talk to it through a scriptable **CLI** (the primary
+interface for automation and AI agents) and an optional full-screen **TUI**.
 
-It's designed to be shared with AI coding systems: the CLI is stable and
-parseable, and every mutating command prints back the resulting entity so an
-agent can read the assigned id. Add `--json` to any command for
-machine-readable output.
+It is built to be shared with AI coding systems: the CLI is stable, parseable,
+and agent-friendly — every mutating command prints the resulting entity so an
+agent can read back the assigned id, and `--json` gives structured output for
+reliable parsing.
 
 [Shortcut]: https://shortcut.com
 
-## Requirements
+---
 
-- Python 3.12+ (stdlib `sqlite3` ships with FTS5, used for search).
-- The backend + CLI are stdlib-only. The **TUI** additionally needs
-  [Textual](https://textual.textualize.io) (`pip install textual`); without it,
-  `python main.py` (no args) prints an install hint and the CLI still works.
+## Executive Summary
 
-## Quick start
+This document is the complete user and integrator guide for `projectplanner`.
+It is written so that a human **or** an AI agent can pick up the tool with no
+other context.
+
+**How to use this document to gather context quickly:**
+
+- If you are an **AI agent about to use the CLI as a tool**, read the
+  [Table of Contents](#table-of-contents) below, then jump to
+  [§ AI Agent Guide](#ai-agent-guide-using-the-cli-during-development) for
+  concrete recipes, and [§ CLI Conventions](#cli-conventions) for the parsing
+  contract (`--json`, exit codes, name-vs-id resolution). That is enough to
+  start driving the tool.
+- If you need to know **what entities exist and how they relate**, read
+  [§ Data Model](#data-model).
+- If you need to know **how the tool is built and how concurrency works**
+  (e.g. before modifying it), read [§ Architecture & Concurrency](#architecture--concurrency)
+  and the per-resource [§ CLI Reference](#cli-reference).
+- For the authoritative design/schema/build record (including the full SQL DDL
+  and deferred-scope list), see [CONTEXT.md](CONTEXT.md) — this README is the
+  interface guide; CONTEXT.md is the engineering source of truth.
+
+**One-line mental model:** a story is a unit of work; it lives in a workflow
+state, may belong to a project/epic/iteration/group, and carries owners, labels,
+tasks, comments, and links. You create stories, move them through states, and
+search them — all from the command line, against a local file.
+
+---
+
+## Table of Contents
+
+| # | Section | Lines |
+|---|---------|-------|
+| 1 | [Executive Summary](#executive-summary) | 18–47 |
+| 2 | [Table of Contents](#table-of-contents) | 48–70 |
+| 3 | [Intent & Design Goals](#intent--design-goals) | 71–96 |
+| 4 | [Requirements & Setup](#requirements--setup) | 97–120 |
+| 5 | [Quick Start](#quick-start) | 121–147 |
+| 6 | [Running the Tool: CLI vs TUI](#running-the-tool-cli-vs-tui) | 148–170 |
+| 7 | [CLI Conventions](#cli-conventions) | 171–213 |
+| 8 | [CLI Reference](#cli-reference) | 214–288 |
+| 9 | [AI Agent Guide: Using the CLI During Development](#ai-agent-guide-using-the-cli-during-development) | 289–403 |
+| 10 | [Data Model](#data-model) | 404–455 |
+| 11 | [Architecture & Concurrency](#architecture--concurrency) | 456–490 |
+| 12 | [Storage & Schema](#storage--schema) | 491–509 |
+| 13 | [Exit Codes & Errors](#exit-codes--errors) | 510–528 |
+| 14 | [Examples & Recipes](#examples--recipes) | 529–562 |
+| 15 | [Non-goals & Differences from Shortcut](#non-goals--differences-from-shortcut) | 563–577 |
+| 16 | [Further Reading](#further-reading) | 578–586 |
+
+---
+
+## Intent & Design Goals
+
+`projectplanner` exists to give a single person (and the AI agents that person
+works with) a fast, durable, queryable place to track software work **without**
+depending on a hosted service, a network, or an account.
+
+**Design goals:**
+
+- **Local-first, zero-dependency-by-default.** One SQLite file. The backend and
+  CLI use only the Python 3.12 standard library (`sqlite3`, `argparse`,
+  `dataclasses`, `datetime`). The TUI adds [Textual](https://textual.textualize.io).
+- **Scriptable and agent-friendly.** The CLI is the automation surface. Output
+  is stable and greppable by default; `--json` makes it reliably parseable.
+  Mutating commands echo the resulting entity so the caller learns the new id.
+- **Simple, understandable model.** Borrow Shortcut's entity vocabulary
+  (story, epic, iteration, milestone, project, workflow, label, …) because it is
+  familiar and well-shaped, but keep a trimmed local schema — no fidelity to
+  Shortcut's JSON shapes or endpoints.
+- **Concurrency-safe enough for multiple agents.** Several processes may write
+  at once; writers serialize via SQLite's file lock with a 5s busy timeout, so a
+  second writer blocks (rather than errors) until the first commits.
+- **No server, no async, no cache.** It is an in-process library plus two thin
+  front-ends (CLI, TUI) over the same backend functions.
+
+---
+
+## Requirements & Setup
+
+- **Python 3.12+** (stdlib `sqlite3` ships with FTS5, used for search).
+- **Backend + CLI:** stdlib only — no install step beyond having Python 3.12.
+- **TUI (optional):** requires `textual`. Recommended setup with a project
+  virtualenv (kept out of git):
+
+  ```bash
+  python3.12 -m venv .venv
+  .venv/bin/pip install textual
+  ```
+
+- **Database:** `planner.db` is created in the repo root on first run and seeded
+  with one member (name from `$USER`, mention name derived from it) and a
+  default workflow named **Default** with three states — **Unstarted**
+  (`unstarted`), **Started** (`started`), **Done** (`done`). The **Started**
+  state is the workflow default, so new stories start there unless you say
+  otherwise.
+
+> No `.env`, config file, or auth is required. There is a single implicit local
+> user (the seeded member, id 1).
+
+---
+
+## Quick Start
 
 ```bash
+# Containers
 python main.py project create --name backend --desc "core api" --abbr bck --color "#65c8c8"
-python main.py label create --name auth --color "#f00" --desc "authentication"
-python main.py epic create --name Auth --project backend
+python main.py label    create --name auth --color "#f00" --desc "authentication"
+python main.py epic     create --name Auth --project backend
 python main.py iteration create --name "Sprint 1" --status active --start 2026-09-01 --end 2026-09-14
+
+# A unit of work, with relations, owners, and labels (names resolve to ids)
 python main.py story create --name "Fix login bug" --desc "oauth redirect fails" \
     --project backend --type bug --epic Auth --iteration "Sprint 1" \
     --owners "$(whoami)" --labels auth
-python main.py task add --story 1 --desc "write tests"
-python main.py story move 1 --state done          # or --state "Done" / --state done
+
+# Break it down, comment, and advance it
+python main.py task    add --story 1 --desc "write tests"
+python main.py comment add --story 1 --text "reproduced on staging"
+python main.py story move 1 --state done      # accepts id, name, or type
+
+# Inspect
 python main.py story list --project backend
 python main.py story detail 1
 python main.py search "login OR auth"
 ```
 
-The database (`planner.db`) is created on first run and seeded with one member
-(from `$USER`) and a default workflow with **Unstarted / Started / Done**
-states.
+---
 
-## Running it
+## Running the Tool: CLI vs TUI
 
-- `python main.py <resource> <action> [flags]` — one-shot CLI.
-- `python main.py` (no args) — interactive **TUI** (full-screen, built with
-  Textual): a filterable story list with a detail pane and modal screens for
-  create / move / comment / task / filter / search. Keyboard shortcuts are
-  shown in the footer:
+- `python main.py <resource> <action> [flags]` — one-shot **CLI** (primary
+  interface for agents and scripts).
+- `python main.py` (no args) — full-screen **TUI** (Textual). Needs `textual`
+  installed; if it is missing, `main.py` prints an install hint and exits 1
+  (the CLI is unaffected).
 
-  | Key | Action          |   | Key | Action           |
-  |-----|-----------------|---|-----|------------------|
-  | `n` | new story       |   | `f` | filter (proj/state) |
-  | `m` | move state      |   | `/` | search           |
-  | `c` | add comment     |   | `e` | toggle complete  |
-  | `t` | add task        |   | `d` | delete story     |
-  | `r` | refresh         |   | `q` | quit             |
+**TUI keybindings** (shown in the footer):
 
-## CLI reference
+| Key | Action | | Key | Action |
+|-----|--------|---|-----|--------|
+| `n` | new story | | `f` | filter (project/state) |
+| `m` | move state | | `/` | search |
+| `c` | add comment | | `e` | toggle complete |
+| `t` | add task | | `d` | delete story |
+| `r` | refresh | | `q` | quit |
+
+The TUI shares the exact same backend functions as the CLI — there is no
+separate data layer.
+
+---
+
+## CLI Conventions
+
+These are the rules an agent can rely on when parsing output and chaining
+commands.
+
+- **Invocation:** `python main.py <resource> <action> [flags]`.
+- **`--json` (anywhere in the command)** prints structured JSON for the result
+  (a single entity, a list, or a small status object). Place it before or after
+  the subcommand — both work.
+- **Name or id, your choice.** Anywhere a human would type a name
+  (`--project backend`, `--owner chris`, `--labels bug,auth`), it is resolved to
+  an id **case-insensitively**. Pass a bare number to use an id directly.
+  Ambiguous names error with the matching ids. **Stories are referenced by id**
+  (names are not unique).
+- **`--state`** on `story move` accepts a state **id**, a state **name**
+  (`"Done"`), or a state **type** (`unstarted`/`started`/`done`). By-type is
+  convenient against the seeded workflow.
+- **Mutating commands echo the resulting entity** — text by default, JSON with
+  `--json`. This is how you learn the id that was just assigned.
+- **Errors** print `error: <message>` to **stderr** and the process exits
+  non-zero (see [§ Exit Codes & Errors](#exit-codes--errors)).
+- **Comma-separated lists** (`--owners`, `--labels`) accept mixed names and ids,
+  separated by commas.
+- **Archived soft-delete:** `project` and `group` have an `archived` flag
+  (`project archive <id>`, `group archive <id>`); `list` hides archived items
+  unless `--archived` is passed. Everything else hard-deletes (with cascade —
+  see [§ Data Model](#data-model)).
+- **`completed_at` is automated:** moving a story/epic/milestone into a `done`
+  state stamps `completed_at`; moving it back out clears it. You do not set it
+  manually.
+
+### The `--json` contract
+
+- A single entity → a JSON object of its columns.
+- `story detail` → an object with `story`, `owners`, `labels`, `tasks`,
+  `workflow_state`.
+- A list → a JSON array of entity objects.
+- `search` → an array of `{entity, id, name, description, rank}`.
+- Delete/status → a small object like `{"deleted": "story", "id": 7}`.
+- Timestamps are ISO-8601 UTC strings; nullable columns are `null`.
+
+---
+
+## CLI Reference
 
 Resources: `story`, `epic`, `iteration`, `milestone`, `project`, `label`,
 `member`, `group`, `workflow`, `task`, `comment`, `link`, `search`.
 
-Each resource has sub-actions (`list`, `get`, `create`, `update`, `delete`,
-plus resource-specific ones like `story move`, `story detail`, `epic stories`,
-`task complete`, etc.). Run `python main.py <resource> -h` and
-`python main.py <resource> <action> -h` for the full flag list.
+Every `<resource> <action>` accepts `-h` for the exact flag list
+(`python main.py story create -h`). Below is the compact surface; flags shown
+are the commonly used ones.
 
-### Conventions
+### story
+| Action | Flags (selected) | Notes |
+|--------|------------------|-------|
+| `list` | `--project --epic --iteration --state-type --group --owner --label --q --no-completed` | filters; `--state-type` is unstarted/started/done |
+| `get <id>` | — | one story |
+| `detail <id>` | — | story + owners/labels/tasks/state |
+| `create` | `--name --desc --type --state --project --epic --iteration --group --requested-by --deadline --owners --labels` | `--type` bug/feature/chore |
+| `update <id>` | `--name --desc --type --project --epic --iteration --group --deadline --position` | pass a nullable FK as a number or `None`? *(clear via update API)* |
+| `move <id>` | `--state` | id/name/type; stamps/clears `completed_at` |
+| `assign <id>` / `unassign <id>` | `--owner` | add/remove a member owner |
+| `label <id>` / `unlabel <id>` | `--label` | add/remove a label |
+| `delete <id>` | — | cascades to tasks/comments/links/owners/labels |
 
-- **Name or id, your choice.** Where you'd type a human name (`--project
-  backend`, `--owner chris`, `--labels bug,auth`), it's resolved to an id
-  case-insensitively; pass a number to use an id directly. Ambiguous names
-  error with the matching ids. Stories are referenced by id (names aren't
-  unique).
-- **`--state`** accepts a state id, a state name, or a state type
-  (`unstarted`/`started`/`done`).
-- **`--json`** (anywhere in the command) prints structured JSON.
-- **Errors** print to stderr and exit non-zero: `error: story 999 not found`.
-- Mutating commands print the resulting entity (text by default; JSON with
-  `--json`).
+### epic
+`list [--project --milestone]` · `get` · `create --name [--desc --state --project --milestone]`
+· `update` · `delete` · `stories <id>` (stories in the epic). State:
+`planned`/`in_progress`/`done` (entering `done` stamps `completed_at`).
 
-## Data model (core)
+### iteration
+`list [--status]` · `get` · `create --name [--desc --status --start --end]`
+· `update` · `delete` · `stories <id>`. Status: `planned`/`active`/`done`.
 
-Stories are the central unit of work. A story belongs to a workflow *state*
-(typed unstarted/started/done), and optionally to a project, epic, iteration,
-and group; it has owners (members), labels, tasks, comments, and links to other
-stories. Epics group stories and may belong to a project and a milestone;
-iterations are time-boxes; milestones group epics. Moving a story/epic/milestone
-to a `done` state stamps `completed_at` (and clears it when moved back out).
+### milestone
+`list [--state]` · `get` · `create --name [--desc --state]` · `update` · `delete`
+· `epics <id>`. State: `planned`/`in_progress`/`done`.
 
-Entities built now: **Stories, Epics, Iterations, Milestones, Projects,
-Workflows (+States), Labels, Members, Groups, Comments, Tasks, Story Links,
-Search**. Others from the Shortcut model (Documents, Objectives, Custom Fields,
-History, etc.) are deferred — see [CONTEXT.md §4](CONTEXT.md).
+### project
+`list [--archived]` · `get` · `create --name [--desc --abbr --color]` · `update`
+· `archive <id>` · `delete` · `stories <id>`. Soft-deleted via `archived`.
 
-## Architecture
+### label
+`list` · `get` · `create --name [--color --desc]` · `update` · `delete`.
+
+### member
+`list` · `get` · `create --name [--mention]` · `update` · `delete`. Resolved by
+`name` or `mention_name`.
+
+### group
+`list [--archived]` · `get` · `create --name [--desc]` · `update` · `archive <id>`
+· `delete` · `stories <id>`. Soft-deleted via `archived`.
+
+### workflow
+`list` · `get` · `create --name [--states "Todo:unstarted,Doing:started,Done:done"]`
+· `delete` · `states <id>` (list states) · `add-state <id> --name --type [--position]`.
+State `type` is `unstarted`/`started`/`done`.
+
+### task
+`list --story <id>` · `add --story <id> --desc [--complete]` · `update <id>`
+· `complete <id>` / `uncomplete <id>` · `delete <id>`. Owned by a story (cascade).
+
+### comment
+`list --story <id>` · `add --story <id> --text [--author --parent]`
+· `update <id> --text` · `delete <id>`. `--parent` threads a reply.
+
+### link
+`list [--story <id>]` · `add --subject <id> --verb <v> --object <id>` · `delete <id>`.
+Verbs: `blocks` `blocks_by` `duplicates` `duplicated_by` `relates_to`. A story
+cannot link to itself; (subject, verb, object) is unique.
+
+### search
+`search <terms...> [--entity story|epic|project|milestone|iteration|label]`.
+Terms are passed to FTS5 `MATCH`, so you can use `login OR auth`, `log*` (prefix),
+`"exact phrase"`, and boolean operators. Results are ranked by relevance.
+
+---
+
+## AI Agent Guide: Using the CLI During Development
+
+This section is the operational playbook for an AI coding agent that uses
+`projectplanner` to track the work it is doing on a software project. Treat the
+CLI as a small, reliable tool you call between editing steps.
+
+### Principles
+
+1. **Create before you code.** When you pick up a unit of work, create a story
+   for it first and capture the id. Cite that id in subsequent commands.
+2. **Move it to reflect reality.** Move a story to `started` when you begin and
+   `done` when it's finished. State is the source of truth for "what's in
+   flight".
+3. **Record decisions and findings as comments.** Comments are the durable
+   log; put reproduction steps, decisions, and blockers there.
+4. **Break work into tasks.** Use `task add` for checklist items so progress is
+   visible and resumable.
+5. **Use `--json` when you need to parse**, plain text when you need to read.
+6. **Always read back the id** from a mutating command's output before
+   referencing the new entity.
+
+### Recipe 1 — Start a session: see what's in flight
+
+```bash
+# What am I working on right now? (started, not done)
+python main.py story list --state-type started --no-completed --json
+
+# Full detail of a specific story (relations, tasks, comments)
+python main.py story detail 17
+```
+
+### Recipe 2 — Pick up a new task and begin
+
+```bash
+# Create the story; capture the id from the JSON output
+SID=$(python main.py story create --name "Refactor auth middleware" \
+      --project backend --type chore --owners "$(whoami)" --json \
+      | python -c "import sys,json; print(json.load(sys.stdin)['id'])")
+
+# Move it to "Started" and add sub-tasks
+python main.py story move "$SID" --state started
+python main.py task add --story "$SID" --desc "Extract session check"
+python main.py task add --story "$SID" --desc "Add tests for middleware"
+```
+
+### Recipe 3 — Log progress as you work
+
+```bash
+# Record a finding (a comment on the story)
+python main.py comment add --story 17 --text "Root cause: session cookie not set on redirect"
+
+# Mark a sub-task done as you finish it
+python main.py task complete 3
+
+# Note a blocker by linking to the story that's blocking this one
+python main.py link add --subject 17 --verb blocks --object 22
+```
+
+### Recipe 4 — Finish and verify
+
+```bash
+# Complete any remaining tasks, then mark the story done
+python main.py task complete 4
+python main.py story move 17 --state done        # completed_at is stamped automatically
+
+# Confirm it's done and read back the final state
+python main.py story get 17 --json
+```
+
+### Recipe 5 — Find related work before starting
+
+```bash
+# Full-text search across all entities
+python main.py search "auth login"
+
+# Scope to one entity type
+python main.py search "auth" --entity story --json
+
+# List everything in a project/iteration
+python main.py story list --project backend --iteration "Sprint 1" --json
+```
+
+### Recipe 6 — Track a feature as an epic with stories
+
+```bash
+python main.py epic create --name "Multi-factor auth" --project backend --milestone M1
+EID=$(python main.py epic create --name "Multi-factor auth" --project backend --json \
+      | python -c "import sys,json; print(json.load(sys.stdin)['id'])")
+python main.py story create --name "TOTP enrollment" --project backend --epic "$EID"
+python main.py story create --name "TOTP verification" --project backend --epic "$EID"
+python main.py epic stories "$EID"          # see the epic's stories
+```
+
+### Recipe 7 — Plan a timebox (iteration) and a milestone
+
+```bash
+python main.py iteration create --name "Sprint 2" --status planned \
+    --start 2026-09-15 --end 2026-09-28
+python main.py milestone create --name "M2 — Hardening" --state in_progress
+
+# Schedule a story into the iteration
+python main.py story update 17 --iteration "Sprint 2"
+```
+
+### Anti-patterns to avoid
+
+- Don't set `completed_at` yourself — it's automated by state moves.
+- Don't reference stories by name in scripts (names aren't unique); capture the
+  id from the create/move output.
+- Don't poll in a tight loop to "wait" for a writer — concurrent writers block
+  for up to 5s and then proceed; just retry on a non-zero exit if needed.
+- Don't parse the plain-text tables programmatically; use `--json`.
+
+---
+
+## Data Model
+
+The **story** is the central entity. Everything else is a container or an
+attachment.
 
 ```
+project ─┐
+epic ────┤ (epic may belong to a project + milestone)
+iteration│
+group ───┤
+         ▼
+       story ──┬── workflow_state (type: unstarted | started | done)
+               ├── owners   (members, many)
+               ├── labels   (many)
+               ├── tasks    (checklist, cascade-deleted with the story)
+               ├── comments (threaded via parent_id, cascade-deleted)
+               └── links    (directed: subject --verb--> object story)
+
+milestone groups epics. workflow contains workflow_states.
+member is a person (one seeded local user). group is a team.
+```
+
+**Key fields on a story:** `id`, `name`, `description`, `story_type`
+(`bug`/`feature`/`chore`), `workflow_state_id`, `epic_id`, `iteration_id`,
+`project_id`, `group_id`, `requested_by_id`, `deadline`, `position`, `created_at`,
+`updated_at`, `completed_at`.
+
+**Behaviors / invariants:**
+
+- **State typing.** Each workflow state has a `type` of `unstarted`, `started`,
+  or `done`. `completed_at` is set only while in a `done`-typed state.
+- **Position.** New stories get `position = max(position)+1` within their
+  project (or globally if no project), so they sort to the end.
+- **Default state.** `story create` with no `--state` uses the default workflow's
+  `default_state_id` (seeded = Started).
+- **Delete semantics.** Deleting a story cascades to its tasks, comments,
+  story-links (as subject or object), owners, and labels. Deleting a project /
+  epic / iteration / group / milestone / member **sets the story's FK to null**
+  (the story survives). Projects and groups are *soft-deleted* via `archived`.
+- **Story links.** A link is a directed `(subject, verb, object)` triple with
+  `verb` ∈ {`blocks`, `blocks_by`, `duplicates`, `duplicated_by`, `relates_to`};
+  the triple is unique and a story cannot link to itself.
+
+Entities built: **Stories, Epics, Iterations, Milestones, Projects,
+Workflows (+States), Labels, Members, Groups, Comments, Tasks, Story Links,
+Search**. Deferred (not built unless needed): Documents, Objectives + Key
+Results, Custom Fields, Entity Templates, Files, Linked Files, Repositories,
+Integrations, Health, History, Reactions, External Links, Categories, Epic
+Workflow — see [CONTEXT.md §4](CONTEXT.md).
+
+---
+
+## Architecture & Concurrency
+
+```
+main.py    entry point: no args → TUI; args → CLI
 backend/   function-call API over SQLite (each REST-shaped op = one Python fn)
 cli/       argparse subparsers → calls backend, prints text/JSON
-tui/       full-screen UI (pending) → same backend
-main.py    dispatches: no args → TUI, args → CLI
+tui/       full-screen Textual UI → same backend functions
 ```
 
-- Every backend function takes the `sqlite3.Connection` as its first arg; the
-  CLI/TUI are thin layers over them.
-- Writers serialize via `PRAGMA busy_timeout = 5000` + `BEGIN IMMEDIATE`: a
-  second writer blocks (up to 5s) until the first commits, rather than erroring.
-  No WAL (YAGNI). See [CONTEXT.md §6](CONTEXT.md).
-- Plain dataclasses, raw SQL, no ORM. Simple versioned migrations.
+- **Function-call API, not REST.** Each operation is a plain function in
+  `backend/*.py` taking the `sqlite3.Connection` as its first argument
+  (e.g. `stories.get_story(conn, id)`). The CLI and TUI are thin layers.
+- **Connection is passed, not global.** `backend/db.connect(db_path)` returns a
+  configured connection; every function takes `conn` first.
+- **No ORM.** Plain dataclasses (`backend/models.py`) for return values; raw SQL
+  via `sqlite3`. A small shared helper (`backend/_util.py`) does get/list/
+  insert/update/delete and maps `sqlite3.IntegrityError` to `NotFound` /
+  `ValidationError` / `Conflict`.
+- **Concurrency.** Every connection sets `PRAGMA busy_timeout = 5000` and
+  `PRAGMA foreign_keys = ON`. Writes go through a `tx_write(conn)` helper that
+  does `BEGIN IMMEDIATE` (acquires the write lock up front) and commits or
+  rolls back. Result: concurrent writers serialize — a second writer blocks
+  (up to 5s) until the first commits, then proceeds, rather than failing with
+  `SQLITE_BUSY`. WAL is intentionally off (YAGNI); enable it only if
+  read-during-write contention is observed.
+- **Migrations.** A `schema_version` table tracks an integer version; on connect
+  any pending versioned statements are applied idempotently inside
+  `BEGIN IMMEDIATE`. Current schema version: **2** (v1 = core tables + seed;
+  v2 = FTS5 search tables + sync triggers).
+- **Search.** FTS5 external-content tables mirror `name` + `description` for
+  stories, epics, projects, milestones, iterations, and labels, kept in sync by
+  after-insert/update/delete triggers.
 
-Full design, schema, and build status live in [CONTEXT.md](CONTEXT.md).
+---
+
+## Storage & Schema
+
+- **File:** `planner.db` in the repo root (gitignored). Created + seeded on first
+  connect.
+- **Ids:** integer autoincrement primary keys.
+- **Timestamps:** TEXT ISO-8601 UTC (`created_at`, `updated_at`, `completed_at`).
+- **Position:** REAL, for insert-between reordering.
+- **Foreign keys:** enforced (`PRAGMA foreign_keys = ON`). CASCADE for owned
+  children (tasks, comments, story_owner, story_label, story_link,
+  workflow_state); SET NULL for optional parent links on stories.
+- **The `group` table** is a SQLite keyword, so all table identifiers are
+  double-quoted in the helper SQL.
+
+The full DDL and column-by-column schema live in
+[CONTEXT.md §7](CONTEXT.md). This README intentionally does not duplicate the
+DDL.
+
+---
+
+## Exit Codes & Errors
+
+| Exit | Meaning | Example stderr |
+|------|---------|----------------|
+| `0`  | success | — |
+| `1`  | a backend error (`NotFound`, `ValidationError`, `Conflict`) | `error: story 999 not found` |
+| `2`  | argparse usage error (bad flags / choices) | `argument --type: invalid choice: 'bogus'` |
+
+Error classes (`backend/errors.py`, all subclass `PlannerError`):
+
+- `NotFound(resource, id)` — referenced entity doesn't exist.
+- `ValidationError(msg)` — invalid args or a CHECK/constraint violation.
+- `Conflict(msg)` — a uniqueness conflict (e.g. a duplicate story link).
+
+Agents should treat exit `1` as a recoverable, retryable-after-fix condition,
+and exit `2` as a usage bug in the command they constructed.
+
+---
+
+## Examples & Recipes
+
+**Show my open work, newest context first:**
+```bash
+python main.py story list --owner "$(whoami)" --no-completed --json
+```
+
+**Everything in a sprint that isn't done:**
+```bash
+python main.py story list --iteration "Sprint 1" --no-completed
+```
+
+**Add a labeled bug in one shot:**
+```bash
+python main.py story create --name "Crash on empty input" --type bug \
+    --project backend --labels bug,crash --owners "$(whoami)"
+```
+
+**Move a whole project's stories?** There's no bulk move command (YAGNI); loop
+in the caller:
+```bash
+for id in $(python main.py story list --project backend --state-type unstarted --json \
+            | python -c "import sys,json; print(' '.join(str(s['id']) for s in json.load(sys.stdin)))"); do
+  python main.py story move "$id" --state started
+done
+```
+
+**Threaded reply to a comment:**
+```bash
+python main.py comment add --story 17 --text "agreed, see PR #42" --parent 5
+```
+
+---
+
+## Non-goals & Differences from Shortcut
+
+- **No Shortcut calls, no network, no auth.** This is not a Shortcut client or
+  mock; the model is inspiration only.
+- **One local workspace, one seeded user.** No multi-workspace, no login.
+- **No pagination protocol.** Lists return in full (add limits only if a list
+  actually grows large).
+- **No webhooks, integrations, file uploads, history tracking, or custom
+  fields.**
+- **No caching, async, or server.** In-process library + two front-ends.
+- **Trimmed shapes.** Field/entity *names* are Shortcut-flavored where carried,
+  but JSON shapes are our own, not Shortcut's.
+
+---
+
+## Further Reading
+
+- **[CONTEXT.md](CONTEXT.md)** — the engineering source of truth: locked
+  decisions, full schema DDL, the build-vs-defer scope, concurrency model, and
+  build history.
+- **In-code docs** — each source file has module and function docstrings
+  describing inputs, outputs, and invariants. Start at `backend/db.py` and
+  `backend/stories.py`.
+- **`python main.py <resource> <action> -h`** — the authoritative flag list for
+  any command.

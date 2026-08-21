@@ -19,7 +19,14 @@ VERBS = ("blocks", "blocks_by", "duplicates", "duplicated_by", "relates_to")
 
 
 def list_links(conn: sqlite3.Connection, story_id: int | None = None) -> list[StoryLink]:
-    """List all links, or those involving ``story_id`` as subject or object."""
+    """List all links, or those involving ``story_id`` as subject or object.
+
+    Args:
+        conn: sqlite3.Connection from db.connect().
+        story_id: int | None — filter by story.
+    Returns:
+        list[StoryLink] — the filtered list of links.
+    """
     if story_id is None:
         rows = conn.execute("SELECT * FROM story_link ORDER BY id")
     else:
@@ -30,11 +37,39 @@ def list_links(conn: sqlite3.Connection, story_id: int | None = None) -> list[St
 
 
 def get_link(conn: sqlite3.Connection, id) -> StoryLink:
+    """Get a single link.
+
+    Args:
+        conn: sqlite3.Connection from db.connect().
+        id: int — link id.
+    Returns:
+        StoryLink — the found link.
+    Raises:
+        NotFound: if the link does not exist.
+    """
     return _util.get(conn, StoryLink, "story_link", id, resource="story_link")
 
 
 def create_link(conn: sqlite3.Connection, subject_story_id: int, verb: str,
                 object_story_id: int) -> StoryLink:
+    """Create a directed link between two stories.
+
+    Validates the verb, ensures a story cannot link to itself, and verifies
+    both stories exist. Uses a raw insert to map UNIQUE violations to a
+    friendly Conflict error.
+
+    Args:
+        conn: sqlite3.Connection from db.connect().
+        subject_story_id: int — source story.
+        verb: str — relationship type (must be in VERBS).
+        object_story_id: int — target story.
+    Returns:
+        StoryLink — the created link.
+    Raises:
+        ValidationError: if the verb is unknown or subject equals object.
+        NotFound: if either story does not exist.
+        Conflict: if the link already exists.
+    """
     if verb not in VERBS:
         raise errors.ValidationError(f"unknown verb {verb!r}")
     if subject_story_id == object_story_id:
@@ -54,5 +89,11 @@ def create_link(conn: sqlite3.Connection, subject_story_id: int, verb: str,
 
 
 def delete_link(conn: sqlite3.Connection, id) -> None:
+    """Delete a link.
+
+    Args:
+        conn: sqlite3.Connection from db.connect().
+        id: int — link id.
+    """
     with db.tx_write(conn):
         _util.delete(conn, "story_link", id, resource="story_link")

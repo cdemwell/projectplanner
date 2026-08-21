@@ -13,13 +13,35 @@ from . import errors
 
 
 def _q(ident: str) -> str:
-    """Quote a SQL identifier (double quotes, escaped). Needed because ``group``
-    is a SQLite keyword and is one of our table names."""
+    """Quote a SQL identifier using double quotes.
+
+    Prevents conflicts with SQLite keywords (e.g. ``group``).
+
+    Args:
+        ident: The identifier to quote.
+
+    Returns:
+        str: The quoted identifier with internal double-quotes escaped.
+    """
     return '"' + ident.replace('"', '""') + '"'
 
 
 def get(conn: sqlite3.Connection, model, table: str, id, *, resource: str | None = None):
-    """Fetch one row by id as a dataclass, or raise :class:`NotFound`."""
+    """Fetch one row by id as a dataclass, or raise :class:`NotFound`.
+
+    Args:
+        conn: sqlite3.Connection from db.connect().
+        model: The dataclass to use for mapping (must inherit from Model).
+        table: The name of the table to query.
+        id: The primary key id.
+        resource: Optional display name for the resource if different from table.
+
+    Returns:
+        Model: The mapped dataclass instance.
+
+    Raises:
+        NotFound: if the row with the given id is not found.
+    """
     resource = resource or table
     row = conn.execute(f"SELECT * FROM {_q(table)} WHERE id = ?", (id,)).fetchone()
     if row is None:
@@ -29,7 +51,19 @@ def get(conn: sqlite3.Connection, model, table: str, id, *, resource: str | None
 
 def list_rows(conn, model, table: str, *, where: str | None = None,
               params=(), order: str = "id"):
-    """Fetch rows (optionally filtered) as a list of dataclasses."""
+    """Fetch rows as a list of dataclasses.
+
+    Args:
+        conn: sqlite3.Connection from db.connect().
+        model: The dataclass to use for mapping.
+        table: The name of the table to query.
+        where: Optional SQL WHERE clause (without 'WHERE' keyword).
+        params: Parameters for the WHERE clause.
+        order: SQL ORDER BY clause (without 'ORDER BY' keyword).
+
+    Returns:
+        list: A list of mapped dataclass instances.
+    """
     sql = f"SELECT * FROM {_q(table)}"
     if where:
         sql += f" WHERE {where}"
@@ -38,7 +72,20 @@ def list_rows(conn, model, table: str, *, where: str | None = None,
 
 
 def insert(conn: sqlite3.Connection, table: str, fields: dict) -> int:
-    """Insert ``fields`` (col -> value) and return the new rowid."""
+    """Insert a row and return the new rowid.
+
+    Args:
+        conn: sqlite3.Connection from db.connect().
+        table: The name of the table.
+        fields: A dictionary of column names to values.
+
+    Returns:
+        int: The last inserted rowid.
+
+    Raises:
+        Conflict: on uniqueness violations.
+        ValidationError: on other integrity constraints.
+    """
     cols = list(fields)
     placeholders = ", ".join("?" for _ in cols)
     sql = f"INSERT INTO {_q(table)}({', '.join(cols)}) VALUES ({placeholders})"
@@ -50,7 +97,21 @@ def insert(conn: sqlite3.Connection, table: str, fields: dict) -> int:
 
 
 def update(conn: sqlite3.Connection, table: str, id, fields: dict) -> bool:
-    """Set the given ``fields`` on the row with ``id``. Returns True if a row matched."""
+    """Update the row with the given id.
+
+    Args:
+        conn: sqlite3.Connection from db.connect().
+        table: The name of the table.
+        id: The primary key id of the row to update.
+        fields: A dictionary of column names to new values.
+
+    Returns:
+        bool: True if a row was actually updated, False otherwise.
+
+    Raises:
+        Conflict: on uniqueness violations.
+        ValidationError: on other integrity constraints.
+    """
     if not fields:
         return True
     sets = ", ".join(f"{k} = ?" for k in fields)
@@ -63,7 +124,17 @@ def update(conn: sqlite3.Connection, table: str, id, fields: dict) -> bool:
 
 
 def delete(conn: sqlite3.Connection, table: str, id, *, resource: str | None = None) -> None:
-    """Delete the row with ``id``; raise :class:`NotFound` if it didn't exist."""
+    """Delete the row with the given id.
+
+    Args:
+        conn: sqlite3.Connection from db.connect().
+        table: The name of the table.
+        id: The primary key id.
+        resource: Optional display name for the resource.
+
+    Raises:
+        NotFound: if the row with the given id did not exist.
+    """
     resource = resource or table
     cur = conn.execute(f"DELETE FROM {_q(table)} WHERE id = ?", (id,))
     if cur.rowcount == 0:
@@ -71,7 +142,14 @@ def delete(conn: sqlite3.Connection, table: str, id, *, resource: str | None = N
 
 
 def _classify_integrity(err: sqlite3.IntegrityError) -> errors.PlannerError:
-    """Turn a raw IntegrityError into a PlannerError (Conflict vs ValidationError)."""
+    """Map a sqlite3.IntegrityError to a project-specific PlannerError.
+
+    Args:
+        err: The raw IntegrityError from sqlite3.
+
+    Returns:
+        PlannerError: Either a Conflict (for UNIQUE violations) or a ValidationError.
+    """
     msg = str(err)
     if "UNIQUE" in msg.upper():
         return errors.Conflict(msg)

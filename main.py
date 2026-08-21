@@ -12,6 +12,16 @@ import sys
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Dispatch to TUI or CLI based on arguments.
+
+    If no arguments are provided, launches the interactive TUI.
+    Otherwise, runs the one-shot CLI.
+
+    Args:
+        argv: Optional list of command-line arguments.
+    Returns:
+        Exit code.
+    """
     argv = list(sys.argv[1:] if argv is None else argv)
 
     # No arguments: launch the interactive TUI.
@@ -24,7 +34,14 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _launch_tui() -> int:
-    """Launch the full-screen Textual TUI (no args)."""
+    """Launch the full-screen Textual TUI (no args).
+
+    Attempts to import the TUI application; if 'textual' is not installed,
+    prints an installation hint and exits with 1.
+
+    Returns:
+        Exit code.
+    """
     try:
         from tui.app import run as run_tui
     except ImportError as e:

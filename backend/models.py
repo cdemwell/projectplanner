@@ -20,6 +20,17 @@ class Model:
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> "Model":
+        """Build a dataclass from a ``sqlite3.Row``.
+
+        Maps row columns by name to the matching dataclass fields, ignoring
+        any extra columns returned by the query.
+
+        Args:
+            row: The sqlite3.Row to map.
+
+        Returns:
+            Model: An instance of the dataclass.
+        """
         names = cls._field_names()
         kwargs = {k: row[k] for k in row.keys() if k in names}
         return cls(**kwargs)  # type: ignore[arg-type]
@@ -32,6 +43,10 @@ class Model:
 # People ------------------------------------------------------------------ #
 @dataclass
 class Member(Model):
+    """Snapshot of a member row.
+
+    Timestamps are ISO-8601 UTC strings.
+    """
     id: int
     name: str
     mention_name: str
@@ -40,6 +55,11 @@ class Member(Model):
 
 @dataclass
 class Group(Model):
+    """Snapshot of a group row.
+
+    Archived is stored as an integer (0/1).
+    Timestamps are ISO-8601 UTC strings.
+    """
     id: int
     name: str
     description: str
@@ -50,6 +70,10 @@ class Group(Model):
 # Workflows --------------------------------------------------------------- #
 @dataclass
 class Workflow(Model):
+    """Snapshot of a workflow row.
+
+    Timestamps are ISO-8601 UTC strings.
+    """
     id: int
     name: str
     default_state_id: int | None
@@ -58,6 +82,10 @@ class Workflow(Model):
 
 @dataclass
 class WorkflowState(Model):
+    """Snapshot of a workflow state row.
+
+    Timestamps are ISO-8601 UTC strings.
+    """
     id: int
     workflow_id: int
     name: str
@@ -69,6 +97,11 @@ class WorkflowState(Model):
 # Planning containers ----------------------------------------------------- #
 @dataclass
 class Project(Model):
+    """Snapshot of a project row.
+
+    Archived is stored as an integer (0/1).
+    Timestamps are ISO-8601 UTC strings.
+    """
     id: int
     name: str
     description: str
@@ -80,6 +113,10 @@ class Project(Model):
 
 @dataclass
 class Label(Model):
+    """Snapshot of a label row.
+
+    Timestamps are ISO-8601 UTC strings.
+    """
     id: int
     name: str
     color: str
@@ -89,6 +126,10 @@ class Label(Model):
 
 @dataclass
 class Milestone(Model):
+    """Snapshot of a milestone row.
+
+    Timestamps are ISO-8601 UTC strings.
+    """
     id: int
     name: str
     description: str
@@ -99,6 +140,11 @@ class Milestone(Model):
 
 @dataclass
 class Epic(Model):
+    """Snapshot of an epic row.
+
+    Timestamps are ISO-8601 UTC strings.
+    FKs to milestones and projects are nullable.
+    """
     id: int
     name: str
     description: str
@@ -111,6 +157,10 @@ class Epic(Model):
 
 @dataclass
 class Iteration(Model):
+    """Snapshot of an iteration row.
+
+    Timestamps are ISO-8601 UTC strings.
+    """
     id: int
     name: str
     description: str
@@ -123,6 +173,12 @@ class Iteration(Model):
 # Stories ----------------------------------------------------------------- #
 @dataclass
 class Story(Model):
+    """Snapshot of a story row.
+
+    Timestamps are ISO-8601 UTC strings.
+    FKs to workflow state, epic, iteration, project, group,
+    and requester are nullable.
+    """
     id: int
     name: str
     description: str
@@ -143,6 +199,11 @@ class Story(Model):
 # Child entities ---------------------------------------------------------- #
 @dataclass
 class Task(Model):
+    """Snapshot of a task row.
+
+    Complete is stored as an integer (0/1).
+    Timestamps are ISO-8601 UTC strings.
+    """
     id: int
     story_id: int
     description: str
@@ -154,6 +215,11 @@ class Task(Model):
 
 @dataclass
 class StoryComment(Model):
+    """Snapshot of a story comment row.
+
+    Timestamps are ISO-8601 UTC strings.
+    FKs to author and parent are nullable.
+    """
     id: int
     story_id: int
     author_id: int | None
@@ -165,6 +231,10 @@ class StoryComment(Model):
 
 @dataclass
 class StoryLink(Model):
+    """Snapshot of a story link row.
+
+    Timestamps are ISO-8601 UTC strings.
+    """
     id: int
     subject_story_id: int
     verb: str
@@ -184,6 +254,13 @@ class StoryDetail:
     workflow_state: WorkflowState | None
 
     def to_dict(self) -> dict[str, Any]:
+        """Return a dictionary representation of the story detail.
+
+        Used for JSON serialization or API responses.
+
+        Returns:
+            dict: Nested dictionary containing the story and its relations.
+        """
         import dataclasses
         return {
             "story": dataclasses.asdict(self.story),

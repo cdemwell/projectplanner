@@ -30,11 +30,19 @@ from backend import (comments, db, errors, groups, labels, members, milestones,
 # Sentinels for "no selection" inside Select widgets (kept as int/str so all
 # option values share a type and we dodge the blank-selection API).
 _NONE_INT = -1
+"""Integer sentinel for no selection in Select widgets."""
 _NONE_STR = ""
+"""String sentinel for no selection in Select widgets."""
 
 
 def _sel(value: Any) -> Any:
-    """Normalize a Select value: blank/sentinel -> None."""
+    """Normalize a Select value: blank/sentinel -> None.
+
+    Args:
+        value: The value from a Select widget.
+    Returns:
+        The value if not a sentinel/blank, otherwise None.
+    """
     if value is _Select.BLANK or value == _NONE_INT or value == _NONE_STR:
         return None
     return value
@@ -45,7 +53,11 @@ def _sel(value: Any) -> Any:
 # --------------------------------------------------------------------------- #
 
 class FilterScreen(ModalScreen[tuple]):
-    """Pick a project and a state-type to filter the story list by."""
+    """Collects project and state-type filters.
+
+    Dismisses with:
+        tuple: (project_id|None, state_type|None), or None on cancel.
+    """
 
     def __init__(self, conn: sqlite3.Connection, current: tuple) -> None:
         super().__init__()
@@ -90,7 +102,11 @@ class FilterScreen(ModalScreen[tuple]):
 
 
 class CreateStoryScreen(ModalScreen[int]):
-    """Create a story; dismiss with the new story id (or None on cancel)."""
+    """Collects name, description, type, project, owner, and state for a new story.
+
+    Dismisses with:
+        int: The new story id, or None on cancel.
+    """
 
     def __init__(self, conn: sqlite3.Connection) -> None:
         super().__init__()
@@ -154,7 +170,11 @@ class CreateStoryScreen(ModalScreen[int]):
 
 
 class MoveStateScreen(ModalScreen[int]):
-    """Choose a new workflow state for the selected story; dismiss with state id."""
+    """Collects a new workflow state for the selected story.
+
+    Dismisses with:
+        int: The new state id, or None on cancel.
+    """
 
     def __init__(self, conn: sqlite3.Connection, story_id: int) -> None:
         super().__init__()
@@ -185,8 +205,11 @@ class MoveStateScreen(ModalScreen[int]):
 
 
 class TextScreen(ModalScreen[str]):
-    """A modal with a TextArea (for comments / tasks). Dismiss with the text
-    (or None on cancel)."""
+    """Collects multi-line text via a TextArea (used for comments and tasks).
+
+    Dismisses with:
+        str: The entered text, or None on cancel.
+    """
 
     def __init__(self, title: str) -> None:
         super().__init__()
@@ -216,7 +239,11 @@ class TextScreen(ModalScreen[str]):
 
 
 class SearchInputScreen(ModalScreen[str]):
-    """Single-line search input."""
+    """Collects a search query string.
+
+    Dismisses with:
+        str: The search query, or None on cancel.
+    """
 
     def compose(self) -> ComposeResult:
         yield Vertical(
@@ -242,7 +269,11 @@ class SearchInputScreen(ModalScreen[str]):
 
 
 class ConfirmScreen(ModalScreen[bool]):
-    """Yes/no confirmation."""
+    """Collects a yes/no confirmation.
+
+    Dismisses with:
+        bool: True if confirmed, False otherwise.
+    """
 
     def __init__(self, message: str) -> None:
         super().__init__()
@@ -325,6 +356,10 @@ class PlannerApp(App):
 
     # --- story list -------------------------------------------------------- #
     def refresh_stories(self) -> None:
+        """Query stories based on active filters and populate the DataTable.
+
+        The filters tuple shape is (project_id|None, state_type|None, search_q|None).
+        """
         assert self.conn is not None
         proj, stype, q = self.filters
         items = stories.list_stories(self.conn, project_id=proj, state_type=stype, q=q)
@@ -366,11 +401,26 @@ class PlannerApp(App):
             log.write("(no stories match the current filter — press 'n' to create one)")
 
     def name_of(self, table: str, id: int) -> str:
+        """Look up a name for a given ID in the specified table.
+
+        Note: named `name_of` to avoid collision with Textual's `Widget._name`.
+
+        Args:
+            table: Table name (e.g., 'project', 'epic').
+            id: The primary key ID.
+        Returns:
+            The name string if found, otherwise the ID as a string.
+        """
         assert self.conn is not None
         row = self.conn.execute(f'SELECT name FROM "{table}" WHERE id = ?', (id,)).fetchone()
         return row["name"] if row else str(id)
 
     def _current_story_id(self) -> int | None:
+        """Retrieve the ID of the story currently highlighted in the DataTable.
+
+        Returns:
+            The story ID as an int, or None if no row is selected.
+        """
         table = self.query_one("#stories", DataTable)
         try:
             key = table.coordinate_to_cell_key(table.cursor_coordinate).row_key
@@ -384,6 +434,8 @@ class PlannerApp(App):
             return None
 
     def show_current_detail(self) -> None:
+        """Render the highlighted story's full details into the RichLog.
+        """
         sid = self._current_story_id()
         if sid is None:
             return
@@ -421,9 +473,11 @@ class PlannerApp(App):
 
     # --- actions ----------------------------------------------------------- #
     def action_refresh(self) -> None:
+        """Refresh the story list based on current filters."""
         self.refresh_stories()
 
     def action_new_story(self) -> None:
+        """Open modal to create a new story."""
         assert self.conn is not None
         self.push_screen(CreateStoryScreen(self.conn), self._after_new)
 
@@ -440,6 +494,7 @@ class PlannerApp(App):
         self.show_current_detail()
 
     def action_move_state(self) -> None:
+        """Open modal to change the workflow state of the selected story."""
         assert self.conn is not None
         sid = self._current_story_id()
         if sid is None:
@@ -448,6 +503,7 @@ class PlannerApp(App):
         self.push_screen(MoveStateScreen(self.conn, sid), lambda _: self.refresh_stories())
 
     def action_add_comment(self) -> None:
+        """Open modal to add a comment to the selected story."""
         sid = self._current_story_id()
         if sid is None or self.conn is None:
             self.bell()
@@ -456,6 +512,7 @@ class PlannerApp(App):
                          lambda text: self._do_comment(sid, text))
 
     def action_add_task(self) -> None:
+        """Open modal to add a task to the selected story."""
         sid = self._current_story_id()
         if sid is None or self.conn is None:
             self.bell()
@@ -476,6 +533,7 @@ class PlannerApp(App):
         self.show_current_detail()
 
     def action_filter(self) -> None:
+        """Open modal to adjust project and state filters."""
         assert self.conn is not None
         proj, stype, _q = self.filters
         self.push_screen(FilterScreen(self.conn, (proj, stype)), self._after_filter)
@@ -488,6 +546,7 @@ class PlannerApp(App):
         self.refresh_stories()
 
     def action_search(self) -> None:
+        """Open modal to search stories by keyword."""
         self.push_screen(SearchInputScreen(), self._after_search)
 
     def _after_search(self, q: str | None) -> None:
@@ -497,6 +556,7 @@ class PlannerApp(App):
         self.refresh_stories()
 
     def action_delete_story(self) -> None:
+        """Open confirmation modal to delete the selected story."""
         sid = self._current_story_id()
         if sid is None:
             self.bell()
@@ -513,6 +573,8 @@ class PlannerApp(App):
         self.refresh_stories()
 
     def action_toggle_complete(self) -> None:
+        """Toggle the selected story between 'done' and 'unstarted' states.
+        """
         sid = self._current_story_id()
         if sid is None or self.conn is None:
             self.bell()
@@ -538,7 +600,13 @@ class PlannerApp(App):
 
 
 def run(db_path: str | None = None) -> int:
-    """Entry point used by main.py."""
+    """Entry point for the TUI app used by main.py.
+
+    Args:
+        db_path: Path to the SQLite database.
+    Returns:
+        Exit code (0 for success).
+    """
     PlannerApp(db_path).run()
     return 0
 
