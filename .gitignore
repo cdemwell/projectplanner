@@ -4,6 +4,10 @@
 /planner.db-wal
 /planner.db-shm
 
+# Runtime artifacts (backups, logs)
+/planner.db.backup*
+/log.txt
+
 # Python
 __pycache__/
 *.py[cod]
