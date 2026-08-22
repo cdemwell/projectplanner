@@ -265,7 +265,7 @@ Naming: `list_*`, `get_*`, `create_*`, `update_*`, `delete_*`, plus `search_*`. 
 - TUI: `textual>=0.80` (declared in `pyproject.toml` `dependencies`).
 - Tests: `pytest>=8`; lint: `ruff>=0.6` (both in
   `[project.optional-dependencies] dev`). Run tests with
-  `.venv/bin/python -m pytest -q` (83 tests; fresh temp DB per test; TUI tests
+  `.venv/bin/python -m pytest -q` (93 tests; fresh temp DB per test; TUI tests
   use Textual's headless `App.run_test()` pilot and are skipped if `textual`
   isn't installed). Lint with `.venv/bin/ruff check backend cli tui main.py tests`
   (config in `[tool.ruff]`; E501/E701/E702 ignored to permit long DDL lines and

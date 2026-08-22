@@ -54,18 +54,18 @@ search them — all from the command line, against a local file.
 | 3 | [Intent & Design Goals](#intent--design-goals) | 72–97 |
 | 4 | [Requirements & Setup](#requirements--setup) | 98–121 |
 | 5 | [Quick Start](#quick-start) | 122–148 |
-| 6 | [Running the Tool: CLI vs TUI](#running-the-tool-cli-vs-tui) | 149–172 |
-| 7 | [CLI Conventions](#cli-conventions) | 173–215 |
-| 8 | [CLI Reference](#cli-reference) | 216–290 |
-| 9 | [AI Agent Guide: Using the CLI During Development](#ai-agent-guide-using-the-cli-during-development) | 291–405 |
-| 10 | [Data Model](#data-model) | 406–457 |
-| 11 | [Architecture & Concurrency](#architecture--concurrency) | 458–492 |
-| 12 | [Storage & Schema](#storage--schema) | 493–511 |
-| 13 | [Exit Codes & Errors](#exit-codes--errors) | 512–530 |
-| 14 | [Examples & Recipes](#examples--recipes) | 531–564 |
-| 15 | [Non-goals & Differences from Shortcut](#non-goals--differences-from-shortcut) | 565–579 |
-| 16 | [Tests](#tests) | 580–620 |
-| 17 | [Further Reading](#further-reading) | 621–629 |
+| 6 | [Running the Tool: CLI vs TUI](#running-the-tool-cli-vs-tui) | 149–174 |
+| 7 | [CLI Conventions](#cli-conventions) | 175–223 |
+| 8 | [CLI Reference](#cli-reference) | 224–303 |
+| 9 | [AI Agent Guide: Using the CLI During Development](#ai-agent-guide-using-the-cli-during-development) | 304–418 |
+| 10 | [Data Model](#data-model) | 419–470 |
+| 11 | [Architecture & Concurrency](#architecture--concurrency) | 471–505 |
+| 12 | [Storage & Schema](#storage--schema) | 506–524 |
+| 13 | [Exit Codes & Errors](#exit-codes--errors) | 525–543 |
+| 14 | [Examples & Recipes](#examples--recipes) | 544–577 |
+| 15 | [Non-goals & Differences from Shortcut](#non-goals--differences-from-shortcut) | 578–592 |
+| 16 | [Tests](#tests) | 593–634 |
+| 17 | [Further Reading](#further-reading) | 635–643 |
 
 ---
 
@@ -162,8 +162,10 @@ python main.py search "login OR auth"
 | `u` | update story | | `/` | search |
 | `m` | move state | | `e` | toggle complete |
 | `c` | add comment | | `x` | task toggle/edit |
-| `t` | add task | | `d` | delete story |
-| `r` | refresh | | `q` | quit |
+| `t` | add task | | `o` | owners |
+| `r` | refresh | | `l` | labels |
+| `d` | delete story | | `J` | move down |
+| `K` | move up | | `q` | quit |
 
 The TUI shares the exact same backend functions as the CLI — there is no
 separate data layer.
@@ -200,6 +202,12 @@ commands.
 - **`completed_at` is automated:** moving a story/epic/milestone into a `done`
   state stamps `completed_at`; moving it back out clears it. You do not set it
   manually.
+- **`$EDITOR` for long-form text.** `story edit <id>` opens `$VISUAL`/`$EDITOR`
+  (fallback `vi`) on a buffer of the story's name and description and updates
+  them (line 1 = name, blank line, rest = description). `comment add` and
+  `task add` with no `--text`/`--desc` open the editor for the body. A non-zero
+  editor exit aborts with no change. The `--text`/`--desc` flags still work for
+  the non-editor path.
 
 ### The `--json` contract
 
@@ -230,6 +238,7 @@ are the commonly used ones.
 | `detail <id>` | — | story + owners/labels/tasks/state |
 | `create` | `--name --desc --type --state --project --epic --iteration --group --requested-by --deadline --owners --labels` | `--type` bug/feature/chore |
 | `update <id>` | `--name --desc --type --project --epic --iteration --group --deadline --position` | pass a nullable FK as a number or `None`? *(clear via update API)* |
+| `edit <id>` | — | open `$EDITOR` on name+description and update them |
 | `move <id>` | `--state` | id/name/type; stamps/clears `completed_at` |
 | `assign <id>` / `unassign <id>` | `--owner` | add/remove a member owner |
 | `label <id>` / `unlabel <id>` | `--label` | add/remove a label |
@@ -269,12 +278,14 @@ are the commonly used ones.
 State `type` is `unstarted`/`started`/`done`.
 
 ### task
-`list --story <id>` · `add --story <id> --desc [--complete]` · `update <id>`
-· `complete <id>` / `uncomplete <id>` · `delete <id>`. Owned by a story (cascade).
+`list --story <id>` · `add --story <id> [--desc] [--complete]` · `update <id>`
+· `complete <id>` / `uncomplete <id>` · `delete <id>`. With no `--desc`, `add`
+opens `$EDITOR`. Owned by a story (cascade).
 
 ### comment
-`list --story <id>` · `add --story <id> --text [--author --parent]`
-· `update <id> --text` · `delete <id>`. `--parent` threads a reply.
+`list --story <id>` · `add --story <id> [--text] [--author --parent]`
+· `update <id> --text` · `delete <id>`. With no `--text`, `add` opens `$EDITOR`.
+`--parent` threads a reply.
 
 ### link
 `list [--story <id>]` · `add --subject <id> --verb <v> --object <id>` · `delete <id>`.
@@ -282,9 +293,11 @@ Verbs: `blocks` `blocks_by` `duplicates` `duplicated_by` `relates_to`. A story
 cannot link to itself; (subject, verb, object) is unique.
 
 ### search
-`search <terms...> [--entity story|epic|project|milestone|iteration|label]`.
+`search <terms...> [--entity story|epic|project|milestone|iteration|label|comment|task]`.
 Terms are passed to FTS5 `MATCH`, so you can use `login OR auth`, `log*` (prefix),
 `"exact phrase"`, and boolean operators. Results are ranked by relevance.
+Search covers stories/epics/projects/milestones/iterations/labels (name +
+description) and comments (`text`) and tasks (`description`).
 
 ---
 
@@ -608,11 +621,12 @@ Coverage:
 - `tests/test_tasks.py`, `test_comments.py`, `test_story_links.py` — child
   entities, threading, verb/self-link/UNIQUE rules, cascade.
 - `tests/test_search.py` — FTS5 insert/update/delete sync, entity filter,
-  ranking, boolean/prefix, error cases.
+  ranking, boolean/prefix, error cases, and comment/task search + sync.
 - `tests/test_cli.py` — `run()` with `--json` shapes, name resolution +
-  ambiguity, `--state` by id/name/type, exit codes (1 backend, 2 argparse).
-- `tests/test_tui.py` — headless Textual pilot (create/toggle/search/comment/
-  delete); skipped if `textual` isn't installed.
+  ambiguity, `--state` by id/name/type, exit codes (1 backend, 2 argparse), and
+  the `$EDITOR` flow (comment/task add, story edit, abort).
+- `tests/test_tui.py` — headless Textual pilot (create/edit/toggle/search/
+  comment/owners/labels/reorder/delete); skipped if `textual` isn't installed.
 - `tests/test_concurrency.py` — two writers serialize (the second blocks until
   the first commits).
 
