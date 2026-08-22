@@ -16,7 +16,7 @@ from typing import Any
 from textual import on
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import (
     Button,
@@ -93,7 +93,7 @@ class FilterScreen(ModalScreen[tuple]):
         type_opts = [("(any state)", _NONE_STR), ("unstarted", "unstarted"),
                      ("started", "started"), ("done", "done")]
         cur_proj, cur_type = self.current
-        yield Vertical(
+        yield VerticalScroll(
             Static("Filter stories", classes="modal-title"),
             Label("Project:"),
             Select(proj_opts, value=cur_proj if cur_proj is not None else _NONE_INT, id="f-proj"),
@@ -146,7 +146,7 @@ class CreateStoryScreen(ModalScreen[int]):
         if wfs:
             for s in workflows.list_workflow_states(self.conn, wfs[0].id):
                 state_opts.append((f"{s.name} ({s.type})", s.id))
-        yield Vertical(
+        yield VerticalScroll(
             Static("New story", classes="modal-title"),
             Label("Name:"), Input(id="s-name"),
             Label("Description:"), TextArea(id="s-desc"),
@@ -228,7 +228,7 @@ class EditStoryScreen(ModalScreen[int]):
             for st in workflows.list_workflow_states(self.conn, wf.id):
                 state_opts.append((f"{st.name} ({st.type})", st.id))
         cur_state = s.workflow_state_id if s.workflow_state_id is not None else _NONE_INT
-        yield Vertical(
+        yield VerticalScroll(
             Static(f"Edit story #{s.id}", classes="modal-title"),
             Label("Name:"), Input(id="e-name", value=s.name),
             Label("Description:"), TextArea(id="e-desc"),
@@ -302,7 +302,7 @@ class MoveStateScreen(ModalScreen[int]):
         for wf in wfs:
             for s in workflows.list_workflow_states(self.conn, wf.id):
                 opts.append((f"{s.name} ({s.type})", s.id))
-        yield Vertical(
+        yield VerticalScroll(
             Static("Move story to state", classes="modal-title"),
             Select(opts, value=opts[0][1] if opts else _NONE_INT, id="m-state"),
             Horizontal(Button("Move", id="ok", variant="primary"), Button("Cancel", id="cancel")),
@@ -331,7 +331,7 @@ class TextScreen(ModalScreen[str]):
         self.title_text = title
 
     def compose(self) -> ComposeResult:
-        yield Vertical(
+        yield VerticalScroll(
             Static(self.title_text, classes="modal-title"),
             TextArea(id="t-body"),
             Horizontal(Button("Submit", id="ok", variant="primary"), Button("Cancel", id="cancel")),
@@ -361,7 +361,7 @@ class SearchInputScreen(ModalScreen[str]):
     """
 
     def compose(self) -> ComposeResult:
-        yield Vertical(
+        yield VerticalScroll(
             Static("Search stories (name/description)", classes="modal-title"),
             Input(id="q", placeholder="login OR auth"),
             Horizontal(Button("Search", id="ok", variant="primary"), Button("Cancel", id="cancel")),
@@ -395,7 +395,7 @@ class ConfirmScreen(ModalScreen[bool]):
         self.message = message
 
     def compose(self) -> ComposeResult:
-        yield Vertical(
+        yield VerticalScroll(
             Static(self.message, classes="modal-title"),
             Horizontal(Button("Delete", id="yes", variant="error"), Button("Cancel", id="cancel")),
             classes="modal-box",
@@ -431,7 +431,7 @@ class TaskActionScreen(ModalScreen[bool]):
                 for t in tasks.list_tasks(self.conn, self.story_id)]
         if not opts:
             opts = [("(no tasks)", _NONE_INT)]
-        yield Vertical(
+        yield VerticalScroll(
             Static("Task actions", classes="modal-title"),
             Label("Task:"), Select(opts, value=opts[0][1], id="ta-task"),
             Label("New description:"), TextArea(id="ta-desc"),
@@ -499,7 +499,7 @@ class OwnerScreen(ModalScreen[bool]):
                 for m in members.list_members(self.conn)]
         if not opts:
             opts = [("(no members)", _NONE_INT)]
-        yield Vertical(
+        yield VerticalScroll(
             Static("Manage owners", classes="modal-title"),
             Select(opts, value=opts[0][1], id="o-member"),
             Horizontal(Button("Toggle", id="toggle", variant="primary"), Button("Done", id="cancel")),
@@ -557,7 +557,7 @@ class LabelScreen(ModalScreen[bool]):
                 for lb in labels.list_labels(self.conn)]
         if not opts:
             opts = [("(no labels)", _NONE_INT)]
-        yield Vertical(
+        yield VerticalScroll(
             Static("Manage labels", classes="modal-title"),
             Select(opts, value=opts[0][1], id="lb-label"),
             Horizontal(Button("Toggle", id="toggle", variant="primary"), Button("Done", id="cancel")),
@@ -598,7 +598,7 @@ class BrowseMenuScreen(ModalScreen[str]):
     """
 
     def compose(self) -> ComposeResult:
-        yield Vertical(
+        yield VerticalScroll(
             Static("Browse", classes="modal-title"),
             Horizontal(
                 Button("Projects", id="project", variant="primary"),
@@ -632,7 +632,7 @@ class EntityBrowserScreen(ModalScreen[tuple]):
     def compose(self) -> ComposeResult:
         title = {"project": "Projects", "epic": "Epics",
                  "iteration": "Iterations", "milestone": "Milestones"}[self.kind]
-        yield Vertical(
+        yield VerticalScroll(
             Static(f"{title} — pick to filter stories", classes="modal-title"),
             DataTable(id="browser-table", cursor_type="row"),
             Horizontal(Button("Select", id="ok", variant="primary"),
