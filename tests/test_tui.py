@@ -249,3 +249,38 @@ def test_tui_reorder_stories(db_path):
             assert getattr(app, "_exception", None) is None
             await pilot.press("q")
     _run(main())
+
+
+def test_tui_refresh_keeps_cursor_position(db_path):
+    """refresh_stories must not yank the cursor back to the top row."""
+    from backend import db
+    from backend import stories as stories_mod
+
+    c = db.connect(db_path)
+    stories_mod.create_story(c, "a")
+    b = stories_mod.create_story(c, "b")
+    stories_mod.create_story(c, "c")
+    c.close()
+
+    async def main():
+        app = PlannerApp(db_path)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            table = app.query_one("#stories")
+            table.move_cursor(row=1); await pilot.pause()
+            assert app._current_story_id() == b.id
+
+            # A refresh (e.g. the auto-refresh tick) rebuilds the table.
+            app.refresh_stories(); await pilot.pause()
+
+            assert table.cursor_row == 1, table.cursor_row
+            assert app._current_story_id() == b.id
+
+            # If the selected story leaves the view, clamp instead of crashing.
+            stories_mod.delete_story(app.conn, b.id)
+            app.refresh_stories(); await pilot.pause()
+            assert table.cursor_row == 1, table.cursor_row
+
+            assert getattr(app, "_exception", None) is None
+            await pilot.press("q")
+    _run(main())

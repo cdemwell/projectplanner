@@ -728,27 +728,36 @@ class PlannerApp(App):
         Binding("b", "browse", "Browse"),
         Binding("slash", "search", "Search"),  # '/'
         Binding("r", "refresh", "Refresh"),
+        Binding("a", "toggle_auto_refresh", "Auto↻"),
         Binding("J", "move_down", "Down"),
         Binding("K", "move_up", "Up"),
         Binding("d", "delete_story", "Delete"),
         Binding("e", "toggle_complete", "Complete"),
     ]
 
-    def __init__(self, db_path: str | None = None) -> None:
+    def __init__(self, db_path: str | None = None,
+                 auto_refresh: float | None = None) -> None:
         super().__init__()
         self.db_path = db_path
         self.conn: sqlite3.Connection | None = None
         # Active story-list filters. Keys map to stories.list_stories params.
         self.filters = {"project": None, "state_type": None, "q": None,
                         "epic": None, "iteration": None, "milestone": None}
+        # Off until the 'a' hotkey (or an explicit --auto-refresh N>0).
+        self._auto_refresh_enabled = bool(auto_refresh)
+        self._auto_refresh_interval = auto_refresh if auto_refresh else 1
 
     # --- lifecycle --------------------------------------------------------- #
     def on_mount(self) -> None:
         self.conn = db.connect(self.db_path)
         self.title = "Project Planner"
         self.refresh_stories()
+        if self._auto_refresh_enabled:
+            self.set_interval(self._auto_refresh_interval, self.refresh_stories, name="auto-refresh")
 
     def on_unmount(self) -> None:
+        if self._auto_refresh_enabled:
+            self.set_timer("auto-refresh", None)  # type: ignore[arg-type]
         if self.conn is not None:
             self.conn.close()
 
@@ -775,6 +784,16 @@ class PlannerApp(App):
             epic_id=f["epic"], iteration_id=f["iteration"],
             milestone_id=f["milestone"], q=f["q"])
         table = self.query_one("#stories", DataTable)
+        # Remember where the cursor was so the rebuild doesn't yank it to the top.
+        prev_row = prev_col = None
+        prev_key: str | None = None
+        if table.row_count:
+            coord = table.cursor_coordinate
+            prev_row, prev_col = coord.row, coord.column
+            try:
+                prev_key = table.coordinate_to_cell_key(coord).row_key.value
+            except Exception:
+                prev_key = None
         table.clear(columns=True)
         if not table.columns:
             table.add_columns("ID", "Name", "Type", "State", "Project", "Owners", "✓")
@@ -807,10 +826,16 @@ class PlannerApp(App):
         parts.append(f"q={'-' if f['q'] is None else f['q']!r}")
         parts.append(f"  ({len(items)} stories)")
         self.query_one("#filter-bar", Static).update("  ".join(parts))
-        # Keep a selection; refresh detail for the cursor row.
+        # Restore the cursor to the story it was on before the rebuild.
+        keys = [str(s.id) for s in items]
         if items:
-            if table.cursor_coordinate is None or table.cursor_row < 0:
-                table.cursor_coordinate = (0, 0)  # type: ignore[assignment]
+            if prev_key is not None and prev_key in keys:
+                new_row = keys.index(prev_key)
+            elif prev_row is not None:
+                new_row = max(0, min(prev_row, len(keys) - 1))
+            else:
+                new_row = 0
+            table.cursor_coordinate = (new_row, prev_col or 0)  # type: ignore[assignment]
             self.show_current_detail()
         else:
             log = self.query_one("#detail", RichLog)
@@ -901,6 +926,17 @@ class PlannerApp(App):
     def action_refresh(self) -> None:
         """Refresh the story list based on current filters."""
         self.refresh_stories()
+
+    def action_toggle_auto_refresh(self) -> None:
+        """Toggle automatic polling for external changes."""
+        if self._auto_refresh_enabled:
+            self._auto_refresh_enabled = False
+            self.set_timer("auto-refresh", None)  # type: ignore[arg-type]
+            self.notify("Auto-refresh disabled", title="🔴")
+        else:
+            self._auto_refresh_enabled = True
+            self.set_interval(self._auto_refresh_interval, self.refresh_stories, name="auto-refresh")
+            self.notify(f"Auto-refresh enabled (every {self._auto_refresh_interval:.0f}s)", title="🟢")
 
     def _filtered_neighbors(self) -> list:
         """Return the stories currently shown (ordered by position, id)."""
@@ -1151,15 +1187,18 @@ class PlannerApp(App):
         return row["id"] if row else None
 
 
-def run(db_path: str | None = None) -> int:
+def run(db_path: str | None = None,
+        auto_refresh: float | None = None) -> int:
     """Entry point for the TUI app used by main.py.
 
     Args:
         db_path: Path to the SQLite database.
+        auto_refresh: Start auto-refreshing at this interval in seconds
+            (default: off; the 'a' hotkey toggles it using a 1s interval).
     Returns:
         Exit code (0 for success).
     """
-    PlannerApp(db_path).run()
+    PlannerApp(db_path, auto_refresh=auto_refresh).run()
     return 0
 
 

@@ -14,8 +14,8 @@ import sys
 def main(argv: list[str] | None = None) -> int:
     """Dispatch to TUI or CLI based on arguments.
 
-    If no arguments are provided, launches the interactive TUI.
-    Otherwise, runs the one-shot CLI.
+    If no arguments are provided (or only TUI flags like --auto-refresh),
+    launches the interactive TUI. Otherwise, runs the one-shot CLI.
 
     Args:
         argv: Optional list of command-line arguments.
@@ -24,20 +24,28 @@ def main(argv: list[str] | None = None) -> int:
     """
     argv = list(sys.argv[1:] if argv is None else argv)
 
-    # No arguments: launch the interactive TUI.
-    if not argv:
-        return _launch_tui()
+    # Check if this looks like a CLI command (has a resource subcommand).
+    # Known CLI resources:
+    cli_resources = {"story", "epic", "iteration", "milestone", "project",
+                     "label", "member", "group", "workflow", "task",
+                     "comment", "link", "search", "plan"}
+    first = argv[0] if argv else None
+    if first and first in cli_resources:
+        from cli.commands import run as run_cli
+        return run_cli(argv)
 
-    # Otherwise: behave as a one-shot CLI.
-    from cli.commands import run as run_cli
-    return run_cli(argv)
+    # Otherwise: launch the interactive TUI (with any TUI-only flags).
+    return _launch_tui(argv)
 
 
-def _launch_tui() -> int:
-    """Launch the full-screen Textual TUI (no args).
+def _launch_tui(argv: list[str] | None = None) -> int:
+    """Launch the full-screen Textual TUI (no args or TUI-only flags).
 
     Attempts to import the TUI application; if 'textual' is not installed,
     prints an installation hint and exits with 1.
+
+    Args:
+        argv: Optional TUI-specific flags (e.g., --auto-refresh).
 
     Returns:
         Exit code.
@@ -59,7 +67,14 @@ def _launch_tui() -> int:
             "    python main.py search \"login\""
         )
         return 1
-    return run_tui()
+
+    import argparse
+    ap = argparse.ArgumentParser(prog="projectplanner", add_help=False)
+    ap.add_argument("--auto-refresh", type=float, default=None,
+                    help="Start with auto-refresh on, ticking every N seconds "
+                         "(default: off; hotkey 'a' toggles it at a 1s interval)")
+    tui_args, _ = ap.parse_known_args(argv or [])
+    return run_tui(auto_refresh=tui_args.auto_refresh)
 
 
 if __name__ == "__main__":
