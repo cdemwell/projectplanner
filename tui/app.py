@@ -190,22 +190,30 @@ class CreateStoryScreen(ModalScreen[int]):
         self.dismiss(None)
 
 
-class EditStoryScreen(ModalScreen[int]):
-    """Edit an existing story's fields.
+class EditStoryPane(Vertical):
+    """Edit an existing story's fields in the right detail pane.
 
-    Fields: name, description, type, state, project, epic, iteration, group,
-    deadline. Nullable parents are cleared by choosing the ``(no …)`` option
-    (which maps to None). State changes go through ``move_story_state`` so
-    ``completed_at`` stays consistent with the done-state rule.
+    Mounted into the ``#detail`` container when 'u' is pressed, replacing the
+    read-only detail view. Fields: name, description, type, state, project,
+    epic, iteration, group, deadline. Nullable parents are cleared via the
+    ``(no …)`` option (maps to None). State changes go through
+    ``move_story_state`` so ``completed_at`` stays consistent with the done-state
+    rule. Uses the full pane height, so it fits without a scrollbar.
 
-    Dismisses with:
-        int: the edited story id, or None on cancel.
+    Args:
+        conn: sqlite3.Connection.
+        story_id: The story being edited.
+        on_saved: Called with the story id after a successful save.
+        on_cancelled: Called (with no args) when editing is cancelled.
     """
 
-    def __init__(self, conn: sqlite3.Connection, story_id: int) -> None:
+    def __init__(self, conn: sqlite3.Connection, story_id: int, *,
+                 on_saved, on_cancelled) -> None:
         super().__init__()
         self.conn = conn
         self.story_id = story_id
+        self.on_saved = on_saved
+        self.on_cancelled = on_cancelled
         self.story = stories.get_story(conn, story_id)
 
     def compose(self) -> ComposeResult:
@@ -222,28 +230,35 @@ class EditStoryScreen(ModalScreen[int]):
         group_opts = [("(no group)", _NONE_INT)]
         for g in groups.list_groups(self.conn, include_archived=True):
             group_opts.append((g.name, g.id))
-        # State: pre-select the current state; the sentinel means "leave as is".
+        # State: pre-select the current one; the sentinel means "leave as is".
         state_opts = [("(leave as is)", _NONE_INT)]
         for wf in workflows.list_workflows(self.conn):
             for st in workflows.list_workflow_states(self.conn, wf.id):
                 state_opts.append((f"{st.name} ({st.type})", st.id))
         cur_state = s.workflow_state_id if s.workflow_state_id is not None else _NONE_INT
-        yield VerticalScroll(
-            Static(f"Edit story #{s.id}", classes="modal-title"),
-            Label("Name:"), Input(id="e-name", value=s.name),
-            Label("Description:"), TextArea(id="e-desc"),
-            Label("Type:"), Select([("feature", "feature"), ("bug", "bug"), ("chore", "chore")],
-                                   value=s.story_type, id="e-type"),
-            Label("State:"), Select(state_opts, value=cur_state, id="e-state"),
-            Label("Project:"), Select(proj_opts, value=s.project_id or _NONE_INT, id="e-proj"),
-            Label("Epic:"), Select(epic_opts, value=s.epic_id or _NONE_INT, id="e-epic"),
-            Label("Iteration:"), Select(iter_opts, value=s.iteration_id or _NONE_INT, id="e-iter"),
-            Label("Group:"), Select(group_opts, value=s.group_id or _NONE_INT, id="e-group"),
-            Label("Deadline:"), Input(id="e-deadline", value=s.deadline or ""),
-            Horizontal(Button("Save", id="ok", variant="primary"), Button("Cancel", id="cancel")),
-            Label("", id="e-err", classes="err"),
-            classes="modal-box",
-        )
+        yield Static(f"Edit story #{s.id}", classes="detail-title")
+        yield Label("Name:")
+        yield Input(value=s.name, id="e-name")
+        yield Label("Description:")
+        yield TextArea(id="e-desc")
+        yield Label("Type:")
+        yield Select([("feature", "feature"), ("bug", "bug"), ("chore", "chore")],
+                     value=s.story_type, id="e-type")
+        yield Label("State:")
+        yield Select(state_opts, value=cur_state, id="e-state")
+        yield Label("Project:")
+        yield Select(proj_opts, value=s.project_id or _NONE_INT, id="e-proj")
+        yield Label("Epic:")
+        yield Select(epic_opts, value=s.epic_id or _NONE_INT, id="e-epic")
+        yield Label("Iteration:")
+        yield Select(iter_opts, value=s.iteration_id or _NONE_INT, id="e-iter")
+        yield Label("Group:")
+        yield Select(group_opts, value=s.group_id or _NONE_INT, id="e-group")
+        yield Label("Deadline:")
+        yield Input(value=s.deadline or "", id="e-deadline")
+        yield Horizontal(Button("Save", id="e-save", variant="primary"),
+                         Button("Cancel", id="e-cancel"))
+        yield Label("", id="e-err", classes="err")
 
     def on_mount(self) -> None:
         self.query_one("#e-desc", TextArea).text = self.story.description
@@ -273,15 +288,15 @@ class EditStoryScreen(ModalScreen[int]):
         except errors.PlannerError as e:
             self.query_one("#e-err", Label).update(f"error: {e}")
             return
-        self.dismiss(self.story_id)
+        self.on_saved(self.story_id)
 
-    @on(Button.Pressed, "#ok")
+    @on(Button.Pressed, "#e-save")
     def _ok(self) -> None:
         self._save()
 
-    @on(Button.Pressed, "#cancel")
+    @on(Button.Pressed, "#e-cancel")
     def _cancel(self) -> None:
-        self.dismiss(None)
+        self.on_cancelled()
 
 
 class MoveStateScreen(ModalScreen[int]):
@@ -743,6 +758,7 @@ class PlannerApp(App):
         # Active story-list filters. Keys map to stories.list_stories params.
         self.filters = {"project": None, "state_type": None, "q": None,
                         "epic": None, "iteration": None, "milestone": None}
+        self._edit_pane: EditStoryPane | None = None
         # Off until the 'a' hotkey (or an explicit --auto-refresh N>0).
         self._auto_refresh_enabled = bool(auto_refresh)
         self._auto_refresh_interval = auto_refresh if auto_refresh else 1
@@ -767,7 +783,9 @@ class PlannerApp(App):
         with Horizontal():
             with Vertical(id="list-pane"):
                 yield DataTable(id="stories", cursor_type="row")
-            yield RichLog(id="detail", wrap=True, markup=True)
+            # Right pane: read-only detail view, or an EditStoryPane when editing.
+            with VerticalScroll(id="detail"):
+                yield RichLog(id="detail-view", wrap=True, markup=True)
         yield Footer()
 
     # --- story list -------------------------------------------------------- #
@@ -838,7 +856,7 @@ class PlannerApp(App):
             table.cursor_coordinate = (new_row, prev_col or 0)  # type: ignore[assignment]
             self.show_current_detail()
         else:
-            log = self.query_one("#detail", RichLog)
+            log = self.query_one("#detail-view", RichLog)
             log.clear()
             log.write("(no stories match the current filter — press 'n' to create one)")
 
@@ -886,7 +904,7 @@ class PlannerApp(App):
             detail = stories.get_story_detail(self.conn, sid)
         except errors.NotFound:
             return
-        log = self.query_one("#detail", RichLog)
+        log = self.query_one("#detail-view", RichLog)
         log.clear()
         s = detail.story
         log.write(f"[bold]#{s.id}  {s.name}[/bold]  [{s.story_type}]")
@@ -920,6 +938,10 @@ class PlannerApp(App):
     @on(DataTable.RowHighlighted)
     def _on_highlight(self, event: DataTable.RowHighlighted) -> None:
         if event.data_table.id == "stories":
+            # Moving the selection while editing abandons the edit and shows
+            # the newly selected story's detail instead.
+            if self._edit_pane is not None:
+                self._close_edit()
             self.show_current_detail()
 
     # --- actions ----------------------------------------------------------- #
@@ -1012,20 +1034,25 @@ class PlannerApp(App):
         self.show_current_detail()
 
     def action_edit_story(self) -> None:
-        """Open a modal to edit the selected story's fields."""
+        """Edit the selected story in-place in the right detail pane."""
         assert self.conn is not None
         sid = self._current_story_id()
         if sid is None:
             self.bell()
             return
-        try:
-            self.push_screen(EditStoryScreen(self.conn, sid), self._after_edit)
-        except errors.NotFound:
-            self.bell()
-
-    def _after_edit(self, sid: int | None) -> None:
-        if sid is None:
+        if self._edit_pane is not None:
+            self.bell()  # already editing
             return
+        # Hide the read-only view and mount the edit form in its place.
+        self.query_one("#detail-view", RichLog).display = False
+        pane = EditStoryPane(self.conn, sid,
+                             on_saved=self._edit_saved,
+                             on_cancelled=self._edit_cancelled)
+        self._edit_pane = pane
+        self.query_one("#detail", VerticalScroll).mount(pane)
+
+    def _edit_saved(self, sid: int) -> None:
+        self._close_edit()
         self.refresh_stories()
         # Keep the cursor on the edited story.
         table = self.query_one("#stories", DataTable)
@@ -1034,6 +1061,20 @@ class PlannerApp(App):
         except Exception:
             pass
         self.show_current_detail()
+
+    def _edit_cancelled(self) -> None:
+        self._close_edit()
+        self.show_current_detail()
+
+    def _close_edit(self) -> None:
+        """Remove the edit pane and restore the read-only detail view."""
+        if self._edit_pane is not None:
+            try:
+                self._edit_pane.remove()
+            except Exception:
+                pass
+            self._edit_pane = None
+        self.query_one("#detail-view", RichLog).display = True
 
     def action_move_state(self) -> None:
         """Open modal to change the workflow state of the selected story."""

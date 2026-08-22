@@ -107,7 +107,7 @@ def test_tui_create_toggle_search_delete(seeded_db):
 
 
 def test_tui_edit_story_renames_and_clears_project(db_path):
-    """The edit modal updates fields and can clear a nullable FK (project)."""
+    """The in-pane edit updates fields and can clear a nullable FK (project)."""
     from textual.widgets import Input, Select
 
     from backend import db, projects
@@ -127,17 +127,20 @@ def test_tui_edit_story_renames_and_clears_project(db_path):
             sid = app._current_story_id()
             assert sid == s.id
 
-            # rename via the edit modal
+            async def save():
+                app.screen.query_one("#e-save", Button).focus(); await pilot.pause()
+                await pilot.press("enter"); await pilot.pause(0.05); await pilot.pause()
+
+            # rename via the in-pane edit
             await pilot.press("u"); await pilot.pause()
-            scr = app.screen
-            scr.query_one("#e-name", Input).value = "Renamed"
-            await _ok(pilot, app)
+            app.screen.query_one("#e-name", Input).value = "Renamed"
+            await save()
             assert app.conn.execute("SELECT name FROM story WHERE id=?", (sid,)).fetchone()[0] == "Renamed"
 
             # reopen and clear the project (choose the "(no project)" sentinel)
             await pilot.press("u"); await pilot.pause()
             app.screen.query_one("#e-proj", Select).value = _NONE_INT
-            await _ok(pilot, app)
+            await save()
             assert app.conn.execute(
                 "SELECT project_id FROM story WHERE id=?", (sid,)).fetchone()[0] is None
 
