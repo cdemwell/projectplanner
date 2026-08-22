@@ -178,9 +178,10 @@ These are the rules an agent can rely on when parsing output and chaining
 commands.
 
 - **Invocation:** `python main.py <resource> <action> [flags]`.
-- **`--json` (anywhere in the command)** prints structured JSON for the result
-  (a single entity, a list, or a small status object). Place it before or after
-  the subcommand — both work.
+- **`--format` (anywhere in the command)** selects output format:
+  `text` (default), `json`, `csv`, or `id-only`. Place it before or after
+  the subcommand — both work. The deprecated `--json` flag still works as an
+  alias for `--format json`.
 - **Name or id, your choice.** Anywhere a human would type a name
   (`--project backend`, `--owner chris`, `--labels bug,auth`), it is resolved to
   an id **case-insensitively**. Pass a bare number to use an id directly.
@@ -189,8 +190,8 @@ commands.
 - **`--state`** on `story move` accepts a state **id**, a state **name**
   (`"Done"`), or a state **type** (`unstarted`/`started`/`done`). By-type is
   convenient against the seeded workflow.
-- **Mutating commands echo the resulting entity** — text by default, JSON with
-  `--json`. This is how you learn the id that was just assigned.
+- **Mutating commands echo the resulting entity** — text by default, structured
+  with `--format`. This is how you learn the id that was just assigned.
 - **Errors** print `error: <message>` to **stderr** and the process exits
   non-zero (see [§ Exit Codes & Errors](#exit-codes--errors)).
 - **Comma-separated lists** (`--owners`, `--labels`) accept mixed names and ids,
@@ -209,13 +210,18 @@ commands.
   editor exit aborts with no change. The `--text`/`--desc` flags still work for
   the non-editor path.
 
-### The `--json` contract
+### The `--format` contract
 
-- A single entity → a JSON object of its columns.
-- `story detail` → an object with `story`, `owners`, `labels`, `tasks`,
+- **`text`** (default): human-readable tables or key/value lines.
+- **`json`**: structured JSON — single object, array of objects, or
+  `story detail` shape with nested `story`, `owners`, `labels`, `tasks`,
   `workflow_state`.
-- A list → a JSON array of entity objects.
-- `search` → an array of `{entity, id, name, description, rank}`.
+- **`csv`**: CSV with headers. Works for flat lists (story/epic/project list,
+  search). For nested objects (e.g. `story detail`) prints a warning and
+  falls back to JSON.
+- **`id-only`**: prints just the numeric id(s), one per line. Useful for
+  piping to `xargs` or loops. Works for lists and single entities
+  (including `story detail` → prints the story id).
 - Delete/status → a small object like `{"deleted": "story", "id": 7}`.
 - Timestamps are ISO-8601 UTC strings; nullable columns are `null`.
 
@@ -224,11 +230,14 @@ commands.
 ## CLI Reference
 
 Resources: `story`, `epic`, `iteration`, `milestone`, `project`, `label`,
-`member`, `group`, `workflow`, `task`, `comment`, `link`, `search`.
+`member`, `group`, `workflow`, `task`, `comment`, `link`, `search`, `plan`.
 
 Every `<resource> <action>` accepts `-h` for the exact flag list
 (`python main.py story create -h`). Below is the compact surface; flags shown
 are the commonly used ones.
+
+**All commands accept `--format`** (`text`|`json`|`csv`|`id-only`, default `text`)
+and the deprecated `--json` alias.
 
 ### story
 | Action | Flags (selected) | Notes |
@@ -291,6 +300,12 @@ opens `$EDITOR`. Owned by a story (cascade).
 `list [--story <id>]` · `add --subject <id> --verb <v> --object <id>` · `delete <id>`.
 Verbs: `blocks` `blocks_by` `duplicates` `duplicated_by` `relates_to`. A story
 cannot link to itself; (subject, verb, object) is unique.
+
+### plan
+`export [--file planner-export.json]` · `import [--file planner-export.json]`.
+Exports/imports the entire plan (all entities with relationships preserved) as a
+portable JSON snapshot. Ids are remapped on import so foreign keys survive. Use
+this to share plan state across environments or back it up.
 
 ### search
 `search <terms...> [--entity story|epic|project|milestone|iteration|label|comment|task]`.
@@ -461,7 +476,7 @@ member is a person (one seeded local user). group is a team.
 
 Entities built: **Stories, Epics, Iterations, Milestones, Projects,
 Workflows (+States), Labels, Members, Groups, Comments, Tasks, Story Links,
-Search**. Deferred (not built unless needed): Documents, Objectives + Key
+Search, Plan Export/Import**. Deferred (not built unless needed): Documents, Objectives + Key
 Results, Custom Fields, Entity Templates, Files, Linked Files, Repositories,
 Integrations, Health, History, Reactions, External Links, Categories, Epic
 Workflow — see [CONTEXT.md §4](CONTEXT.md).
@@ -630,6 +645,8 @@ Coverage:
   comment/owners/labels/reorder/delete); skipped if `textual` isn't installed.
 - `tests/test_concurrency.py` — two writers serialize (the second blocks until
   the first commits).
+
+96 tests.
 
 ---
 
