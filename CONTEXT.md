@@ -46,12 +46,13 @@ unless the user explicitly asks.
 **Backend + CLI + TUI are all built and working.**
 
 - `main.py` — dispatch: no args → Textual TUI; args → CLI.
-- `backend/` — `db.py`, `errors.py`, `models.py`, `_util.py`, and one module per
+- `backend/` — `db.py`, `errors.py`, `models.py`, `_util.py`, `plan.py`, and one module per
   entity (`members`, `groups`, `workflows`, `projects`, `labels`, `milestones`,
   `epics`, `iterations`, `stories`, `tasks`, `comments`, `story_links`,
   `search.py`). Schema is at version 3 (v1 = core tables + seed; v2 = FTS5
   over name+description for story/epic/project/milestone/iteration/label; v3 =
-  FTS5 over comment text and task description).
+  FTS5 over comment text and task description). `plan.py` provides export/import
+  of the entire plan as a portable JSON snapshot (remapping primary keys on import).
 - `cli/commands.py` — argparse subparsers for every resource; `--json` flag;
   name-to-id resolution; `run(argv)` entry point.
 - `tui/app.py` — full-screen Textual TUI: filterable story list + detail pane,
@@ -203,6 +204,7 @@ Naming: `list_*`, `get_*`, `create_*`, `update_*`, `delete_*`, plus `search_*`. 
   `delete_comment`.
 - story_links: `list_links`, `create_link`, `delete_link`.
 - search: `search(conn, query, *, entity=None)`.
+- plan: `export_plan(conn) -> dict`, `export_to_file(conn, path)`, `import_plan(conn, data) -> dict`, `import_from_file(conn, path)`.
 
 ### Errors (`backend/errors.py`)
 - `NotFound(resource, id)` — raised when a referenced entity doesn't exist.
@@ -306,9 +308,10 @@ Seeding must be idempotent and run inside a single `BEGIN IMMEDIATE` transaction
 5. ✅ Remaining `backend` modules (epics, iterations, milestones, groups, tasks,
    comments, story_links) + their CLI subcommands.
 6. ✅ `backend/search.py` (FTS5) + `main.py search`.
-7. ✅ TUI (`tui/app.py`) — built with **Textual**; headless smoke test passes
+7. ✅ `backend/plan.py` (export/import) + `main.py plan`.
+8. ✅ TUI (`tui/app.py`) — built with **Textual**; headless smoke test passes
    (create / search / comment / move / toggle-complete / delete).
-8. ✅ README + `.gitignore`; committed.
+9. ✅ README + `.gitignore`; committed.
 
 ## 15. Open items
 

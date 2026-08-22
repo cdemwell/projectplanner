@@ -12,6 +12,7 @@ read back the assigned id.
 from __future__ import annotations
 
 import argparse
+import csv
 import dataclasses
 import json as _json
 import os
@@ -19,6 +20,7 @@ import shlex
 import subprocess
 import sys
 import tempfile
+from io import StringIO
 from typing import Any
 
 from backend import (
@@ -32,6 +34,7 @@ from backend import (
     labels,
     members,
     milestones,
+    plan,
     projects,
     search,
     stories,
@@ -89,27 +92,123 @@ def _print_kv(d: dict) -> None:
         print(f"{k}: {v}")
 
 
+def _is_flat(value: Any) -> bool:
+    """Check if a value is a flat dict/list (no nested dicts/lists)."""
+    # Convert dataclasses to dict for checking
+    if dataclasses.is_dataclass(value):
+        value = value.to_dict() if hasattr(value, "to_dict") else dataclasses.asdict(value)
+    if isinstance(value, list):
+        for v in value:
+            if dataclasses.is_dataclass(v):
+                v = v.to_dict() if hasattr(v, "to_dict") else dataclasses.asdict(v)
+            if not isinstance(v, dict):
+                return False
+            if any(isinstance(v2, (dict, list)) for v2 in v.values()):
+                return False
+        return True
+    if isinstance(value, dict):
+        return all(not isinstance(v, (dict, list)) for v in value.values())
+    return False
+
+
+def _fmt_csv(value: Any, *, include_headers: bool = True) -> None:
+    """Render ``value`` as CSV to stdout.
+
+    For lists of flat dicts: each dict is a row, headers are dict keys.
+    For single flat dicts: single row with headers.
+    For nested objects: prints a message and falls back to JSON.
+    For other values: wrapped in a single column.
+    """
+    # Convert to jsonable for processing
+    json_value = _jsonable(value)
+
+    if isinstance(json_value, list):
+        rows = json_value
+        if not rows:
+            return
+        # Check if flat
+        if _is_flat(value):
+            fieldnames = list(rows[0].keys()) if rows else []
+        else:
+            print("CSV format not supported for nested data; use --format json", file=sys.stderr)
+            print(_json.dumps(json_value, indent=2, default=str))
+            return
+    elif isinstance(json_value, dict):
+        if _is_flat(value):
+            rows = [json_value]
+            fieldnames = list(json_value.keys())
+        else:
+            print("CSV format not supported for nested data; use --format json", file=sys.stderr)
+            print(_json.dumps(json_value, indent=2, default=str))
+            return
+    else:
+        rows = [{"value": json_value}]
+        fieldnames = ["value"]
+
+    buf = StringIO()
+    writer = csv.DictWriter(buf, fieldnames=fieldnames, extrasaction="ignore")
+    if include_headers:
+        writer.writeheader()
+    for row in rows:
+        writer.writerow(row)
+    print(buf.getvalue().rstrip("\n"))
+
+
+def _fmt_id_only(value: Any) -> None:
+    """Print just the ID(s) from the value, one per line."""
+    if isinstance(value, list):
+        for item in value:
+            if isinstance(item, dict) and "id" in item:
+                print(item["id"])
+            elif hasattr(item, "id"):
+                print(item.id)
+    elif isinstance(value, dict):
+        # Handle nested structures like StoryDetail
+        if "story" in value and isinstance(value["story"], dict) and "id" in value["story"]:
+            print(value["story"]["id"])
+        elif "id" in value:
+            print(value["id"])
+    elif hasattr(value, "id"):
+        print(value.id)
+    elif hasattr(value, "story") and hasattr(value.story, "id"):
+        print(value.story.id)
+
+
 def emit(args: argparse.Namespace, value: Any, *, text_fn=None) -> None:
-    """Render ``value`` as JSON (``--json``) or via ``text_fn`` (default: tables).
+    """Render ``value`` according to ``--format`` (text/json/csv/id-only).
 
     Args:
-        args: Namespace; ``args.json`` selects JSON output.
+        args: Namespace; ``args.format`` selects output format, ``args.json``
+            is a deprecated alias for ``--format json``.
         value: The backend return value to render.
-        text_fn: Optional ``(conn, value)`` text formatter. If absent and not
-            JSON, a list of dicts is printed as a table, else as JSON.
+        text_fn: Optional ``(conn, value)`` text formatter for default text mode.
     """
+    # Deprecated --json alias
     if getattr(args, "json", False):
-        print(_json.dumps(_jsonable(value), indent=2, default=str))
-    elif text_fn is not None:
-        text_fn(value)
-    elif value is None:
-        pass
+        fmt = "json"
     else:
-        # Fallback: dump as key/value or table depending on shape.
-        if isinstance(value, list) and value and isinstance(value[0], dict):
-            _print_table(value, list(value[0]))
+        fmt = getattr(args, "format", "text")
+
+    if fmt == "json":
+        print(_json.dumps(_jsonable(value), indent=2, default=str))
+    elif fmt == "csv":
+        _fmt_csv(value)
+    elif fmt == "id-only":
+        _fmt_id_only(value)
+    elif fmt == "text":
+        if text_fn is not None:
+            text_fn(value)
+        elif value is None:
+            pass
         else:
-            print(_json.dumps(_jsonable(value), indent=2, default=str))
+            # Fallback: dump as key/value or table depending on shape.
+            if isinstance(value, list) and value and isinstance(value[0], dict):
+                _print_table(value, list(value[0]))
+            else:
+                print(_json.dumps(_jsonable(value), indent=2, default=str))
+    else:
+        # Should not happen due to argparse choices
+        print(_json.dumps(_jsonable(value), indent=2, default=str))
 
 
 # --------------------------------------------------------------------------- #
@@ -687,6 +786,20 @@ def h_search(conn, a):
                          limit=a.limit, offset=a.offset)
 
 
+# -- plan ----------------------------------------------------------------- #
+def h_plan_export(conn, a):
+    """Handle ``plan export``; write a JSON snapshot to a file and return counts."""
+    data = plan.export_to_file(conn, a.file)
+    total = sum(len(v) for k, v in data.items() if k != "_meta")
+    return {"file": a.file, "exported": total}
+
+
+def h_plan_import(conn, a):
+    """Handle ``plan import``; restore a JSON snapshot and return counts."""
+    counts = plan.import_from_file(conn, a.file)
+    return {"file": a.file, "imported": counts}
+
+
 # --------------------------------------------------------------------------- #
 # Parser construction
 # --------------------------------------------------------------------------- #
@@ -696,7 +809,9 @@ COMMON = argparse.ArgumentParser(add_help=False)
 # parser (e.g. `main.py --json story list`); the flag is only set when present.
 # This is what makes `--json` work both before and after the subcommand.
 COMMON.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
-                    help="emit JSON (machine-readable)")
+                    help="emit JSON (machine-readable) [deprecated: use --format json]")
+COMMON.add_argument("--format", choices=["text", "json", "csv", "id-only"], default="text",
+                    help="output format (default: text)")
 
 
 def _sp(parent, name, **kw):
@@ -938,6 +1053,14 @@ def build_parser() -> argparse.ArgumentParser:
     _paging(sp)
     sp.set_defaults(func=h_search, fmt=lambda c, v: _fmt_list_simple(v, ["entity", "id", "name", "rank"]))
 
+    # plan -------------------------------------------------------------------
+    sp = sub.add_parser("plan", parents=[COMMON])
+    asp = sp.add_subparsers(dest="action", required=True)
+    p = _sp(asp, "export"); p.add_argument("--file", default="planner-export.json")
+    p.set_defaults(func=h_plan_export, fmt=_fmt_one)
+    p = _sp(asp, "import"); p.add_argument("--file", required=True)
+    p.set_defaults(func=h_plan_import, fmt=_fmt_one)
+
     return parser
 
 
@@ -961,12 +1084,12 @@ def run(argv: list[str] | None = None) -> int:
     conn = db.connect(args.db) if getattr(args, "db", None) else db.connect()
     try:
         value = args.func(conn, args)
-        if getattr(args, "json", False):
-            emit(args, value)                      # JSON via emit()
-        elif getattr(args, "fmt", None) is not None:
-            args.fmt(conn, value)                 # custom text formatter
+        # Always use emit for consistent format handling (--json is deprecated alias for --format json)
+        # The custom formatter is passed to emit for text mode
+        if getattr(args, "fmt", None) is not None:
+            emit(args, value, text_fn=lambda v: args.fmt(conn, v))
         else:
-            emit(args, value)                     # fallback
+            emit(args, value)
     except errors.PlannerError as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
