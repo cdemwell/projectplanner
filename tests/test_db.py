@@ -75,7 +75,17 @@ def test_tx_write_commits_and_rolls_back(conn):
     assert conn.execute("SELECT COUNT(*) FROM project").fetchone()[0] == 1  # 'y' not persisted
 
 
-def test_default_db_path_is_repo_root():
-    # DEFAULT_DB_PATH should resolve to planner.db next to main.py.
-    assert db.DEFAULT_DB_PATH.name == "planner.db"
-    assert db.DEFAULT_DB_PATH.parent.name == "projectplanner" or db.DEFAULT_DB_PATH.parent.exists()
+def test_bare_connect_never_touches_repo_db():
+    """A bare db.connect() must use the patched temp default, never the repo db.
+
+    The autouse conftest fixture redirects ``db.DEFAULT_DB_PATH`` to a temp file,
+    so a bare ``connect()`` (or a CLI ``run()`` that forgot ``--db``) can never
+    read or write the real ``planner.db`` in the repo root.
+    """
+    from pathlib import Path
+    repo_db = Path(__file__).resolve().parent.parent / "planner.db"
+    c = db.connect()  # no path -> uses the patched temp default
+    connected = Path(c.execute("PRAGMA database_list").fetchone()[2]).resolve()
+    assert connected != repo_db.resolve()
+    assert connected.name == "default-test.db"
+    c.close()
