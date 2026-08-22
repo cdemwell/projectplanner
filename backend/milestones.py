@@ -12,19 +12,24 @@ STATES = ("planned", "in_progress", "done")
 EDITABLE = {"name", "description", "state"}
 
 
-def list_milestones(conn: sqlite3.Connection, *, state: str | None = None) -> list[Milestone]:
+def list_milestones(conn: sqlite3.Connection, *, state: str | None = None,
+                    limit: int | None = None, offset: int | None = None) -> list[Milestone]:
     """List all milestones, optionally filtered by state.
 
     Args:
         conn: sqlite3.Connection from db.connect().
         state: str | None — filter by state ('planned', 'in_progress', 'done').
+        limit: int | None — max rows (None = all).
+        offset: int | None — rows to skip (None = 0).
     Returns:
         list[Milestone] — the list of matching milestones.
     """
     if state is not None:
         return _util.list_rows(conn, Milestone, "milestone", where="state = ?",
-                               params=(state,), order="id")
-    return _util.list_rows(conn, Milestone, "milestone", order="id")
+                               params=(state,), order="id",
+                               limit=limit, offset=offset)
+    return _util.list_rows(conn, Milestone, "milestone", order="id",
+                           limit=limit, offset=offset)
 
 
 def get_milestone(conn: sqlite3.Connection, id) -> Milestone:

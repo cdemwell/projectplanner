@@ -12,13 +12,16 @@ STATES = ("planned", "in_progress", "done")
 EDITABLE = {"name", "description", "state", "milestone_id", "project_id"}
 
 
-def list_epics(conn: sqlite3.Connection, *, project_id=None, milestone_id=None) -> list[Epic]:
+def list_epics(conn: sqlite3.Connection, *, project_id=None, milestone_id=None,
+               limit: int | None = None, offset: int | None = None) -> list[Epic]:
     """List epics with optional filters.
 
     Args:
         conn: sqlite3.Connection from db.connect().
         project_id: int | None — filter by project.
         milestone_id: int | None — filter by milestone.
+        limit: int | None — max rows (None = all).
+        offset: int | None — rows to skip (None = 0).
     Returns:
         list[Epic] — the matching epics.
     """
@@ -28,7 +31,8 @@ def list_epics(conn: sqlite3.Connection, *, project_id=None, milestone_id=None) 
     if milestone_id is not None:
         where.append("milestone_id = ?"); params.append(milestone_id)
     return _util.list_rows(conn, Epic, "epic",
-                           where=" AND ".join(where) or None, params=params, order="id")
+                           where=" AND ".join(where) or None, params=params, order="id",
+                           limit=limit, offset=offset)
 
 
 def get_epic(conn: sqlite3.Connection, id) -> Epic:

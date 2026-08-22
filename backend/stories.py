@@ -23,12 +23,14 @@ EDITABLE = {
 def list_stories(conn: sqlite3.Connection, *, project_id=None, epic_id=None,
                  iteration_id=None, state_type=None, group_id=None,
                  owner_id=None, label_id=None, q: str | None = None,
-                 include_completed: bool = True) -> list[Story]:
+                 include_completed: bool = True,
+                 limit: int | None = None, offset: int | None = None) -> list[Story]:
     """List stories with optional filters.
 
     Builds a dynamic WHERE clause. For owners, labels, and state type, it uses
     EXISTS subqueries to check junction tables or workflow state types.
-    Results are ordered by position, then ID.
+    Results are ordered by position, then ID. ``limit``/``offset`` page the
+    result (None = no limit / no offset).
 
     Args:
         conn: sqlite3.Connection from db.connect().
@@ -41,8 +43,10 @@ def list_stories(conn: sqlite3.Connection, *, project_id=None, epic_id=None,
         label_id: int | None — filter by label.
         q: str | None — keyword search over name and description.
         include_completed: bool — whether to include stories where completed_at is set.
+        limit: int | None — max rows to return (None = all).
+        offset: int | None — rows to skip before returning (None = 0).
     Returns:
-        list[Story] — the filtered list of stories.
+        list[Story] — the filtered (and optionally paged) list of stories.
     """
     where: list[str] = []
     params: list = []
@@ -75,6 +79,10 @@ def list_stories(conn: sqlite3.Connection, *, project_id=None, epic_id=None,
     if where:
         sql += " WHERE " + " AND ".join(where)
     sql += " ORDER BY s.position, s.id"
+    if limit is not None or offset is not None:
+        sql += " LIMIT ? OFFSET ?"
+        params += [limit if limit is not None else -1,
+                   offset if offset is not None else 0]
     return [Story.from_row(r) for r in conn.execute(sql, params)]
 
 

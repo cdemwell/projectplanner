@@ -10,15 +10,19 @@ from .models import Label
 EDITABLE = {"name", "color", "description"}
 
 
-def list_labels(conn: sqlite3.Connection) -> list[Label]:
+def list_labels(conn: sqlite3.Connection, *, limit: int | None = None,
+                offset: int | None = None) -> list[Label]:
     """List all labels.
 
     Args:
         conn: sqlite3.Connection from db.connect().
+        limit: int | None — max rows (None = all).
+        offset: int | None — rows to skip (None = 0).
     Returns:
         A list of Label dataclasses.
     """
-    return _util.list_rows(conn, Label, "label", order="name")
+    return _util.list_rows(conn, Label, "label", order="name",
+                           limit=limit, offset=offset)
 
 
 def get_label(conn: sqlite3.Connection, id) -> Label:

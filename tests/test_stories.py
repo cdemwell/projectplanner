@@ -189,3 +189,14 @@ def test_delete_parent_sets_story_fk_null(conn):
     s = stories.get_story(conn, s.id)
     assert s.epic_id is None  # SET NULL, story survives
     assert s.project_id == p.id
+
+
+def test_list_stories_pagination(conn):
+    for i in range(5):
+        stories.create_story(conn, f"s{i}")
+    # default: all 5
+    assert [s.name for s in stories.list_stories(conn)] == ["s0", "s1", "s2", "s3", "s4"]
+    assert len(stories.list_stories(conn, limit=2)) == 2
+    assert [s.name for s in stories.list_stories(conn, limit=2)] == ["s0", "s1"]
+    assert [s.name for s in stories.list_stories(conn, offset=3)] == ["s3", "s4"]
+    assert [s.name for s in stories.list_stories(conn, limit=2, offset=2)] == ["s2", "s3"]

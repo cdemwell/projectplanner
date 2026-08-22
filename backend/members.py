@@ -10,15 +10,19 @@ from .models import Member
 EDITABLE = {"name", "mention_name"}
 
 
-def list_members(conn: sqlite3.Connection) -> list[Member]:
+def list_members(conn: sqlite3.Connection, *, limit: int | None = None,
+                 offset: int | None = None) -> list[Member]:
     """List all members.
 
     Args:
         conn: sqlite3.Connection from db.connect().
+        limit: int | None — max rows (None = all).
+        offset: int | None — rows to skip (None = 0).
     Returns:
         A list of Member dataclasses.
     """
-    return _util.list_rows(conn, Member, "member", order="id")
+    return _util.list_rows(conn, Member, "member", order="id",
+                           limit=limit, offset=offset)
 
 
 def get_member(conn: sqlite3.Connection, id) -> Member:

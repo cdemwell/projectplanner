@@ -495,11 +495,12 @@ tui/       full-screen Textual UI → same backend functions
   read-during-write contention is observed.
 - **Migrations.** A `schema_version` table tracks an integer version; on connect
   any pending versioned statements are applied idempotently inside
-  `BEGIN IMMEDIATE`. Current schema version: **2** (v1 = core tables + seed;
-  v2 = FTS5 search tables + sync triggers).
+  `BEGIN IMMEDIATE`. Current schema version: **3** (v1 = core tables + seed;
+  v2 = FTS5 over name+description; v3 = FTS5 over comment text + task description).
 - **Search.** FTS5 external-content tables mirror `name` + `description` for
-  stories, epics, projects, milestones, iterations, and labels, kept in sync by
-  after-insert/update/delete triggers.
+  stories, epics, projects, milestones, iterations, and labels, plus `text` for
+  comments and `description` for tasks, kept in sync by after-insert/update/delete
+  triggers.
 
 ---
 

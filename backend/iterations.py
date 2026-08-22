@@ -11,19 +11,24 @@ STATUSES = ("planned", "active", "done")
 EDITABLE = {"name", "description", "status", "start_date", "end_date"}
 
 
-def list_iterations(conn: sqlite3.Connection, *, status: str | None = None) -> list[Iteration]:
+def list_iterations(conn: sqlite3.Connection, *, status: str | None = None,
+                    limit: int | None = None, offset: int | None = None) -> list[Iteration]:
     """List all iterations, optionally filtered by status.
 
     Args:
         conn: sqlite3.Connection from db.connect().
         status: str | None — filter by status ('planned', 'active', 'done').
+        limit: int | None — max rows (None = all).
+        offset: int | None — rows to skip (None = 0).
     Returns:
         list[Iteration] — the list of matching iterations.
     """
     if status is not None:
         return _util.list_rows(conn, Iteration, "iteration", where="status = ?",
-                               params=(status,), order="id")
-    return _util.list_rows(conn, Iteration, "iteration", order="id")
+                               params=(status,), order="id",
+                               limit=limit, offset=offset)
+    return _util.list_rows(conn, Iteration, "iteration", order="id",
+                           limit=limit, offset=offset)
 
 
 def get_iteration(conn: sqlite3.Connection, id) -> Iteration:

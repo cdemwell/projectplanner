@@ -391,7 +391,8 @@ def h_story_list(conn, a):
         state_type=a.state_type, group_id=resolve_group(conn, a.group) if a.group else None,
         owner_id=resolve_member(conn, a.owner) if a.owner else None,
         label_id=resolve_label(conn, a.label) if a.label else None,
-        q=a.q, include_completed=a.include_completed)
+        q=a.q, include_completed=a.include_completed,
+        limit=a.limit, offset=a.offset)
 
 
 def h_story_get(conn, a):
@@ -486,7 +487,8 @@ def h_epic_list(conn, a):
     return epics.list_epics(
         conn,
         project_id=resolve_project(conn, a.project) if a.project else None,
-        milestone_id=resolve_milestone(conn, a.milestone) if a.milestone else None)
+        milestone_id=resolve_milestone(conn, a.milestone) if a.milestone else None,
+        limit=a.limit, offset=a.offset)
 
 
 def h_epic_create(conn, a):
@@ -508,7 +510,7 @@ def h_epic_update(conn, a):
 # -- iterations ----------------------------------------------------------- #
 def h_iteration_list(conn, a):
     """Handle ``iteration list``; optionally filter by status."""
-    return iterations.list_iterations(conn, status=a.status)
+    return iterations.list_iterations(conn, status=a.status, limit=a.limit, offset=a.offset)
 def h_iteration_create(conn, a):
     """Handle ``iteration create``; return the new iteration."""
     return iterations.create_iteration(conn, a.name, description=a.desc or "",
@@ -524,7 +526,7 @@ def h_iteration_update(conn, a):
 # -- milestones ------------------------------------------------------------ #
 def h_milestone_list(conn, a):
     """Handle ``milestone list``; optionally filter by state."""
-    return milestones.list_milestones(conn, state=a.state)
+    return milestones.list_milestones(conn, state=a.state, limit=a.limit, offset=a.offset)
 def h_milestone_create(conn, a):
     """Handle ``milestone create``; return the new milestone."""
     return milestones.create_milestone(conn, a.name, description=a.desc or "", state=a.state)
@@ -538,7 +540,8 @@ def h_milestone_update(conn, a):
 # -- projects -------------------------------------------------------------- #
 def h_project_list(conn, a):
     """Handle ``project list``; include archived only if ``--archived``."""
-    return projects.list_projects(conn, include_archived=a.archived)
+    return projects.list_projects(conn, include_archived=a.archived,
+                                  limit=a.limit, offset=a.offset)
 def h_project_create(conn, a):
     """Handle ``project create``; return the new project."""
     return projects.create_project(conn, a.name, description=a.desc or "",
@@ -554,7 +557,7 @@ def h_project_update(conn, a):
 # -- labels ---------------------------------------------------------------- #
 def h_label_list(conn, a):
     """Handle ``label list``; return all labels."""
-    return labels.list_labels(conn)
+    return labels.list_labels(conn, limit=a.limit, offset=a.offset)
 def h_label_create(conn, a):
     """Handle ``label create``; return the new label."""
     return labels.create_label(conn, a.name, color=a.color or "", description=a.desc or "")
@@ -568,7 +571,7 @@ def h_label_update(conn, a):
 # -- members --------------------------------------------------------------- #
 def h_member_list(conn, a):
     """Handle ``member list``; return all members."""
-    return members.list_members(conn)
+    return members.list_members(conn, limit=a.limit, offset=a.offset)
 def h_member_create(conn, a):
     """Handle ``member create``; return the new member."""
     return members.create_member(conn, a.name, mention_name=a.mention)
@@ -581,7 +584,8 @@ def h_member_update(conn, a):
 # -- groups ---------------------------------------------------------------- #
 def h_group_list(conn, a):
     """Handle ``group list``; include archived only if ``--archived``."""
-    return groups.list_groups(conn, include_archived=a.archived)
+    return groups.list_groups(conn, include_archived=a.archived,
+                              limit=a.limit, offset=a.offset)
 def h_group_create(conn, a):
     """Handle ``group create``; return the new group."""
     return groups.create_group(conn, a.name, description=a.desc or "")
@@ -679,7 +683,8 @@ def h_link_add(conn, a):
 # -- search --------------------------------------------------------------- #
 def h_search(conn, a):
     """Handle ``search``; join query terms and return ranked SearchResults."""
-    return search.search(conn, " ".join(a.query), entity=a.entity)
+    return search.search(conn, " ".join(a.query), entity=a.entity,
+                         limit=a.limit, offset=a.offset)
 
 
 # --------------------------------------------------------------------------- #
@@ -704,6 +709,12 @@ def _id_arg(p):
     p.add_argument("id", help="entity id")
 
 
+def _paging(p):
+    """Add ``--limit``/``--offset`` paging flags to a list/search subparser."""
+    p.add_argument("--limit", type=int, help="max rows to return")
+    p.add_argument("--offset", type=int, help="rows to skip before returning")
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Construct the full argparse CLI: one subparser per resource, one nested
     subparser per action, each wiring ``func`` (a handler) and ``fmt`` (a text
@@ -724,6 +735,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--group"); p.add_argument("--owner"); p.add_argument("--label")
     p.add_argument("--q"); p.add_argument("--no-completed", dest="include_completed",
                                           action="store_false", default=True)
+    _paging(p)
     p.set_defaults(func=h_story_list, fmt=lambda c, v: _fmt_stories(c, v))
     p = _sp(asp, "get"); _id_arg(p); p.set_defaults(func=h_story_get, fmt=_fmt_one)
     p = _sp(asp, "detail"); _id_arg(p); p.set_defaults(func=h_story_detail, fmt=_fmt_story_detail)
@@ -758,7 +770,7 @@ def build_parser() -> argparse.ArgumentParser:
     # epic -------------------------------------------------------------------
     sp = sub.add_parser("epic", parents=[COMMON])
     asp = sp.add_subparsers(dest="action", required=True)
-    p = _sp(asp, "list"); p.add_argument("--project"); p.add_argument("--milestone")
+    p = _sp(asp, "list"); p.add_argument("--project"); p.add_argument("--milestone"); _paging(p)
     p.set_defaults(func=h_epic_list, fmt=lambda c, v: _fmt_list_simple(v, ["id", "name", "state", "project_id", "milestone_id"]))
     p = _sp(asp, "get"); _id_arg(p); p.set_defaults(func=lambda c, a: epics.get_epic(c, int(a.id)), fmt=_fmt_one)
     p = _sp(asp, "create"); p.add_argument("--name", required=True); p.add_argument("--desc")
@@ -775,7 +787,7 @@ def build_parser() -> argparse.ArgumentParser:
     # iteration --------------------------------------------------------------
     sp = sub.add_parser("iteration", parents=[COMMON])
     asp = sp.add_subparsers(dest="action", required=True)
-    p = _sp(asp, "list"); p.add_argument("--status", choices=list(iterations.STATUSES))
+    p = _sp(asp, "list"); p.add_argument("--status", choices=list(iterations.STATUSES)); _paging(p)
     p.set_defaults(func=h_iteration_list, fmt=lambda c, v: _fmt_list_simple(v, ["id", "name", "status", "start_date", "end_date"]))
     p = _sp(asp, "get"); _id_arg(p); p.set_defaults(func=lambda c, a: iterations.get_iteration(c, int(a.id)), fmt=_fmt_one)
     p = _sp(asp, "create"); p.add_argument("--name", required=True); p.add_argument("--desc")
@@ -792,7 +804,7 @@ def build_parser() -> argparse.ArgumentParser:
     # milestone --------------------------------------------------------------
     sp = sub.add_parser("milestone", parents=[COMMON])
     asp = sp.add_subparsers(dest="action", required=True)
-    p = _sp(asp, "list"); p.add_argument("--state", choices=list(milestones.STATES))
+    p = _sp(asp, "list"); p.add_argument("--state", choices=list(milestones.STATES)); _paging(p)
     p.set_defaults(func=h_milestone_list, fmt=lambda c, v: _fmt_list_simple(v, ["id", "name", "state", "completed_at"]))
     p = _sp(asp, "get"); _id_arg(p); p.set_defaults(func=lambda c, a: milestones.get_milestone(c, int(a.id)), fmt=_fmt_one)
     p = _sp(asp, "create"); p.add_argument("--name", required=True); p.add_argument("--desc")
@@ -808,7 +820,7 @@ def build_parser() -> argparse.ArgumentParser:
     # project ---------------------------------------------------------------
     sp = sub.add_parser("project", parents=[COMMON])
     asp = sp.add_subparsers(dest="action", required=True)
-    p = _sp(asp, "list"); p.add_argument("--archived", action="store_true")
+    p = _sp(asp, "list"); p.add_argument("--archived", action="store_true"); _paging(p)
     p.set_defaults(func=h_project_list, fmt=lambda c, v: _fmt_list_simple(v, ["id", "name", "abbreviation", "color", "archived"]))
     p = _sp(asp, "get"); _id_arg(p); p.set_defaults(func=lambda c, a: projects.get_project(c, int(a.id)), fmt=_fmt_one)
     p = _sp(asp, "create"); p.add_argument("--name", required=True); p.add_argument("--desc")
@@ -829,7 +841,7 @@ def build_parser() -> argparse.ArgumentParser:
     # label -----------------------------------------------------------------
     sp = sub.add_parser("label", parents=[COMMON])
     asp = sp.add_subparsers(dest="action", required=True)
-    p = _sp(asp, "list"); p.set_defaults(func=h_label_list, fmt=lambda c, v: _fmt_list_simple(v, ["id", "name", "color", "description"]))
+    p = _sp(asp, "list"); _paging(p); p.set_defaults(func=h_label_list, fmt=lambda c, v: _fmt_list_simple(v, ["id", "name", "color", "description"]))
     p = _sp(asp, "get"); _id_arg(p); p.set_defaults(func=lambda c, a: labels.get_label(c, int(a.id)), fmt=_fmt_one)
     p = _sp(asp, "create"); p.add_argument("--name", required=True); p.add_argument("--color"); p.add_argument("--desc")
     p.set_defaults(func=h_label_create, fmt=_fmt_one)
@@ -841,7 +853,7 @@ def build_parser() -> argparse.ArgumentParser:
     # member ----------------------------------------------------------------
     sp = sub.add_parser("member", parents=[COMMON])
     asp = sp.add_subparsers(dest="action", required=True)
-    p = _sp(asp, "list"); p.set_defaults(func=h_member_list, fmt=lambda c, v: _fmt_list_simple(v, ["id", "name", "mention_name"]))
+    p = _sp(asp, "list"); _paging(p); p.set_defaults(func=h_member_list, fmt=lambda c, v: _fmt_list_simple(v, ["id", "name", "mention_name"]))
     p = _sp(asp, "get"); _id_arg(p); p.set_defaults(func=lambda c, a: members.get_member(c, int(a.id)), fmt=_fmt_one)
     p = _sp(asp, "create"); p.add_argument("--name", required=True); p.add_argument("--mention")
     p.set_defaults(func=h_member_create, fmt=_fmt_one)
@@ -853,7 +865,7 @@ def build_parser() -> argparse.ArgumentParser:
     # group -----------------------------------------------------------------
     sp = sub.add_parser("group", parents=[COMMON])
     asp = sp.add_subparsers(dest="action", required=True)
-    p = _sp(asp, "list"); p.add_argument("--archived", action="store_true")
+    p = _sp(asp, "list"); p.add_argument("--archived", action="store_true"); _paging(p)
     p.set_defaults(func=h_group_list, fmt=lambda c, v: _fmt_list_simple(v, ["id", "name", "description", "archived"]))
     p = _sp(asp, "get"); _id_arg(p); p.set_defaults(func=lambda c, a: groups.get_group(c, int(a.id)), fmt=_fmt_one)
     p = _sp(asp, "create"); p.add_argument("--name", required=True); p.add_argument("--desc")
@@ -923,6 +935,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("query", nargs="+", help="search terms (FTS5 syntax, e.g. 'login bug')")
     sp.add_argument("--entity", choices=["story", "epic", "project", "milestone",
                                           "iteration", "label", "comment", "task"])
+    _paging(sp)
     sp.set_defaults(func=h_search, fmt=lambda c, v: _fmt_list_simple(v, ["entity", "id", "name", "rank"]))
 
     return parser

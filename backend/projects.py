@@ -10,18 +10,23 @@ from .models import Project, Story
 EDITABLE = {"name", "description", "abbreviation", "color", "archived"}
 
 
-def list_projects(conn: sqlite3.Connection, *, include_archived: bool = False) -> list[Project]:
+def list_projects(conn: sqlite3.Connection, *, include_archived: bool = False,
+                  limit: int | None = None, offset: int | None = None) -> list[Project]:
     """List projects.
 
     Args:
         conn: sqlite3.Connection from db.connect().
         include_archived: Whether to include archived projects.
+        limit: int | None — max rows (None = all).
+        offset: int | None — rows to skip (None = 0).
     Returns:
         A list of Project dataclasses.
     """
     if include_archived:
-        return _util.list_rows(conn, Project, "project", order="name")
-    return _util.list_rows(conn, Project, "project", where="archived = 0", order="name")
+        return _util.list_rows(conn, Project, "project", order="name",
+                               limit=limit, offset=offset)
+    return _util.list_rows(conn, Project, "project", where="archived = 0",
+                           order="name", limit=limit, offset=offset)
 
 
 def get_project(conn: sqlite3.Connection, id) -> Project:

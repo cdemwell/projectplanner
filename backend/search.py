@@ -56,20 +56,23 @@ class SearchResult:
         }
 
 
-def search(conn: sqlite3.Connection, query: str, *, entity: str | None = None) -> list[SearchResult]:
+def search(conn: sqlite3.Connection, query: str, *, entity: str | None = None,
+           limit: int | None = None, offset: int | None = None) -> list[SearchResult]:
     """Search ``name`` + ``description`` across entities (or one ``entity``).
 
     ``query`` is passed straight to FTS5's MATCH, so it supports terms, prefix
     (``log*``), and boolean (``login AND bug``) syntax. a "phrase" in quotes
     matches exactly. Results are sorted by relevance (bm25, negated so
-    bigger is better).
+    bigger is better). ``limit``/``offset`` page the ranked results.
 
     Args:
         conn: sqlite3.Connection from db.connect().
         query: str — FTS5 MATCH query.
         entity: str | None — optional filter by entity type.
+        limit: int | None — max results (None = all).
+        offset: int | None — results to skip (None = 0).
     Returns:
-        list[SearchResult] — results ranked by relevance.
+        list[SearchResult] — results ranked by relevance (optionally paged).
     Raises:
         ValueError: if an unknown entity is provided or the MATCH syntax is invalid.
     """
@@ -100,4 +103,9 @@ def search(conn: sqlite3.Connection, query: str, *, entity: str | None = None) -
                 entity=label, id=r[0], name=name, description=desc,
                 rank=-r[1 + len(cols)]))
     results.sort(key=lambda x: x.rank, reverse=True)
+    start = offset or 0
+    if start:
+        results = results[start:]
+    if limit is not None:
+        results = results[:limit]
     return results

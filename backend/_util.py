@@ -50,7 +50,8 @@ def get(conn: sqlite3.Connection, model, table: str, id, *, resource: str | None
 
 
 def list_rows(conn, model, table: str, *, where: str | None = None,
-              params=(), order: str = "id"):
+              params=(), order: str = "id", limit: int | None = None,
+              offset: int | None = None):
     """Fetch rows as a list of dataclasses.
 
     Args:
@@ -60,6 +61,10 @@ def list_rows(conn, model, table: str, *, where: str | None = None,
         where: Optional SQL WHERE clause (without 'WHERE' keyword).
         params: Parameters for the WHERE clause.
         order: SQL ORDER BY clause (without 'ORDER BY' keyword).
+        limit: Optional maximum number of rows (None = no limit).
+        offset: Optional number of rows to skip (None = 0). Applied with or
+            without a limit (SQLite ``LIMIT -1 OFFSET n`` skips n then returns
+            the rest).
 
     Returns:
         list: A list of mapped dataclass instances.
@@ -68,6 +73,10 @@ def list_rows(conn, model, table: str, *, where: str | None = None,
     if where:
         sql += f" WHERE {where}"
     sql += f" ORDER BY {order}"
+    if limit is not None or offset is not None:
+        sql += " LIMIT ? OFFSET ?"
+        params = tuple(params) + (limit if limit is not None else -1,
+                                  offset if offset is not None else 0)
     return [model.from_row(r) for r in conn.execute(sql, params)]
 
 

@@ -10,19 +10,24 @@ from .models import Group, Story
 EDITABLE = {"name", "description", "archived"}
 
 
-def list_groups(conn: sqlite3.Connection, *, include_archived: bool = False) -> list[Group]:
+def list_groups(conn: sqlite3.Connection, *, include_archived: bool = False,
+                limit: int | None = None, offset: int | None = None) -> list[Group]:
     """List groups.
 
     Args:
         conn: sqlite3.Connection from db.connect().
         include_archived: Whether to include archived groups.
+        limit: int | None — max rows (None = all).
+        offset: int | None — rows to skip (None = 0).
     Returns:
         A list of Group dataclasses.
     """
     if include_archived:
-        return _util.list_rows(conn, Group, "group", order="name")
+        return _util.list_rows(conn, Group, "group", order="name",
+                               limit=limit, offset=offset)
     return _util.list_rows(conn, Group, "group",
-                          where="archived = 0", order="name")
+                          where="archived = 0", order="name",
+                          limit=limit, offset=offset)
 
 
 def get_group(conn: sqlite3.Connection, id) -> Group:

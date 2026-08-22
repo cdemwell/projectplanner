@@ -182,3 +182,26 @@ def test_story_edit_abort(run_cli, monkeypatch):
     rc, out, err = run_cli("--json", "story", "edit", "1")
     assert rc == 0
     assert json.loads(out) == {"aborted": "story edit", "id": 1}
+
+
+def test_cli_pagination(run_cli):
+    for n in ["a", "b", "c", "d"]:
+        run_cli("story", "create", "--name", n)
+    rc, out, err = run_cli("--json", "story", "list", "--limit", "2")
+    assert [s["name"] for s in json.loads(out)] == ["a", "b"]
+    rc, out, err = run_cli("--json", "story", "list", "--offset", "2")
+    assert [s["name"] for s in json.loads(out)] == ["c", "d"]
+    rc, out, err = run_cli("--json", "story", "list", "--limit", "2", "--offset", "1")
+    assert [s["name"] for s in json.loads(out)] == ["b", "c"]
+    # default unchanged
+    rc, out, err = run_cli("--json", "story", "list")
+    assert len(json.loads(out)) == 4
+
+
+def test_cli_search_pagination(run_cli):
+    for n in ["login a", "login b", "login c"]:
+        run_cli("story", "create", "--name", n)
+    rc, out, err = run_cli("--json", "search", "login", "--limit", "2")
+    assert len(json.loads(out)) == 2
+    rc, out, err = run_cli("--json", "search", "login", "--offset", "2")
+    assert len(json.loads(out)) == 1
