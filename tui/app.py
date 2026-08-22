@@ -41,6 +41,7 @@ from backend import (
     iterations,
     labels,
     members,
+    milestones,
     projects,
     stories,
     tasks,
@@ -590,6 +591,109 @@ class LabelScreen(ModalScreen[bool]):
         self.dismiss(None)
 
 
+class BrowseMenuScreen(ModalScreen[str]):
+    """Choose which container entity to browse.
+
+    Dismisses with one of 'project'/'epic'/'iteration'/'milestone', or None.
+    """
+
+    def compose(self) -> ComposeResult:
+        yield Vertical(
+            Static("Browse", classes="modal-title"),
+            Horizontal(
+                Button("Projects", id="project", variant="primary"),
+                Button("Epics", id="epic"),
+                Button("Iterations", id="iteration"),
+                Button("Milestones", id="milestone"),
+            ),
+            Button("Cancel", id="cancel"),
+            classes="modal-box",
+        )
+
+    @on(Button.Pressed)
+    def _pick(self, event: Button.Pressed) -> None:
+        if event.button.id == "cancel":
+            self.dismiss(None)
+        elif event.button.id in ("project", "epic", "iteration", "milestone"):
+            self.dismiss(event.button.id)
+
+
+class EntityBrowserScreen(ModalScreen[tuple]):
+    """Browse a container entity and pick one to filter the story list by.
+
+    Dismisses with (filter_key, id) — e.g. ('project', 3) — or None on cancel.
+    """
+
+    def __init__(self, conn: sqlite3.Connection, kind: str) -> None:
+        super().__init__()
+        self.conn = conn
+        self.kind = kind
+
+    def compose(self) -> ComposeResult:
+        title = {"project": "Projects", "epic": "Epics",
+                 "iteration": "Iterations", "milestone": "Milestones"}[self.kind]
+        yield Vertical(
+            Static(f"{title} — pick to filter stories", classes="modal-title"),
+            DataTable(id="browser-table", cursor_type="row"),
+            Horizontal(Button("Select", id="ok", variant="primary"),
+                       Button("Cancel", id="cancel")),
+            classes="modal-box",
+        )
+
+    def on_mount(self) -> None:
+        table = self.query_one("#browser-table", DataTable)
+        rows = self._rows()
+        cols = self._columns()
+        table.add_columns(*cols)
+        for r in rows:
+            table.add_row(*[str(c) for c in r], key=str(r[0]))
+
+    def _columns(self) -> list[str]:
+        if self.kind == "project":
+            return ["ID", "Name", "Archived"]
+        if self.kind == "epic":
+            return ["ID", "Name", "State"]
+        if self.kind == "iteration":
+            return ["ID", "Name", "Status"]
+        return ["ID", "Name", "State"]  # milestone
+
+    def _rows(self) -> list[tuple]:
+        c = self.conn
+        if self.kind == "project":
+            return [(p.id, p.name, "yes" if p.archived else "")
+                    for p in projects.list_projects(c, include_archived=True)]
+        if self.kind == "epic":
+            return [(e.id, e.name, e.state) for e in epics.list_epics(c)]
+        if self.kind == "iteration":
+            return [(it.id, it.name, it.status) for it in iterations.list_iterations(c)]
+        return [(m.id, m.name, m.state) for m in milestones.list_milestones(c)]
+
+    def _selected_id(self) -> int | None:
+        table = self.query_one("#browser-table", DataTable)
+        try:
+            key = table.coordinate_to_cell_key(table.cursor_coordinate).row_key
+        except Exception:
+            return None
+        if key is None or key.value is None:
+            return None
+        try:
+            return int(key.value)
+        except (TypeError, ValueError):
+            return None
+
+    @on(Button.Pressed, "#ok")
+    def _select(self) -> None:
+        sid = self._selected_id()
+        if sid is None:
+            self.bell()
+            return
+        self.dismiss((self.kind, sid))
+
+    @on(Button.Pressed, "#cancel")
+    def _cancel(self) -> None:
+        self.dismiss(None)
+
+
 # --------------------------------------------------------------------------- #
 # Main app
 # --------------------------------------------------------------------------- #
@@ -621,6 +725,7 @@ class PlannerApp(App):
         Binding("o", "manage_owners", "Owners"),
         Binding("l", "manage_labels", "Labels"),
         Binding("f", "filter", "Filter"),
+        Binding("b", "browse", "Browse"),
         Binding("slash", "search", "Search"),  # '/'
         Binding("r", "refresh", "Refresh"),
         Binding("J", "move_down", "Down"),
@@ -633,8 +738,9 @@ class PlannerApp(App):
         super().__init__()
         self.db_path = db_path
         self.conn: sqlite3.Connection | None = None
-        # Active filters: (project_id|None, state_type|None, search_q|None)
-        self.filters: tuple = (None, None, None)
+        # Active story-list filters. Keys map to stories.list_stories params.
+        self.filters = {"project": None, "state_type": None, "q": None,
+                        "epic": None, "iteration": None, "milestone": None}
 
     # --- lifecycle --------------------------------------------------------- #
     def on_mount(self) -> None:
@@ -659,11 +765,15 @@ class PlannerApp(App):
     def refresh_stories(self) -> None:
         """Query stories based on active filters and populate the DataTable.
 
-        The filters tuple shape is (project_id|None, state_type|None, search_q|None).
+        ``self.filters`` is a dict with keys project/state_type/q/epic/iteration/
+        milestone (each id|str|None), mapped to ``stories.list_stories`` params.
         """
         assert self.conn is not None
-        proj, stype, q = self.filters
-        items = stories.list_stories(self.conn, project_id=proj, state_type=stype, q=q)
+        f = self.filters
+        items = stories.list_stories(
+            self.conn, project_id=f["project"], state_type=f["state_type"],
+            epic_id=f["epic"], iteration_id=f["iteration"],
+            milestone_id=f["milestone"], q=f["q"])
         table = self.query_one("#stories", DataTable)
         table.clear(columns=True)
         if not table.columns:
@@ -686,9 +796,15 @@ class PlannerApp(App):
                           owners, "✓" if s.completed_at else "", key=str(s.id))
         # Filter-bar caption.
         parts = []
-        parts.append(f"project={'any' if proj is None else self.name_of('project', proj)}")
-        parts.append(f"state={'any' if stype is None else stype}")
-        parts.append(f"q={'-' if q is None else q!r}")
+        parts.append(f"project={'any' if f['project'] is None else self.name_of('project', f['project'])}")
+        parts.append(f"state={'any' if f['state_type'] is None else f['state_type']}")
+        if f["epic"] is not None:
+            parts.append(f"epic={self.name_of('epic', f['epic'])}")
+        if f["iteration"] is not None:
+            parts.append(f"iter={self.name_of('iteration', f['iteration'])}")
+        if f["milestone"] is not None:
+            parts.append(f"milestone={self.name_of('milestone', f['milestone'])}")
+        parts.append(f"q={'-' if f['q'] is None else f['q']!r}")
         parts.append(f"  ({len(items)} stories)")
         self.query_one("#filter-bar", Static).update("  ".join(parts))
         # Keep a selection; refresh detail for the cursor row.
@@ -789,8 +905,11 @@ class PlannerApp(App):
     def _filtered_neighbors(self) -> list:
         """Return the stories currently shown (ordered by position, id)."""
         assert self.conn is not None
-        proj, stype, q = self.filters
-        return stories.list_stories(self.conn, project_id=proj, state_type=stype, q=q)
+        f = self.filters
+        return stories.list_stories(
+            self.conn, project_id=f["project"], state_type=f["state_type"],
+            epic_id=f["epic"], iteration_id=f["iteration"],
+            milestone_id=f["milestone"], q=f["q"])
 
     def _swap_positions(self, a, b) -> None:
         """Swap the position columns of two stories."""
@@ -949,24 +1068,43 @@ class PlannerApp(App):
     def action_filter(self) -> None:
         """Open modal to adjust project and state filters."""
         assert self.conn is not None
-        proj, stype, _q = self.filters
-        self.push_screen(FilterScreen(self.conn, (proj, stype)), self._after_filter)
+        self.push_screen(FilterScreen(self.conn, (self.filters["project"],
+                                                 self.filters["state_type"])),
+                         self._after_filter)
 
     def _after_filter(self, result: tuple | None) -> None:
         if result is None:
             return
         proj, stype = result
-        self.filters = (proj, stype, self.filters[2])
+        self.filters["project"] = proj
+        self.filters["state_type"] = stype
         self.refresh_stories()
 
     def action_search(self) -> None:
         """Open modal to search stories by keyword."""
         self.push_screen(SearchInputScreen(), self._after_search)
 
+    def action_browse(self) -> None:
+        """Open a menu to browse a container entity, then filter stories by it."""
+        assert self.conn is not None
+        self.push_screen(BrowseMenuScreen(), self._after_browse_menu)
+
+    def _after_browse_menu(self, kind: str | None) -> None:
+        if kind is None or self.conn is None:
+            return
+        self.push_screen(EntityBrowserScreen(self.conn, kind), self._after_browse)
+
+    def _after_browse(self, result: tuple | None) -> None:
+        if result is None:
+            return
+        kind, entity_id = result
+        self.filters[kind] = entity_id
+        self.refresh_stories()
+
     def _after_search(self, q: str | None) -> None:
         if q is None:
             return
-        self.filters = (self.filters[0], self.filters[1], q or None)
+        self.filters["q"] = q or None
         self.refresh_stories()
 
     def action_delete_story(self) -> None:

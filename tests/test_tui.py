@@ -82,7 +82,9 @@ def test_tui_create_toggle_search_delete(seeded_db):
             assert app.query_one("#stories").row_count == 1
 
             # clear filter
-            app.filters = (None, None, None); app.refresh_stories(); await pilot.pause()
+            app.filters = {"project": None, "state_type": None, "q": None,
+                           "epic": None, "iteration": None, "milestone": None}
+            app.refresh_stories(); await pilot.pause()
 
             # add a comment
             app.query_one("#stories").move_cursor(row=0); await pilot.pause()

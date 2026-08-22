@@ -22,15 +22,14 @@ EDITABLE = {
 
 def list_stories(conn: sqlite3.Connection, *, project_id=None, epic_id=None,
                  iteration_id=None, state_type=None, group_id=None,
-                 owner_id=None, label_id=None, q: str | None = None,
-                 include_completed: bool = True,
+                 owner_id=None, label_id=None, milestone_id=None,
+                 q: str | None = None, include_completed: bool = True,
                  limit: int | None = None, offset: int | None = None) -> list[Story]:
     """List stories with optional filters.
 
-    Builds a dynamic WHERE clause. For owners, labels, and state type, it uses
-    EXISTS subqueries to check junction tables or workflow state types.
-    Results are ordered by position, then ID. ``limit``/``offset`` page the
-    result (None = no limit / no offset).
+    Builds a dynamic WHERE clause. For owners, labels, state type, and milestone,
+    it uses EXISTS subqueries to check junction/parent tables. Results are
+    ordered by position, then ID. ``limit``/``offset`` page the result.
 
     Args:
         conn: sqlite3.Connection from db.connect().
@@ -41,6 +40,7 @@ def list_stories(conn: sqlite3.Connection, *, project_id=None, epic_id=None,
         group_id: int | None — filter by group.
         owner_id: int | None — filter by member assigned.
         label_id: int | None — filter by label.
+        milestone_id: int | None — filter to stories whose epic belongs to this milestone.
         q: str | None — keyword search over name and description.
         include_completed: bool — whether to include stories where completed_at is set.
         limit: int | None — max rows to return (None = all).
@@ -70,6 +70,10 @@ def list_stories(conn: sqlite3.Connection, *, project_id=None, epic_id=None,
         where.append("EXISTS (SELECT 1 FROM story_label sl "
                      "WHERE sl.story_id = s.id AND sl.label_id = ?)")
         params.append(label_id)
+    if milestone_id is not None:
+        where.append("EXISTS (SELECT 1 FROM epic e "
+                     "WHERE e.id = s.epic_id AND e.milestone_id = ?)")
+        params.append(milestone_id)
     if q is not None:
         where.append("(s.name LIKE ? OR s.description LIKE ?)")
         params += [f"%{q}%", f"%{q}%"]
