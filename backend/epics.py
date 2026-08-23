@@ -131,3 +131,21 @@ def list_epic_stories(conn: sqlite3.Connection, epic_id) -> list:
     """
     from .stories import list_stories
     return list_stories(conn, epic_id=epic_id)
+
+
+def epic_progress(conn: sqlite3.Connection, epic_id: int) -> dict:
+    """Compute an epic's progress based on its stories.
+
+    Args:
+        conn: sqlite3.Connection from db.connect().
+        epic_id: int — the epic ID.
+    Returns:
+        dict — {"done": int, "total": int, "pct": float}
+    """
+    row = conn.execute(
+        "SELECT COUNT(*), COUNT(completed_at) FROM story WHERE epic_id = ?",
+        (epic_id,)
+    ).fetchone()
+    total, done = row[0], row[1]
+    pct = (done / total * 100) if total > 0 else 0.0
+    return {"done": done, "total": total, "pct": pct}

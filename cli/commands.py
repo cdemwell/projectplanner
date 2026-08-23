@@ -431,6 +431,18 @@ def _fmt_stories(conn, items):
                  ["id", "name", "type", "state", "project", "owners", "done"])
 
 
+def _fmt_epics(conn, items):
+    """Text formatter for ``epic list``."""
+    rows = []
+    for e in items:
+        prog = epics.epic_progress(conn, e.id)
+        progress_str = f"{prog['done']}/{prog['total']} ({prog['pct']:.1f}%)"
+        row = dataclasses.asdict(e)
+        row["progress"] = progress_str
+        rows.append(row)
+    _print_table(rows, ["id", "name", "state", "progress", "project_id", "milestone_id"])
+
+
 def _fmt_one(conn, obj):
     """Text formatter for a single entity: prints ``key: value`` lines."""
     d = (obj.to_dict() if hasattr(obj, "to_dict")
@@ -886,7 +898,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("epic", parents=[COMMON])
     asp = sp.add_subparsers(dest="action", required=True)
     p = _sp(asp, "list"); p.add_argument("--project"); p.add_argument("--milestone"); _paging(p)
-    p.set_defaults(func=h_epic_list, fmt=lambda c, v: _fmt_list_simple(v, ["id", "name", "state", "project_id", "milestone_id"]))
+    p.set_defaults(func=h_epic_list, fmt=_fmt_epics)
     p = _sp(asp, "get"); _id_arg(p); p.set_defaults(func=lambda c, a: epics.get_epic(c, int(a.id)), fmt=_fmt_one)
     p = _sp(asp, "create"); p.add_argument("--name", required=True); p.add_argument("--desc")
     p.add_argument("--state", default="planned"); p.add_argument("--project"); p.add_argument("--milestone")
