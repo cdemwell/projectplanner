@@ -29,6 +29,7 @@ from typing import Any
 from backend import (
     _util,
     comments,
+    config,
     db,
     epics,
     errors,
@@ -1215,12 +1216,32 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--keep", type=int, help="number of most recent backups to keep")
     p.set_defaults(func=h_plan_backup, fmt=_fmt_one)
 
+    # config -------------------------------------------------------------------
+    sp = sub.add_parser("config", parents=[COMMON])
+    sp.add_argument("--file", help="load config from a specific file")
+    sp.add_argument("--init", action="store_true", help="copy example config to planner.json")
+    sp.set_defaults(func=h_config, fmt=_fmt_one)
+
     return parser
 
 
 # --------------------------------------------------------------------------- #
 # Entry point
 # --------------------------------------------------------------------------- #
+
+def h_config(conn, a):
+    """Handle ``config``; print current config, load from file, or init from example."""
+    if a.init:
+        example_path = Path("planner.example.json")
+        config_path = Path("planner.json")
+        if not example_path.exists():
+            raise errors.PlannerError("planner.example.json not found")
+        shutil.copy2(example_path, config_path)
+        return {"status": "initialized", "file": str(config_path)}
+
+    path = a.file if a.file else "planner.json"
+    return config.load_config(path)
+
 
 def run(argv: list[str] | None = None) -> int:
     """Parse ``argv``, open a connection, run the action, and render output.

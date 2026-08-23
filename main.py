@@ -28,7 +28,7 @@ def main(argv: list[str] | None = None) -> int:
     # Known CLI resources:
     cli_resources = {"story", "epic", "iteration", "milestone", "project",
                      "label", "member", "group", "workflow", "task",
-                     "comment", "link", "search", "plan"}
+                     "comment", "link", "search", "plan", "config"}
     first = argv[0] if argv else None
     if first and first in cli_resources:
         from cli.commands import run as run_cli

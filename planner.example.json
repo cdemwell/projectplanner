@@ -1,0 +1,7 @@
+{
+  "default_project": "backend",
+  "default_owner": "cdemwell",
+  "auto_refresh_seconds": 5,
+  "rotate_backup": 3,
+  "default_story_type": "feature"
+}
