@@ -97,11 +97,11 @@ def test_state_resolution_by_name_and_type(run_cli):
     # by type
     rc, out, err = run_cli("--json", "story", "move", str(sid), "--state", "done")
     assert rc == 0, err
-    assert json.loads(out)["completed_at"] is not None
+    assert json.loads(out)[0]["completed_at"] is not None
     # by name
     rc, out, err = run_cli("--json", "story", "move", str(sid), "--state", "Unstarted")
     assert rc == 0
-    assert json.loads(out)["completed_at"] is None
+    assert json.loads(out)[0]["completed_at"] is None
 
 
 def test_error_exit_code_one(run_cli):
@@ -132,7 +132,7 @@ def test_delete_status_json(run_cli):
     run_cli("story", "create", "--name", "x")
     rc, out, err = run_cli("--json", "story", "delete", "1")
     assert rc == 0
-    assert json.loads(out) == {"deleted": "story", "id": 1}
+    assert json.loads(out) == [{"deleted": "story", "id": 1}]
 
 
 def test_ambiguous_name_error(run_cli):

@@ -453,6 +453,16 @@ def _fmt_one(conn, obj):
     _print_kv(d) if isinstance(d, dict) else print(d)
 
 
+def _fmt_bulk(conn, items):
+    """Text formatter for multiple entities: prints each using _fmt_one."""
+    if not isinstance(items, list):
+        _fmt_one(conn, items)
+        return
+    for item in items:
+        _fmt_one(conn, item)
+        print()
+
+
 def _fmt_list_simple(items, columns):
     """Text formatter for a list of dataclasses: ``asdict`` each, then table."""
     rows = [dataclasses.asdict(i) if dataclasses.is_dataclass(i) else i for i in items]
@@ -542,7 +552,7 @@ def h_story_create(conn, a):
 
 
 def h_story_update(conn, a):
-    """Handle ``story update``; map provided flags to editable fields and return the story."""
+    """Handle ``story update``; map provided flags to editable fields and return the stories."""
     fields = {}
     if a.name is not None: fields["name"] = a.name
     if a.desc is not None: fields["description"] = a.desc
@@ -553,7 +563,16 @@ def h_story_update(conn, a):
     if a.group is not None: fields["group_id"] = resolve_group(conn, a.group)
     if a.deadline is not None: fields["deadline"] = a.deadline
     if a.position is not None: fields["position"] = a.position
-    return stories.update_story(conn, int(a.id), **fields)
+
+    results = []
+    for sid in getattr(a, "ids", [getattr(a, "id", None)]):
+        if sid is None: continue
+        try:
+            results.append(stories.update_story(conn, int(sid), **fields))
+        except errors.NotFound:
+            print(f"warning: story {sid} not found", file=sys.stderr)
+            results.append({"error": "NotFound", "id": sid})
+    return results
 
 
 def h_story_edit(conn, a):
@@ -568,38 +587,91 @@ def h_story_edit(conn, a):
 
 
 def h_story_move(conn, a):
-    """Handle ``story move``; resolve the target state and move the story."""
-    return stories.move_story_state(conn, int(a.id), resolve_workflow_state(conn, a.state))
+    """Handle ``story move``; resolve the target state and move the stories."""
+    state_id = resolve_workflow_state(conn, a.state)
+    results = []
+    for sid in getattr(a, "ids", [getattr(a, "id", None)]):
+        if sid is None: continue
+        try:
+            results.append(stories.move_story_state(conn, int(sid), state_id))
+        except errors.NotFound:
+            print(f"warning: story {sid} not found", file=sys.stderr)
+            results.append({"error": "NotFound", "id": sid})
+    return results
 
 
 def h_story_assign(conn, a):
-    """Handle ``story assign``; add an owner and return the story."""
-    stories.assign_owner(conn, int(a.id), resolve_member(conn, a.owner))
-    return stories.get_story(conn, int(a.id))
+    """Handle ``story assign``; add an owner and return the stories."""
+    owner_id = resolve_member(conn, a.owner)
+    results = []
+    for sid in getattr(a, "ids", [getattr(a, "id", None)]):
+        if sid is None: continue
+        try:
+            stories.assign_owner(conn, int(sid), owner_id)
+            results.append(stories.get_story(conn, int(sid)))
+        except errors.NotFound:
+            print(f"warning: story {sid} not found", file=sys.stderr)
+            results.append({"error": "NotFound", "id": sid})
+    return results
 
 
 def h_story_unassign(conn, a):
-    """Handle ``story unassign``; remove an owner and return the story."""
-    stories.remove_owner(conn, int(a.id), resolve_member(conn, a.owner))
-    return stories.get_story(conn, int(a.id))
+    """Handle ``story unassign``; remove an owner and return the stories."""
+    owner_id = resolve_member(conn, a.owner)
+    results = []
+    for sid in getattr(a, "ids", [getattr(a, "id", None)]):
+        if sid is None: continue
+        try:
+            stories.remove_owner(conn, int(sid), owner_id)
+            results.append(stories.get_story(conn, int(sid)))
+        except errors.NotFound:
+            print(f"warning: story {sid} not found", file=sys.stderr)
+            results.append({"error": "NotFound", "id": sid})
+    return results
 
 
 def h_story_label(conn, a):
-    """Handle ``story label``; add a label and return the story."""
-    stories.add_label(conn, int(a.id), resolve_label(conn, a.label))
-    return stories.get_story(conn, int(a.id))
+    """Handle ``story label``; add a label and return the stories."""
+    label_id = resolve_label(conn, a.label)
+    results = []
+    for sid in getattr(a, "ids", [getattr(a, "id", None)]):
+        if sid is None: continue
+        try:
+            stories.add_label(conn, int(sid), label_id)
+            results.append(stories.get_story(conn, int(sid)))
+        except errors.NotFound:
+            print(f"warning: story {sid} not found", file=sys.stderr)
+            results.append({"error": "NotFound", "id": sid})
+    return results
 
 
 def h_story_unlabel(conn, a):
-    """Handle ``story unlabel``; remove a label and return the story."""
-    stories.remove_label(conn, int(a.id), resolve_label(conn, a.label))
-    return stories.get_story(conn, int(a.id))
+    """Handle ``story unlabel``; remove a label and return the stories."""
+    label_id = resolve_label(conn, a.label)
+    results = []
+    for sid in getattr(a, "ids", [getattr(a, "id", None)]):
+        if sid is None: continue
+        try:
+            stories.remove_label(conn, int(sid), label_id)
+            results.append(stories.get_story(conn, int(sid)))
+        except errors.NotFound:
+            print(f"warning: story {sid} not found", file=sys.stderr)
+            results.append({"error": "NotFound", "id": sid})
+    return results
 
 
 def h_story_delete(conn, a):
-    """Handle ``story delete``; delete and return a ``{deleted, id}`` status."""
-    stories.delete_story(conn, int(a.id))
-    return {"deleted": "story", "id": int(a.id)}
+    """Handle ``story delete``; delete and return a list of status dicts."""
+    results = []
+    for sid in getattr(a, "ids", [getattr(a, "id", None)]):
+        if sid is None: continue
+        try:
+            stories.delete_story(conn, int(sid))
+            results.append({"deleted": "story", "id": int(sid)})
+        except errors.NotFound:
+            print(f"warning: story {sid} not found", file=sys.stderr)
+            results.append({"error": "NotFound", "id": sid})
+    return results
 
 
 # -- epics ---------------------------------------------------------------- #
@@ -870,6 +942,11 @@ def _id_arg(p):
     p.add_argument("id", help="entity id")
 
 
+def _ids_arg(p):
+    """Add the standard positional ``ids`` argument to an action subparser."""
+    p.add_argument("ids", nargs="+", help="entity id(s)")
+
+
 def _paging(p):
     """Add ``--limit``/``--offset`` paging flags to a list/search subparser."""
     p.add_argument("--limit", type=int, help="max rows to return")
@@ -911,25 +988,25 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--deadline"); p.add_argument("--owners", help="comma-separated member names/ids")
     p.add_argument("--labels", help="comma-separated label names/ids")
     p.set_defaults(func=h_story_create, fmt=_fmt_one)
-    p = _sp(asp, "update"); _id_arg(p)
+    p = _sp(asp, "update"); _ids_arg(p)
     for f in ("--name", "--desc", "--project", "--epic", "--iteration", "--group", "--deadline"):
         p.add_argument(f)
     p.add_argument("--type", choices=list(stories.STORY_TYPES))
     p.add_argument("--position", type=float)
-    p.set_defaults(func=h_story_update, fmt=_fmt_one)
+    p.set_defaults(func=h_story_update, fmt=_fmt_bulk)
     p = _sp(asp, "edit"); _id_arg(p)
     p.set_defaults(func=h_story_edit, fmt=_fmt_one)
-    p = _sp(asp, "move"); _id_arg(p); p.add_argument("--state", required=True)
-    p.set_defaults(func=h_story_move, fmt=_fmt_one)
-    p = _sp(asp, "assign"); _id_arg(p); p.add_argument("--owner", required=True)
-    p.set_defaults(func=h_story_assign, fmt=_fmt_one)
-    p = _sp(asp, "unassign"); _id_arg(p); p.add_argument("--owner", required=True)
-    p.set_defaults(func=h_story_unassign, fmt=_fmt_one)
-    p = _sp(asp, "label"); _id_arg(p); p.add_argument("--label", required=True)
-    p.set_defaults(func=h_story_label, fmt=_fmt_one)
-    p = _sp(asp, "unlabel"); _id_arg(p); p.add_argument("--label", required=True)
-    p.set_defaults(func=h_story_unlabel, fmt=_fmt_one)
-    p = _sp(asp, "delete"); _id_arg(p); p.set_defaults(func=h_story_delete, fmt=_fmt_one)
+    p = _sp(asp, "move"); _ids_arg(p); p.add_argument("--state", required=True)
+    p.set_defaults(func=h_story_move, fmt=_fmt_bulk)
+    p = _sp(asp, "assign"); _ids_arg(p); p.add_argument("--owner", required=True)
+    p.set_defaults(func=h_story_assign, fmt=_fmt_bulk)
+    p = _sp(asp, "unassign"); _ids_arg(p); p.add_argument("--owner", required=True)
+    p.set_defaults(func=h_story_unassign, fmt=_fmt_bulk)
+    p = _sp(asp, "label"); _ids_arg(p); p.add_argument("--label", required=True)
+    p.set_defaults(func=h_story_label, fmt=_fmt_bulk)
+    p = _sp(asp, "unlabel"); _ids_arg(p); p.add_argument("--label", required=True)
+    p.set_defaults(func=h_story_unlabel, fmt=_fmt_bulk)
+    p = _sp(asp, "delete"); _ids_arg(p); p.set_defaults(func=h_story_delete, fmt=_fmt_bulk)
 
     # epic -------------------------------------------------------------------
     sp = sub.add_parser("epic", parents=[COMMON])
