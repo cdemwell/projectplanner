@@ -26,12 +26,14 @@ from textual.widgets import (
     Header,
     Input,
     Label,
+    OptionList,
     RichLog,
     Select,
     Static,
     TextArea,
 )
 from textual.widgets import Select as _Select
+from textual.widgets.option_list import Option
 
 from backend import (
     comments,
@@ -68,6 +70,30 @@ def _sel(value: Any) -> Any:
     if value is _Select.BLANK or value == _NONE_INT or value == _NONE_STR:
         return None
     return value
+
+
+# Command palette entries: (display label, action method name).
+# These mirror the app's actions so the palette can dispatch to them directly.
+_PALETTE_COMMANDS: list[tuple[str, str]] = [
+    ("New story", "new_story"),
+    ("Update story", "edit_story"),
+    ("Move state", "move_state"),
+    ("Add comment", "add_comment"),
+    ("Add task", "add_task"),
+    ("Task action", "task_action"),
+    ("Manage owners", "manage_owners"),
+    ("Manage labels", "manage_labels"),
+    ("Filter", "filter"),
+    ("Browse", "browse"),
+    ("Search", "search"),
+    ("Toggle complete", "toggle_complete"),
+    ("Delete story", "delete_story"),
+    ("Refresh", "refresh"),
+    ("Move down", "move_down"),
+    ("Move up", "move_up"),
+    ("Toggle auto-refresh", "toggle_auto_refresh"),
+    ("Quit", "quit"),
+]
 
 
 # --------------------------------------------------------------------------- #
@@ -141,6 +167,67 @@ class FilterScreen(ModalScreen[tuple]):
     @on(Button.Pressed, "#cancel")
     def _cancel(self) -> None:
         self.dismiss(None)
+
+
+class CommandPalette(ModalScreen[str]):
+    """Command palette opened with Ctrl+P.
+
+    An Input at the top fuzzy/substring-filters a list of all app commands
+    below. Enter or click selects the highlighted command.
+
+    Dismisses with:
+        str: The action method name to run (e.g. 'new_story'), or None on cancel.
+    """
+
+    def compose(self) -> ComposeResult:
+        yield Vertical(
+            Static("Commands", classes="modal-title"),
+            Input(id="pal-input", placeholder="Type to filter commands…"),
+            OptionList(*[Option(name, id=action)
+                         for name, action in _PALETTE_COMMANDS],
+                       id="pal-options"),
+            classes="palette-box",
+        )
+
+    def on_mount(self) -> None:
+        opts = self.query_one("#pal-options", OptionList)
+        if opts.option_count:
+            opts.highlighted = 0
+        self.query_one("#pal-input", Input).focus()
+
+    def _filtered(self, query: str) -> list[tuple[str, str]]:
+        """Return palette commands whose label contains the query (case-insensitive)."""
+        q = query.strip().lower()
+        if not q:
+            return _PALETTE_COMMANDS
+        return [(name, action) for name, action in _PALETTE_COMMANDS
+                if q in name.lower()]
+
+    def _rebuild(self, query: str) -> None:
+        opts = self.query_one("#pal-options", OptionList)
+        opts.clear_options()
+        opts.add_options([Option(name, id=action)
+                          for name, action in self._filtered(query)])
+        if opts.option_count:
+            opts.highlighted = 0
+
+    def _dispatch_highlighted(self) -> None:
+        opts = self.query_one("#pal-options", OptionList)
+        if opts.option_count == 0:
+            return
+        self.dismiss(opts.get_option_at_index(opts.highlighted).id)
+
+    @on(Input.Changed, "#pal-input")
+    def _on_changed(self, event: Input.Changed) -> None:
+        self._rebuild(event.value)
+
+    @on(Input.Submitted, "#pal-input")
+    def _on_submitted(self, event: Input.Submitted) -> None:
+        self._dispatch_highlighted()
+
+    @on(OptionList.OptionSelected, "#pal-options")
+    def _on_selected(self, event: OptionList.OptionSelected) -> None:
+        self.dismiss(event.option.id)
 
 
 
@@ -761,6 +848,9 @@ class EntityBrowserScreen(ModalScreen[tuple]):
 class PlannerApp(App):
     """Full-screen project planner TUI."""
 
+    # Replace Textual's built-in command palette with our own Ctrl+P palette.
+    ENABLE_COMMAND_PALETTE = False
+
     CSS = """
     #filter-bar { background: $panel; height: 1; padding: 0 1; color: $text-muted; }
     #stories { width: 1fr; border: solid $primary; }
@@ -769,12 +859,18 @@ class PlannerApp(App):
         width: 64; height: auto; max-height: 80%;
         background: $panel; border: solid $primary; padding: 1 2;
     }
+    .palette-box {
+        width: 60; height: auto; max-height: 60%;
+        background: $panel; border: solid $primary; padding: 1 2;
+    }
+    #pal-options { height: auto; max-height: 30; }
     .modal-title { text-style: bold; margin-bottom: 1; }
     .err { color: $error; }
     TextArea { height: 6; }
     """
 
     BINDINGS = [
+        Binding("ctrl+p", "open_palette", "Palette"),
         Binding("q", "quit", "Quit"),
         Binding("n", "new_story", "New"),
         Binding("u", "edit_story", "Update"),
@@ -997,6 +1093,20 @@ class PlannerApp(App):
             self.show_current_detail()
 
     # --- actions ----------------------------------------------------------- #
+    def action_open_palette(self) -> None:
+        """Open the command palette; run the chosen command on dismiss."""
+        self.push_screen(CommandPalette(), self._run_palette_command)
+
+    def _run_palette_command(self, action_name: str | None) -> None:
+        """Dispatch a palette selection to the matching action method."""
+        if action_name is None:
+            return
+        method = getattr(self, f"action_{action_name}", None)
+        if method is not None:
+            method()
+        else:
+            self.bell()
+
     def action_refresh(self) -> None:
         """Refresh the story list based on current filters."""
         self.refresh_stories()
