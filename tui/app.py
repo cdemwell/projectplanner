@@ -13,6 +13,8 @@ from __future__ import annotations
 import sqlite3
 from typing import Any
 
+from rich.style import Style
+from rich.text import Text
 from textual import on
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -432,16 +434,16 @@ class CreateStoryPane(Vertical):
 
 
 class MoveStateScreen(ModalScreen[int]):
-    """Collects a new workflow state for the selected story.
+    """Collects a new workflow state for the selected story/stories.
 
-    Dismisses with:
+    Applies the chosen state to every story in ``story_ids``. Dismisses with:
         int: The new state id, or None on cancel.
     """
 
-    def __init__(self, conn: sqlite3.Connection, story_id: int) -> None:
+    def __init__(self, conn: sqlite3.Connection, story_ids: list[int]) -> None:
         super().__init__()
         self.conn = conn
-        self.story_id = story_id
+        self.story_ids = story_ids
 
     def compose(self) -> ComposeResult:
         wfs = workflows.list_workflows(self.conn)
@@ -449,8 +451,10 @@ class MoveStateScreen(ModalScreen[int]):
         for wf in wfs:
             for s in workflows.list_workflow_states(self.conn, wf.id):
                 opts.append((f"{s.name} ({s.type})", s.id))
+        count = len(self.story_ids)
+        title = "Move story to state" if count == 1 else f"Move {count} stories to state"
         yield VerticalScroll(
-            Static("Move story to state", classes="modal-title"),
+            Static(title, classes="modal-title"),
             Select(opts, value=opts[0][1] if opts else _NONE_INT, id="m-state"),
             Horizontal(Button("Move", id="ok", variant="primary"), Button("Cancel", id="cancel")),
             classes="modal-box",
@@ -462,7 +466,8 @@ class MoveStateScreen(ModalScreen[int]):
         if sid is None:
             self.dismiss(None)
             return
-        stories.move_story_state(self.conn, self.story_id, sid)
+        for story_id in self.story_ids:
+            stories.move_story_state(self.conn, story_id, sid)
         self.dismiss(sid)
 
 
@@ -738,6 +743,70 @@ class LabelScreen(ModalScreen[bool]):
         self.dismiss(None)
 
 
+class AssignOwnerScreen(ModalScreen[int]):
+    """Pick a member to assign as owner of every selected story.
+
+    Dismisses with:
+        int: The member id to assign, or None on cancel.
+    """
+
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        super().__init__()
+        self.conn = conn
+
+    def compose(self) -> ComposeResult:
+        opts = [(m.name, m.id) for m in members.list_members(self.conn)]
+        if not opts:
+            opts = [("(no members)", _NONE_INT)]
+        yield VerticalScroll(
+            Static("Assign owner to selected", classes="modal-title"),
+            Select(opts, value=opts[0][1], id="a-member"),
+            Horizontal(Button("Assign", id="ok", variant="primary"),
+                       Button("Cancel", id="cancel")),
+            classes="modal-box",
+        )
+
+    @on(Button.Pressed, "#ok")
+    def _assign(self) -> None:
+        mid = _sel(self.query_one("#a-member", Select).value)
+        if mid is None:
+            self.dismiss(None)
+            return
+        self.dismiss(mid)
+
+
+class AssignLabelScreen(ModalScreen[int]):
+    """Pick a label to add to every selected story.
+
+    Dismisses with:
+        int: The label id to add, or None on cancel.
+    """
+
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        super().__init__()
+        self.conn = conn
+
+    def compose(self) -> ComposeResult:
+        opts = [(lb.name, lb.id) for lb in labels.list_labels(self.conn)]
+        if not opts:
+            opts = [("(no labels)", _NONE_INT)]
+        yield VerticalScroll(
+            Static("Add label to selected", classes="modal-title"),
+            Select(opts, value=opts[0][1], id="a-label"),
+            Horizontal(Button("Add", id="ok", variant="primary"),
+                       Button("Cancel", id="cancel")),
+            classes="modal-box",
+        )
+
+    @on(Button.Pressed, "#ok")
+    def _add(self) -> None:
+        lid = _sel(self.query_one("#a-label", Select).value)
+        if lid is None:
+            self.dismiss(None)
+            return
+        self.dismiss(lid)
+
+
 class BrowseMenuScreen(ModalScreen[str]):
     """Choose which container entity to browse.
 
@@ -889,6 +958,9 @@ class PlannerApp(App):
         Binding("K", "move_up", "Up"),
         Binding("d", "delete_story", "Delete"),
         Binding("e", "toggle_complete", "Complete"),
+        Binding("v", "toggle_multiselect", "Multi"),
+        Binding("space", "toggle_select", "Toggle", show=False),
+        Binding("escape", "exit_multiselect", "Exit", show=False),
     ]
 
     def __init__(self, db_path: str | None = None,
@@ -905,6 +977,9 @@ class PlannerApp(App):
         # Off until the 'a' hotkey (or an explicit --auto-refresh N>0).
         self._auto_refresh_enabled = bool(auto_refresh)
         self._auto_refresh_interval = auto_refresh if auto_refresh else 1
+        # Multi-select (visual) mode: a set of selected story ids, toggled by Space.
+        self._multi_select = False
+        self._selected: set[int] = set()
 
     # --- lifecycle --------------------------------------------------------- #
     def on_mount(self) -> None:
@@ -946,6 +1021,8 @@ class PlannerApp(App):
             milestone_id=f["milestone"], q=f["q"],
             owner_id=f["owner"], label_id=f["label"])
         table = self.query_one("#stories", DataTable)
+        # Drop selections that no longer match the filter.
+        self._selected &= {s.id for s in items}
         # Remember where the cursor was so the rebuild doesn't yank it to the top.
         prev_row = prev_col = None
         prev_key: str | None = None
@@ -973,8 +1050,14 @@ class PlannerApp(App):
             owners = ",".join(m["mention_name"] for m in self.conn.execute(
                 "SELECT m.mention_name AS mention_name FROM member m "
                 "JOIN story_owner so ON so.member_id = m.id WHERE so.story_id = ?", (s.id,)))
-            table.add_row(str(s.id), s.name, s.story_type, state, projname,
-                          owners, "✓" if s.completed_at else "", key=str(s.id))
+            cells = [str(s.id), s.name, s.story_type, state, projname,
+                     owners, "✓" if s.completed_at else ""]
+            if s.id in self._selected:
+                # Highlight selected rows in multi-select (visual) mode.
+                table.add_row(*[Text(c, style=Style(reverse=True)) for c in cells],
+                              key=str(s.id))
+            else:
+                table.add_row(*cells, key=str(s.id))
         # Filter-bar caption.
         parts = []
         parts.append(f"project={'any' if f['project'] is None else self.name_of('project', f['project'])}")
@@ -991,6 +1074,8 @@ class PlannerApp(App):
             parts.append(f"milestone={self.name_of('milestone', f['milestone'])}")
         parts.append(f"q={'-' if f['q'] is None else f['q']!r}")
         parts.append(f"  ({len(items)} stories)")
+        if self._multi_select:
+            parts.append(f"  [MULTI] {len(self._selected)} selected")
         self.query_one("#filter-bar", Static).update("  ".join(parts))
         # Restore the cursor to the story it was on before the rebuild.
         keys = [str(s.id) for s in items]
@@ -1041,10 +1126,20 @@ class PlannerApp(App):
         except (TypeError, ValueError):
             return None
 
+    def _detail_story_id(self) -> int | None:
+        """Story id to render in the detail pane.
+
+        In multi-select mode this is the first selected story; otherwise it is
+        the story under the cursor.
+        """
+        if self._multi_select and self._selected:
+            return sorted(self._selected)[0]
+        return self._current_story_id()
+
     def show_current_detail(self) -> None:
         """Render the highlighted story's full details into the RichLog.
         """
-        sid = self._current_story_id()
+        sid = self._detail_story_id()
         if sid is None:
             return
         assert self.conn is not None
@@ -1106,6 +1201,44 @@ class PlannerApp(App):
             method()
         else:
             self.bell()
+
+    def _selected_ids(self) -> list[int]:
+        """IDs of the current bulk selection, or [] outside multi-select mode."""
+        if not self._multi_select:
+            return []
+        return sorted(self._selected)
+
+    def action_toggle_multiselect(self) -> None:
+        """Enter or exit multi-select (visual) mode."""
+        if self._multi_select:
+            self._multi_select = False
+            self._selected.clear()
+        else:
+            self._multi_select = True
+            self._selected.clear()
+        self.refresh_stories()
+
+    def action_exit_multiselect(self) -> None:
+        """Leave multi-select mode and clear the selection."""
+        if not self._multi_select:
+            return
+        self._multi_select = False
+        self._selected.clear()
+        self.refresh_stories()
+
+    def action_toggle_select(self) -> None:
+        """Toggle the current row's selection (Space) in multi-select mode."""
+        if not self._multi_select:
+            return
+        sid = self._current_story_id()
+        if sid is None:
+            self.bell()
+            return
+        if sid in self._selected:
+            self._selected.discard(sid)
+        else:
+            self._selected.add(sid)
+        self.refresh_stories()
 
     def action_refresh(self) -> None:
         """Refresh the story list based on current filters."""
@@ -1258,13 +1391,19 @@ class PlannerApp(App):
         self.query_one("#detail-view", RichLog).display = True
 
     def action_move_state(self) -> None:
-        """Open modal to change the workflow state of the selected story."""
+        """Open modal to change the workflow state of the selected story/selection."""
         assert self.conn is not None
+        ids = self._selected_ids()
+        if self._multi_select and ids:
+            self.push_screen(MoveStateScreen(self.conn, ids),
+                             lambda _: self.refresh_stories())
+            return
         sid = self._current_story_id()
         if sid is None:
             self.bell()
             return
-        self.push_screen(MoveStateScreen(self.conn, sid), lambda _: self.refresh_stories())
+        self.push_screen(MoveStateScreen(self.conn, [sid]),
+                         lambda _: self.refresh_stories())
 
     def action_add_comment(self) -> None:
         """Open modal to add a comment to the selected story."""
@@ -1294,7 +1433,13 @@ class PlannerApp(App):
                          lambda changed: self.show_current_detail() if changed else None)
 
     def action_manage_owners(self) -> None:
-        """Open modal to add/remove owners on the selected story."""
+        """Open modal to add/remove owners on the selected story, or assign to all selected."""
+        ids = self._selected_ids()
+        if self._multi_select and ids:
+            assert self.conn is not None
+            self.push_screen(AssignOwnerScreen(self.conn),
+                             lambda mid: self._assign_owner_to_all(mid, ids))
+            return
         sid = self._current_story_id()
         if sid is None or self.conn is None:
             self.bell()
@@ -1302,14 +1447,35 @@ class PlannerApp(App):
         self.push_screen(OwnerScreen(self.conn, sid),
                          lambda changed: self.show_current_detail() if changed else None)
 
+    def _assign_owner_to_all(self, mid: int | None, ids: list[int]) -> None:
+        if mid is None or self.conn is None:
+            return
+        for sid in ids:
+            stories.assign_owner(self.conn, sid, mid)
+        self.show_current_detail()
+
     def action_manage_labels(self) -> None:
-        """Open modal to add/remove labels on the selected story."""
+        """Open modal to add/remove labels on the selected story, or add a label
+        to every selected story."""
+        ids = self._selected_ids()
+        if self._multi_select and ids:
+            assert self.conn is not None
+            self.push_screen(AssignLabelScreen(self.conn),
+                             lambda lid: self._add_label_to_all(lid, ids))
+            return
         sid = self._current_story_id()
         if sid is None or self.conn is None:
             self.bell()
             return
         self.push_screen(LabelScreen(self.conn, sid),
                          lambda changed: self.show_current_detail() if changed else None)
+
+    def _add_label_to_all(self, lid: int | None, ids: list[int]) -> None:
+        if lid is None or self.conn is None:
+            return
+        for sid in ids:
+            stories.add_label(self.conn, sid, lid)
+        self.show_current_detail()
 
     def _do_comment(self, sid: int, text: str | None) -> None:
         if not text or not text.strip() or self.conn is None:
@@ -1370,7 +1536,13 @@ class PlannerApp(App):
         self.refresh_stories()
 
     def action_delete_story(self) -> None:
-        """Open confirmation modal to delete the selected story."""
+        """Open confirmation modal to delete the selected story or selection."""
+        ids = self._selected_ids()
+        if self._multi_select and ids:
+            n = len(ids)
+            self.push_screen(ConfirmScreen(f"Delete {n} selected stories?"),
+                             lambda ok: self._after_bulk_delete(ok))
+            return
         sid = self._current_story_id()
         if sid is None:
             self.bell()
@@ -1384,6 +1556,15 @@ class PlannerApp(App):
             return
         assert self.conn is not None
         stories.delete_story(self.conn, sid)
+        self.refresh_stories()
+
+    def _after_bulk_delete(self, ok: bool | None) -> None:
+        if not ok:
+            return
+        assert self.conn is not None
+        for sid in list(self._selected):
+            stories.delete_story(self.conn, sid)
+        self._selected.clear()
         self.refresh_stories()
 
     def action_toggle_complete(self) -> None:

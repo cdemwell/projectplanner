@@ -227,6 +227,39 @@ def test_tui_manage_owners_and_labels(db_path):
     _run(main())
 
 
+def test_tui_multiselect_bulk_delete(seeded_db):
+    """'v' enters multi-select, Space toggles rows, and 'd' deletes all selected."""
+    async def main():
+        app = PlannerApp(seeded_db)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            assert app.query_one("#stories").row_count == 2
+
+            # enter multi-select (visual) mode
+            await pilot.press("v"); await pilot.pause()
+            assert app._multi_select is True
+
+            # select two stories with Space
+            app.query_one("#stories").move_cursor(row=0); await pilot.pause()
+            await pilot.press("space"); await pilot.pause()
+            app.query_one("#stories").move_cursor(row=1); await pilot.pause()
+            await pilot.press("space"); await pilot.pause()
+            assert len(app._selected) == 2
+
+            # delete all selected with confirmation
+            await pilot.press("d"); await pilot.pause()
+            app.screen.query_one("#yes", Button).focus(); await pilot.pause()
+            await pilot.press("enter"); await pilot.pause(0.05); await pilot.pause()
+
+            # both selected stories are gone
+            assert app.conn.execute("SELECT COUNT(*) FROM story").fetchone()[0] == 0
+            assert len(app._selected) == 0
+
+            assert getattr(app, "_exception", None) is None
+            await pilot.press("q")
+    _run(main())
+
+
 def test_tui_reorder_stories(db_path):
     """'J'/'K' swap a story with its neighbor by updating position."""
     from backend import db
