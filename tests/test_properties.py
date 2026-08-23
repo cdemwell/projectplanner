@@ -5,6 +5,7 @@ Uses Hypothesis to generate random sequences of operations and verify correctnes
 from __future__ import annotations
 
 import contextlib
+
 import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
@@ -18,8 +19,6 @@ from backend import (
     workflows,
 )
 
-
-import contextlib
 
 def get_fresh_conn():
     """Return a fresh, seeded in-memory database connection as a context manager."""
