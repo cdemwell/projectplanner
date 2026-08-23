@@ -20,6 +20,7 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import (
     Button,
+    Checkbox,
     DataTable,
     Footer,
     Header,
@@ -74,31 +75,46 @@ def _sel(value: Any) -> Any:
 # --------------------------------------------------------------------------- #
 
 class FilterScreen(ModalScreen[tuple]):
-    """Collects project and state-type filters.
+    """Collects project, state-type, owner, and label filters.
 
     Dismisses with:
-        tuple: (project_id|None, state_type|None), or None on cancel.
+        tuple: (project_id|None, state_types|list[str], owner_id|None, label_id|None),
+               or None on cancel.
     """
 
     def __init__(self, conn: sqlite3.Connection, current: tuple) -> None:
         super().__init__()
         self.conn = conn
-        self.current = current  # (project_id|None, state_type|None)
+        self.current = current  # (project_id|None, state_types|list[str], owner_id|None, label_id|None)
 
     def compose(self) -> ComposeResult:
         proj_opts = [("(all projects)", _NONE_INT)]
         for p in projects.list_projects(self.conn, include_archived=True):
             proj_opts.append((p.name, p.id))
         proj_opts.append(("(archived-only view: use CLI)", _NONE_INT))  # noqa
-        type_opts = [("(any state)", _NONE_STR), ("unstarted", "unstarted"),
-                     ("started", "started"), ("done", "done")]
-        cur_proj, cur_type = self.current
+
+        owner_opts = [("(any owner)", _NONE_INT)]
+        for m in members.list_members(self.conn):
+            owner_opts.append((m.name, m.id))
+
+        label_opts = [("(any label)", _NONE_INT)]
+        for lb in labels.list_labels(self.conn):
+            label_opts.append((lb.name, lb.id))
+
+        cur_proj, cur_types, cur_owner, cur_label = self.current
+
         yield VerticalScroll(
             Static("Filter stories", classes="modal-title"),
             Label("Project:"),
             Select(proj_opts, value=cur_proj if cur_proj is not None else _NONE_INT, id="f-proj"),
-            Label("State type:"),
-            Select(type_opts, value=cur_type or _NONE_STR, id="f-type"),
+            Label("Owner:"),
+            Select(owner_opts, value=cur_owner if cur_owner is not None else _NONE_INT, id="f-owner"),
+            Label("Label:"),
+            Select(label_opts, value=cur_label if cur_label is not None else _NONE_INT, id="f-label"),
+            Label("State types:"),
+            Checkbox("Unstarted", value=("unstarted" in cur_types), id="f-unstarted"),
+            Checkbox("Started", value=("started" in cur_types), id="f-started"),
+            Checkbox("Done", value=("done" in cur_types), id="f-done"),
             Horizontal(
                 Button("Apply", id="ok", variant="primary"),
                 Button("Clear", id="clear"),
@@ -110,12 +126,17 @@ class FilterScreen(ModalScreen[tuple]):
     @on(Button.Pressed, "#ok")
     def _apply(self) -> None:
         proj = _sel(self.query_one("#f-proj", Select).value)
-        stype = _sel(self.query_one("#f-type", Select).value)
-        self.dismiss((proj, stype))
+        owner = _sel(self.query_one("#f-owner", Select).value)
+        label = _sel(self.query_one("#f-label", Select).value)
+        stypes = []
+        if self.query_one("#f-unstarted", Checkbox).value: stypes.append("unstarted")
+        if self.query_one("#f-started", Checkbox).value: stypes.append("started")
+        if self.query_one("#f-done", Checkbox).value: stypes.append("done")
+        self.dismiss((proj, stypes, owner, label))
 
     @on(Button.Pressed, "#clear")
     def _clear(self) -> None:
-        self.dismiss((None, None))
+        self.dismiss((None, [], None, None))
 
     @on(Button.Pressed, "#cancel")
     def _cancel(self) -> None:
@@ -756,8 +777,9 @@ class PlannerApp(App):
         self.db_path = db_path
         self.conn: sqlite3.Connection | None = None
         # Active story-list filters. Keys map to stories.list_stories params.
-        self.filters = {"project": None, "state_type": None, "q": None,
-                        "epic": None, "iteration": None, "milestone": None}
+        self.filters = {"project": None, "state_type": [], "q": None,
+                        "epic": None, "iteration": None, "milestone": None,
+                        "owner": None, "label": None}
         self._edit_pane: EditStoryPane | None = None
         # Off until the 'a' hotkey (or an explicit --auto-refresh N>0).
         self._auto_refresh_enabled = bool(auto_refresh)
@@ -800,7 +822,8 @@ class PlannerApp(App):
         items = stories.list_stories(
             self.conn, project_id=f["project"], state_type=f["state_type"],
             epic_id=f["epic"], iteration_id=f["iteration"],
-            milestone_id=f["milestone"], q=f["q"])
+            milestone_id=f["milestone"], q=f["q"],
+            owner_id=f["owner"], label_id=f["label"])
         table = self.query_one("#stories", DataTable)
         # Remember where the cursor was so the rebuild doesn't yank it to the top.
         prev_row = prev_col = None
@@ -834,7 +857,11 @@ class PlannerApp(App):
         # Filter-bar caption.
         parts = []
         parts.append(f"project={'any' if f['project'] is None else self.name_of('project', f['project'])}")
-        parts.append(f"state={'any' if f['state_type'] is None else f['state_type']}")
+        parts.append(f"owner={'any' if f['owner'] is None else self.name_of('member', f['owner'])}")
+        parts.append(f"label={'any' if f['label'] is None else self.name_of('label', f['label'])}")
+        stypes = f['state_type']
+        st_str = 'any' if not stypes else ','.join(stypes)
+        parts.append(f"state={st_str}")
         if f["epic"] is not None:
             parts.append(f"epic={self.name_of('epic', f['epic'])}")
         if f["iteration"] is not None:
@@ -1146,15 +1173,19 @@ class PlannerApp(App):
         """Open modal to adjust project and state filters."""
         assert self.conn is not None
         self.push_screen(FilterScreen(self.conn, (self.filters["project"],
-                                                 self.filters["state_type"])),
+                                                 self.filters["state_type"],
+                                                 self.filters["owner"],
+                                                 self.filters["label"])),
                          self._after_filter)
 
     def _after_filter(self, result: tuple | None) -> None:
         if result is None:
             return
-        proj, stype = result
+        proj, stypes, owner, label = result
         self.filters["project"] = proj
-        self.filters["state_type"] = stype
+        self.filters["state_type"] = stypes
+        self.filters["owner"] = owner
+        self.filters["label"] = label
         self.refresh_stories()
 
     def action_search(self) -> None:

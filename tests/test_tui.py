@@ -83,7 +83,8 @@ def test_tui_create_toggle_search_delete(seeded_db):
 
             # clear filter
             app.filters = {"project": None, "state_type": None, "q": None,
-                           "epic": None, "iteration": None, "milestone": None}
+                           "epic": None, "iteration": None, "milestone": None,
+                           "owner": None, "label": None}
             app.refresh_stories(); await pilot.pause()
 
             # add a comment
