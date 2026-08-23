@@ -976,7 +976,8 @@ class PlannerApp(App):
         self._create_pane: CreateStoryPane | None = None
         # Off until the 'a' hotkey (or an explicit --auto-refresh N>0).
         self._auto_refresh_enabled = bool(auto_refresh)
-        self._auto_refresh_interval = auto_refresh if auto_refresh else 1
+        self._auto_refresh_interval = float(auto_refresh) if auto_refresh else 1.0
+        self._auto_refresh_timer = None
         # Multi-select (visual) mode: a set of selected story ids, toggled by Space.
         self._multi_select = False
         self._selected: set[int] = set()
@@ -987,11 +988,11 @@ class PlannerApp(App):
         self.title = "Project Planner"
         self.refresh_stories()
         if self._auto_refresh_enabled:
-            self.set_interval(self._auto_refresh_interval, self.refresh_stories, name="auto-refresh")
+            self._auto_refresh_timer = self.set_interval(
+                self._auto_refresh_interval, self.refresh_stories, name="auto-refresh")
 
     def on_unmount(self) -> None:
-        if self._auto_refresh_enabled:
-            self.set_timer("auto-refresh", None)  # type: ignore[arg-type]
+        self._stop_auto_refresh_timer()
         if self.conn is not None:
             self.conn.close()
 
@@ -1248,12 +1249,19 @@ class PlannerApp(App):
         """Toggle automatic polling for external changes."""
         if self._auto_refresh_enabled:
             self._auto_refresh_enabled = False
-            self.set_timer("auto-refresh", None)  # type: ignore[arg-type]
+            self._stop_auto_refresh_timer()
             self.notify("Auto-refresh disabled", title="🔴")
         else:
             self._auto_refresh_enabled = True
-            self.set_interval(self._auto_refresh_interval, self.refresh_stories, name="auto-refresh")
+            self._auto_refresh_timer = self.set_interval(
+                self._auto_refresh_interval, self.refresh_stories, name="auto-refresh")
             self.notify(f"Auto-refresh enabled (every {self._auto_refresh_interval:.0f}s)", title="🟢")
+
+    def _stop_auto_refresh_timer(self) -> None:
+        """Cancel the auto-refresh timer if it's running."""
+        if self._auto_refresh_timer is not None:
+            self._auto_refresh_timer.stop()
+            self._auto_refresh_timer = None
 
     def _filtered_neighbors(self) -> list:
         """Return the stories currently shown (ordered by position, id)."""
