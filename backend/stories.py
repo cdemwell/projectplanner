@@ -58,10 +58,16 @@ def list_stories(conn: sqlite3.Connection, *, project_id=None, epic_id=None,
         where.append("s.iteration_id = ?"); params.append(iteration_id)
     if group_id is not None:
         where.append("s.group_id = ?"); params.append(group_id)
-    if state_type is not None:
-        where.append("EXISTS (SELECT 1 FROM workflow_state ws "
-                     "WHERE ws.id = s.workflow_state_id AND ws.type = ?)")
-        params.append(state_type)
+    if state_type:
+        if isinstance(state_type, list):
+            placeholders = ", ".join("?" for _ in state_type)
+            where.append(f"EXISTS (SELECT 1 FROM workflow_state ws "
+                         f"WHERE ws.id = s.workflow_state_id AND ws.type IN ({placeholders}))")
+            params.extend(state_type)
+        else:
+            where.append("EXISTS (SELECT 1 FROM workflow_state ws "
+                         "WHERE ws.id = s.workflow_state_id AND ws.type = ?)")
+            params.append(state_type)
     if owner_id is not None:
         where.append("EXISTS (SELECT 1 FROM story_owner so "
                      "WHERE so.story_id = s.id AND so.member_id = ?)")

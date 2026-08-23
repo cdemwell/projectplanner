@@ -200,3 +200,15 @@ def test_list_stories_pagination(conn):
     assert [s.name for s in stories.list_stories(conn, limit=2)] == ["s0", "s1"]
     assert [s.name for s in stories.list_stories(conn, offset=3)] == ["s3", "s4"]
     assert [s.name for s in stories.list_stories(conn, limit=2, offset=2)] == ["s2", "s3"]
+
+def test_multi_state_filtering(conn):
+    s1 = stories.create_story(conn, "unstarted")
+    stories.move_story_state(conn, s1.id, _state_id(conn, "unstarted"))
+    s2 = stories.create_story(conn, "started")
+    stories.move_story_state(conn, s2.id, _state_id(conn, "started"))
+    s3 = stories.create_story(conn, "done")
+    stories.move_story_state(conn, s3.id, _done_state_id(conn))
+
+    assert {s.id for s in stories.list_stories(conn, state_type=["unstarted", "done"])} == {s1.id, s3.id}
+    assert {s.id for s in stories.list_stories(conn, state_type=["started"])} == {s2.id}
+    assert {s.id for s in stories.list_stories(conn, state_type=[])} == {s1.id, s2.id, s3.id}
