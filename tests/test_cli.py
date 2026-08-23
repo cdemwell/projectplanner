@@ -236,3 +236,18 @@ def test_cli_search_pagination(run_cli):
     assert len(json.loads(out)) == 2
     rc, out, err = run_cli("--json", "search", "login", "--offset", "2")
     assert len(json.loads(out)) == 1
+
+
+def test_dry_run(run_cli):
+    """Verify --dry-run does not modify the DB but reports success."""
+    # 1. Create a story with --dry-run
+    rc, out, err = run_cli("--dry-run", "--json", "story", "create", "--name", "dry run story")
+    assert rc == 0
+    assert "[dry-run]" in out
+    s = json.loads(out.replace("[dry-run]\n", "", 1))
+    assert s["name"] == "dry run story"
+
+    # 2. Verify it does NOT exist in the real DB
+    rc, out, err = run_cli("--json", "story", "list")
+    stories = json.loads(out)
+    assert not any(st["name"] == "dry run story" for st in stories)
