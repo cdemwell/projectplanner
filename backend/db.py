@@ -16,7 +16,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 # Schema version this code understands. Bump when adding a migration in MIGRATIONS.
-CURRENT_SCHEMA_VERSION = 3
+CURRENT_SCHEMA_VERSION = 4
 
 # Default DB location: next to main.py (repo root).
 DEFAULT_DB_PATH = Path(__file__).resolve().parent.parent / "planner.db"
@@ -389,10 +389,16 @@ _SCHEMA_V3 = [
     _fts_trigger("task", ("description",)),
 ]
 
+# v4: add an optional human-readable note to workflow states.
+_SCHEMA_V4 = [
+    "ALTER TABLE workflow_state ADD COLUMN description TEXT NOT NULL DEFAULT ''",
+]
+
 _MIGRATIONS = [
     (1, _SCHEMA_V1),
     (2, _SCHEMA_V2),
     (3, _SCHEMA_V3),
+    (4, _SCHEMA_V4),
 ]
 
 

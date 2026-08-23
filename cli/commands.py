@@ -827,7 +827,8 @@ def h_workflow_states(conn, a):
     return workflows.list_workflow_states(conn, int(a.id))
 def h_workflow_add_state(conn, a):
     """Handle ``workflow add-state``; add a state to a workflow and return it."""
-    return workflows.create_workflow_state(conn, int(a.id), a.name, a.type, position=a.position)
+    return workflows.create_workflow_state(conn, int(a.id), a.name, a.type,
+                                           position=a.position, description=a.desc or "")
 
 
 # -- tasks ----------------------------------------------------------------- #
@@ -1181,9 +1182,10 @@ def build_parser() -> argparse.ArgumentParser:
     p = _sp(asp, "create"); p.add_argument("--name", required=True)
     p.add_argument("--states", help="comma list of name:type (e.g. Todo:unstarted,Doing:started,Done:done)")
     p.set_defaults(func=h_workflow_create, fmt=_fmt_one)
-    p = _sp(asp, "states"); _id_arg(p); p.set_defaults(func=h_workflow_states, fmt=lambda c, v: _fmt_list_simple(v, ["id", "name", "type", "position"]))
+    p = _sp(asp, "states"); _id_arg(p); p.set_defaults(func=h_workflow_states, fmt=lambda c, v: _fmt_list_simple(v, ["id", "name", "type", "position", "description"]))
     p = _sp(asp, "add-state"); _id_arg(p); p.add_argument("--name", required=True)
     p.add_argument("--type", required=True, choices=list(workflows.STATE_TYPES)); p.add_argument("--position", type=float)
+    p.add_argument("--desc", "--description", dest="desc", help="optional human-readable note for the state")
     p.set_defaults(func=h_workflow_add_state, fmt=_fmt_one)
     p = _sp(asp, "delete"); _id_arg(p)
     p.set_defaults(func=lambda c, a: (workflows.delete_workflow(c, int(a.id)), {"deleted": "workflow", "id": int(a.id)})[1], fmt=_fmt_one)

@@ -91,6 +91,7 @@ class WorkflowState(Model):
     name: str
     type: str
     position: float
+    description: str
     created_at: str
 
 

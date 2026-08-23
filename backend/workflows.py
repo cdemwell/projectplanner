@@ -11,7 +11,7 @@ from .models import Workflow, WorkflowState
 STATE_TYPES = ("unstarted", "started", "done")
 
 _WORKFLOW_EDITABLE = {"name", "default_state_id"}
-_STATE_EDITABLE = {"name", "type", "position"}
+_STATE_EDITABLE = {"name", "type", "position", "description"}
 
 
 def list_workflows(conn: sqlite3.Connection) -> list[Workflow]:
@@ -150,7 +150,8 @@ def state_type(conn: sqlite3.Connection, state_id) -> str | None:
 
 
 def create_workflow_state(conn: sqlite3.Connection, workflow_id, name: str, type: str, *,
-                          position: float | None = None) -> WorkflowState:
+                          position: float | None = None,
+                          description: str = "") -> WorkflowState:
     """Create a new workflow state.
 
     Args:
@@ -159,6 +160,7 @@ def create_workflow_state(conn: sqlite3.Connection, workflow_id, name: str, type
         name: str — display name.
         type: str — state type ('unstarted', 'started', 'done').
         position: Optional position. Auto-positions at end if None.
+        description: Optional human-readable note for the state.
     Returns:
         The created WorkflowState.
     Raises:
@@ -176,7 +178,7 @@ def create_workflow_state(conn: sqlite3.Connection, workflow_id, name: str, type
     with db.tx_write(conn):
         new_id = _util.insert(conn, "workflow_state", {
             "workflow_id": workflow_id, "name": name, "type": type,
-            "position": position, "created_at": db.now(),
+            "position": position, "description": description, "created_at": db.now(),
         })
     return get_workflow_state(conn, new_id)
 
@@ -187,7 +189,7 @@ def update_workflow_state(conn: sqlite3.Connection, id, **fields) -> WorkflowSta
     Args:
         conn: sqlite3.Connection from db.connect().
         id: State ID.
-        fields: Fields to update (name, type, position).
+        fields: Fields to update (name, type, position, description).
     Returns:
         The updated WorkflowState.
     Raises:

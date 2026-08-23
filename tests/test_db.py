@@ -54,8 +54,26 @@ def test_fts_tables_and_triggers_exist(conn):
     assert n_triggers == 24
 
 
-def test_schema_version_is_3(conn):
-    assert conn.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == 3
+def test_schema_version_is_4(conn):
+    assert conn.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == 4
+
+
+def test_v4_migration_adds_description_column(conn):
+    """The v4 migration must add a NOT NULL description column, default ''."""
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(workflow_state)")}
+    assert "description" in cols
+    # Existing seeded states carry an empty default.
+    for r in conn.execute("SELECT description FROM workflow_state"):
+        assert r["description"] == ""
+
+
+def test_v4_migration_idempotent(db_path):
+    """Reconnecting to an already-migrated v4 DB must not re-run ALTER TABLE."""
+    db.connect(db_path).close()
+    db.connect(db_path).close()  # second connect: schema_version already 4
+    c = db.connect(db_path)
+    assert c.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == 4
+    c.close()
 
 
 def test_tx_write_commits_and_rolls_back(conn):
