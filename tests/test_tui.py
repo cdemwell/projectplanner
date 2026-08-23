@@ -261,6 +261,48 @@ def test_tui_reorder_stories(db_path):
     _run(main())
 
 
+def test_tui_command_palette(db_path):
+    """Ctrl+P opens the palette, filters, and runs the selected command."""
+    from textual.widgets import Input, OptionList
+
+    from backend import db
+    from backend import stories as stories_mod
+    from tui.app import _PALETTE_COMMANDS, CommandPalette
+
+    c = db.connect(db_path)
+    s = stories_mod.create_story(c, "x")
+    c.close()
+
+    async def main():
+        app = PlannerApp(db_path)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            app.query_one("#stories").move_cursor(row=0); await pilot.pause()
+            sid = app._current_story_id()
+            assert sid == s.id
+
+            # open the palette with Ctrl+P
+            await pilot.press("ctrl+p"); await pilot.pause()
+            assert isinstance(app.screen, CommandPalette)
+            opts = app.screen.query_one("#pal-options", OptionList)
+            assert opts.option_count == len(_PALETTE_COMMANDS)
+
+            # typing filters to a single matching command
+            inp = app.screen.query_one("#pal-input", Input)
+            inp.value = "complete"; await pilot.pause()
+            assert opts.option_count == 1
+            assert opts.get_option_at_index(0).id == "toggle_complete"
+
+            # Enter runs the selected command: story becomes complete
+            await pilot.press("enter"); await pilot.pause()
+            assert app.conn.execute(
+                "SELECT completed_at FROM story WHERE id=?", (s.id,)).fetchone()[0]
+
+            assert getattr(app, "_exception", None) is None
+            await pilot.press("q")
+    _run(main())
+
+
 def test_tui_refresh_keeps_cursor_position(db_path):
     """refresh_stories must not yank the cursor back to the top row."""
     from backend import db
