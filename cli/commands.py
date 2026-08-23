@@ -948,7 +948,7 @@ COMMON = argparse.ArgumentParser(add_help=False)
 # This is what makes `--json` work both before and after the subcommand.
 COMMON.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
                     help="emit JSON (machine-readable) [deprecated: use --format json]")
-COMMON.add_argument("--format", choices=["text", "json", "csv", "id-only"], default="text",
+COMMON.add_argument("--format", choices=["text", "json", "csv", "id-only"], default=None,
                     help="output format (default: text)")
 COMMON.add_argument("--dry-run", action="store_true", default=argparse.SUPPRESS,
                     help="run without modifying the database")
@@ -978,14 +978,15 @@ def _paging(p):
 def build_parser() -> argparse.ArgumentParser:
     """Construct the full argparse CLI: one subparser per resource, one nested
     subparser per action, each wiring ``func`` (a handler) and ``fmt`` (a text
-    formatter). The top parser also carries ``--json`` (default False) and
-    ``--db``. Returns the parser."""
+    formatter). The top parser also carries ``--json`` (default False), ``--db``,
+    ``--rotate-backup``, and ``--config``. Returns the parser."""
     parser = argparse.ArgumentParser(prog="projectplanner",
                                      description="Local project planner (Shortcut-model-based).")
     parser.add_argument("--json", action="store_true", default=False)
     parser.add_argument("--db", help="path to planner.db (default: ./planner.db)")
-    parser.add_argument("--rotate-backup", type=int, default=0,
+    parser.add_argument("--rotate-backup", type=int, default=None,
                         help="auto-backup planner.db before writes, keeping N most recent")
+    parser.add_argument("--config", help="path to a YAML config file providing defaults")
     parser.add_argument("--dry-run", action="store_true", default=False,
                         help="run without modifying the database")
     sub = parser.add_subparsers(dest="resource", required=True)
@@ -999,7 +1000,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--group"); p.add_argument("--owner"); p.add_argument("--label")
     p.add_argument("--mine", action="store_true")
     p.add_argument("--q"); p.add_argument("--no-completed", dest="include_completed",
-                                          action="store_false", default=True)
+                                          action="store_false", default=None)
     _paging(p)
     p.set_defaults(func=h_story_list, fmt=lambda c, v: _fmt_stories(c, v))
     p = _sp(asp, "deadlines")
@@ -1008,7 +1009,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = _sp(asp, "detail"); _id_arg(p); p.set_defaults(func=h_story_detail, fmt=_fmt_story_detail)
     p = _sp(asp, "create")
     p.add_argument("--name", required=True); p.add_argument("--desc"); p.add_argument("--type",
-            choices=list(stories.STORY_TYPES), default="feature")
+            choices=list(stories.STORY_TYPES), default=None)
     p.add_argument("--state"); p.add_argument("--project"); p.add_argument("--epic")
     p.add_argument("--iteration"); p.add_argument("--group"); p.add_argument("--requested-by")
     p.add_argument("--deadline"); p.add_argument("--owners", help="comma-separated member names/ids")
@@ -1218,9 +1219,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     # config -------------------------------------------------------------------
     sp = sub.add_parser("config", parents=[COMMON])
-    sp.add_argument("--file", help="load config from a specific file")
-    sp.add_argument("--init", action="store_true", help="copy example config to planner.json")
-    sp.set_defaults(func=h_config, fmt=_fmt_one)
+    asp = sp.add_subparsers(dest="action", required=True)
+    p = _sp(asp, "init"); p.add_argument("--file", default="planner.yaml")
+    p.set_defaults(func=h_config_init, fmt=_fmt_one)
+    p = _sp(asp, "show")
+    p.set_defaults(func=h_config_show, fmt=_fmt_one)
 
     return parser
 
@@ -1229,17 +1232,65 @@ def build_parser() -> argparse.ArgumentParser:
 # Entry point
 # --------------------------------------------------------------------------- #
 
-def h_config(conn, a):
-    """Handle ``config``; print current config, load from file, or init from example."""
-    if a.init:
-        example_path = Path("planner.example.json")
-        config_path = Path("planner.json")
-        if not example_path.exists():
-            raise errors.PlannerError("planner.example.json not found")
-        shutil.copy2(example_path, config_path)
-        return {"status": "initialized", "file": str(config_path)}
+# Maps a CLI arg dest -> (config field, built-in CLI default). After parsing,
+# args that were left at their sentinel ``None`` default are filled from the
+# config (if the file set that field) or from the built-in default, so the
+# precedence is always CLI > config > built-in.
+_CONFIG_MAP: dict[str, tuple[str, object]] = {
+    "project": ("default_project", None),
+    "owner": ("default_owner", None),
+    "type": ("default_story_type", "feature"),
+    "state": ("default_state", None),
+    "iteration": ("default_iteration", None),
+    "group": ("default_group", None),
+    "epic": ("default_epic", None),
+    "label": ("default_label", None),
+    "format": ("format", "text"),
+    "rotate_backup": ("rotate_backup", 0),
+    "keep": ("keep", None),
+    "db": ("db_path", None),
+    "limit": ("limit", None),
+    "offset": ("offset", None),
+    "include_completed": ("include_completed", True),
+}
 
-    path = a.file if a.file else "planner.json"
+
+_CONFIG_DEFAULTS = config.Config()
+
+
+def _apply_config_defaults(args: argparse.Namespace, cfg: config.Config | None) -> None:
+    """Fill unset args from ``cfg`` (or built-in defaults) after parsing.
+
+    Only args whose value is still ``None`` (i.e. not given on the command line)
+    are touched, so explicit CLI flags always win over config values. ``cfg`` is
+    ``None`` when no ``--config`` was given, in which case built-in defaults are
+    used for every unset arg. A config field is applied only when it differs from
+    its own built-in ``Config()`` default, so a field the file leaves unset does
+    not get force-applied to the CLI (e.g. ``default_owner`` must not silently
+    turn into a ``--owner`` filter).
+    """
+    for dest, (field, builtin) in _CONFIG_MAP.items():
+        if not hasattr(args, dest):
+            continue
+        val = getattr(args, dest)
+        if val is not None:
+            continue  # explicitly set on the command line (or a non-None default)
+        if cfg is not None and getattr(cfg, field) != getattr(_CONFIG_DEFAULTS, field):
+            setattr(args, dest, getattr(cfg, field))
+        else:
+            setattr(args, dest, builtin)
+
+
+def h_config_init(conn, a):
+    """Handle ``config init``; write a default config file (planner.yaml)."""
+    cfg = config.Config()
+    config.save_config(cfg, a.file)
+    return {"status": "initialized", "file": a.file}
+
+
+def h_config_show(conn, a):
+    """Handle ``config show``; print the current config (defaults or from file)."""
+    path = getattr(a, "config", None) or "planner.yaml"
     return config.load_config(path)
 
 
@@ -1256,6 +1307,11 @@ def run(argv: list[str] | None = None) -> int:
     """
     parser = build_parser()
     args = parser.parse_args(argv)
+
+    # Load a config file if --config was given, then fill unset args from it
+    # (or from built-in defaults). CLI flags always override config values.
+    cfg = config.load_config(args.config) if getattr(args, "config", None) else None
+    _apply_config_defaults(args, cfg)
 
     db_path_str = args.db if getattr(args, "db", None) else db.DEFAULT_DB_PATH
     db_path = Path(db_path_str)

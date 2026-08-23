@@ -1,0 +1,42 @@
+# Planner configuration file. Every setting the CLI exposes as a flag has a
+# default here, so this file doubles as documentation. Lines beginning with '#'
+# are comments and are ignored on load. Any field may be omitted; missing fields
+# fall back to built-in defaults. Copy to planner.yaml and edit, then pass
+# `--config planner.yaml` (or run `config init` to generate a default file).
+#
+# Command-line flags ALWAYS override these values (CLI > config > defaults).
+
+# Default values applied when creating a new story. Override any of these to
+# change what the corresponding flag fills in when it is not given on the CLI.
+default_project: backend
+default_owner: cdemwell
+default_story_type: feature   # feature | bug | chore
+default_state: ""             # workflow state name/type used for new stories
+default_iteration: ""         # default iteration applied to new stories
+default_group: ""             # default group applied to new stories
+default_epic: ""              # default epic applied to new stories
+default_label: ""             # default label applied to new stories
+
+# How results are rendered. Accepts: text, json, csv, id-only.
+format: text
+
+# How often the TUI auto-refreshes, in seconds.
+auto_refresh_seconds: 5
+
+# Automatic backup rotation for planner.db. `rotate_backup` keeps this many most
+# recent rotated backups before pruning.
+rotate_backup: 3
+
+# How many of the most recent backups to retain when running a manual backup.
+keep: 7
+
+# Path to the SQLite database file. Leave empty/null to use the default
+# planner.db. A relative path is resolved against the current directory.
+db_path: null
+
+# Paging defaults applied to list/search commands when the flag is not given.
+limit: null
+offset: null
+
+# Whether list commands include completed stories by default.
+include_completed: true
