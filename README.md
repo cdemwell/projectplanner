@@ -53,19 +53,19 @@ search them — all from the command line, against a local file.
 | 2 | [Table of Contents](#table-of-contents) | 48–71 |
 | 3 | [Intent & Design Goals](#intent--design-goals) | 72–97 |
 | 4 | [Requirements & Setup](#requirements--setup) | 98–121 |
-| 5 | [Quick Start](#quick-start) | 122–148 |
-| 6 | [Running the Tool: CLI vs TUI](#running-the-tool-cli-vs-tui) | 149–174 |
-| 7 | [CLI Conventions](#cli-conventions) | 175–223 |
-| 8 | [CLI Reference](#cli-reference) | 224–303 |
-| 9 | [AI Agent Guide: Using the CLI During Development](#ai-agent-guide-using-the-cli-during-development) | 304–418 |
-| 10 | [Data Model](#data-model) | 419–470 |
-| 11 | [Architecture & Concurrency](#architecture--concurrency) | 471–505 |
-| 12 | [Storage & Schema](#storage--schema) | 506–524 |
-| 13 | [Exit Codes & Errors](#exit-codes--errors) | 525–543 |
-| 14 | [Examples & Recipes](#examples--recipes) | 544–577 |
-| 15 | [Non-goals & Differences from Shortcut](#non-goals--differences-from-shortcut) | 578–592 |
-| 16 | [Tests](#tests) | 593–634 |
-| 17 | [Further Reading](#further-reading) | 635–643 |
+| 5 | [Quick Start](#quick-start) | 122–158 |
+| 6 | [Running the Tool: CLI vs TUI](#running-the-tool-cli-vs-tui) | 159–191 |
+| 7 | [CLI Conventions](#cli-conventions) | 192–246 |
+| 8 | [CLI Reference](#cli-reference) | 247–335 |
+| 9 | [AI Agent Guide: Using the CLI During Development](#ai-agent-guide-using-the-cli-during-development) | 336–450 |
+| 10 | [Data Model](#data-model) | 451–502 |
+| 11 | [Architecture & Concurrency](#architecture--concurrency) | 503–538 |
+| 12 | [Storage & Schema](#storage--schema) | 539–557 |
+| 13 | [Exit Codes & Errors](#exit-codes--errors) | 558–576 |
+| 14 | [Examples & Recipes](#examples--recipes) | 577–610 |
+| 15 | [Non-goals & Differences from Shortcut](#non-goals--differences-from-shortcut) | 611–625 |
+| 16 | [Tests](#tests) | 626–669 |
+| 17 | [Further Reading](#further-reading) | 670–678 |
 
 ---
 
@@ -138,10 +138,20 @@ python main.py task    add --story 1 --desc "write tests"
 python main.py comment add --story 1 --text "reproduced on staging"
 python main.py story move 1 --state done      # accepts id, name, or type
 
+# Bulk actions, deadlines, and search
+python main.py story move 1 2 3 --state done  # bulk move multiple stories
+python main.py story deadlines                # urgency-sorted, overdue flagged
+python main.py search "login OR auth"
+
 # Inspect
 python main.py story list --project backend
 python main.py story detail 1
-python main.py search "login OR auth"
+
+# Config, backup, and export
+python main.py config init                   # create planner.yaml from example
+python main.py plan backup                    # timestamped backup of planner.db
+python main.py plan export --file plan.json   # portable JSON snapshot
+python main.py --help                         # full CLI overview with examples
 ```
 
 ---
@@ -158,7 +168,7 @@ python main.py search "login OR auth"
 
 | Key | Action | | Key | Action |
 |-----|--------|---|-----|--------|
-| `n` | new story | | `f` | filter (project/state) |
+| `n` | new story | | `f` | filter (project/state/owner/label) |
 | `u` | update story | | `/` | search |
 | `m` | move state | | `e` | toggle complete |
 | `c` | add comment | | `x` | task toggle/edit |
@@ -166,6 +176,13 @@ python main.py search "login OR auth"
 | `r` | refresh | | `l` | labels |
 | `d` | delete story | | `J` | move down |
 | `K` | move up | | `q` | quit |
+| `Ctrl+P` | command palette | | `v` | multi-select |
+| `a` | auto-refresh | | `b` | browse (epics/iterations/projects/milestones) |
+
+Story editing happens **in the right detail pane** (not a modal): pressing
+`u` or `n` swaps the read-only view for an in-pane edit form. Multi-select
+(`v`) allows bulk delete/move/assign/label. The command palette (`Ctrl+P`)
+fuzzy-searches all actions. Auto-refresh (`a`) polls for external changes.
 
 The TUI shares the exact same backend functions as the CLI — there is no
 separate data layer.
