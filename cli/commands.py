@@ -482,13 +482,20 @@ def _fmt_story_detail(conn, detail):
 # -- stories -------------------------------------------------------------- #
 def h_story_list(conn, a):
     """Handle ``story list``; resolve filter names and return matching stories."""
+    owner_id = None
+    if a.mine:
+        row = conn.execute("SELECT id FROM member ORDER BY id LIMIT 1").fetchone()
+        owner_id = row[0] if row else None
+    elif a.owner:
+        owner_id = resolve_member(conn, a.owner)
+
     return stories.list_stories(
         conn,
         project_id=resolve_project(conn, a.project) if a.project else None,
         epic_id=resolve_epic(conn, a.epic) if a.epic else None,
         iteration_id=resolve_iteration(conn, a.iteration) if a.iteration else None,
         state_type=a.state_type, group_id=resolve_group(conn, a.group) if a.group else None,
-        owner_id=resolve_member(conn, a.owner) if a.owner else None,
+        owner_id=owner_id,
         label_id=resolve_label(conn, a.label) if a.label else None,
         q=a.q, include_completed=a.include_completed,
         limit=a.limit, offset=a.offset)
@@ -848,6 +855,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--project"); p.add_argument("--epic"); p.add_argument("--iteration")
     p.add_argument("--state-type", choices=list(workflows.STATE_TYPES))
     p.add_argument("--group"); p.add_argument("--owner"); p.add_argument("--label")
+    p.add_argument("--mine", action="store_true")
     p.add_argument("--q"); p.add_argument("--no-completed", dest="include_completed",
                                           action="store_false", default=True)
     _paging(p)

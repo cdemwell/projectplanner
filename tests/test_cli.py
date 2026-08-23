@@ -198,6 +198,37 @@ def test_cli_pagination(run_cli):
     assert len(json.loads(out)) == 4
 
 
+def test_story_list_mine(run_cli):
+    # The DB is seeded with one member automatically.
+    # Create another member for comparison.
+    run_cli("member", "create", "--name", "Bob")
+
+    # Identify the first member (the seeded one).
+    rc, out, err = run_cli("--json", "member", "list")
+    members = json.loads(out)
+    me = members[0]  # The seeded member is always first (id=1)
+    bob = members[1]
+
+    # Create stories owned by 'me' and 'Bob'.
+    run_cli("story", "create", "--name", "My Story 1", "--owners", me["name"])
+    run_cli("story", "create", "--name", "My Story 2", "--owners", me["name"])
+    run_cli("story", "create", "--name", "Bob Story 1", "--owners", bob["name"])
+
+    # Test --mine (should only show 'me's stories)
+    rc, out, err = run_cli("--json", "story", "list", "--mine")
+    assert rc == 0
+    stories = json.loads(out)
+    assert len(stories) == 2
+    assert {s["name"] for s in stories} == {"My Story 1", "My Story 2"}
+
+    # Test --owner Bob (should only show Bob's story)
+    rc, out, err = run_cli("--json", "story", "list", "--owner", bob["name"])
+    assert rc == 0
+    stories = json.loads(out)
+    assert len(stories) == 1
+    assert stories[0]["name"] == "Bob Story 1"
+
+
 def test_cli_search_pagination(run_cli):
     for n in ["login a", "login b", "login c"]:
         run_cli("story", "create", "--name", n)
