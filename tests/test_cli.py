@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sys
+from datetime import datetime, timedelta
 
 import pytest
 
@@ -251,3 +252,33 @@ def test_dry_run(run_cli):
     rc, out, err = run_cli("--json", "story", "list")
     stories = json.loads(out)
     assert not any(st["name"] == "dry run story" for st in stories)
+
+
+def test_story_deadlines(run_cli):
+    from datetime import UTC
+    today = datetime.now(UTC).strftime("%Y-%m-%d")
+    yesterday = (datetime.now(UTC) - timedelta(days=1)).strftime("%Y-%m-%d")
+    tomorrow = (datetime.now(UTC) + timedelta(days=1)).strftime("%Y-%m-%d")
+
+    run_cli("story", "create", "--name", "Past Story", "--deadline", yesterday)
+    run_cli("story", "create", "--name", "Future Story", "--deadline", tomorrow)
+    run_cli("story", "create", "--name", "Today Story", "--deadline", today)
+    run_cli("story", "create", "--name", "No Deadline Story")
+
+    rc, out, err = run_cli("story", "deadlines")
+    assert rc == 0
+
+    lines = [line for line in out.splitlines() if line.strip() and not line.startswith("-")]
+    # Header is lines[0], data are lines[1:]
+    data = lines[1:]
+
+    assert len(data) == 3
+    # Should be sorted: Past, Today, Future
+    assert "Past Story" in data[0]
+    assert "OVERDUE" in data[0]
+    assert "Today Story" in data[1]
+    assert "DUE" in data[1]
+    assert "Future Story" in data[2]
+    # status column is last, should be empty for future
+    assert "OVERDUE" not in data[2]
+    assert "DUE" not in data[2]
