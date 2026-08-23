@@ -17,10 +17,13 @@ import dataclasses
 import json as _json
 import os
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
+from datetime import datetime
 from io import StringIO
+from pathlib import Path
 from typing import Any
 
 from backend import (
@@ -800,6 +803,28 @@ def h_plan_import(conn, a):
     return {"file": a.file, "imported": counts}
 
 
+def h_plan_backup(conn, a):
+    """Handle ``plan backup``; copy DB to timestamped file and prune old backups."""
+    db_path = Path(a.db) if getattr(a, "db", None) else Path("planner.db")
+    if not db_path.exists():
+        raise errors.PlannerError(f"Database file not found: {db_path}")
+
+    timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+    backup_path = db_path.with_suffix(f"{db_path.suffix}.{timestamp}")
+    shutil.copy2(db_path, backup_path)
+
+    if a.keep is not None:
+        backups = sorted(
+            db_path.parent.glob(f"{db_path.name}.*"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True
+        )
+        for old_backup in backups[a.keep:]:
+            old_backup.unlink()
+
+    return {"backup": str(backup_path)}
+
+
 # --------------------------------------------------------------------------- #
 # Parser construction
 # --------------------------------------------------------------------------- #
@@ -1060,6 +1085,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=h_plan_export, fmt=_fmt_one)
     p = _sp(asp, "import"); p.add_argument("--file", required=True)
     p.set_defaults(func=h_plan_import, fmt=_fmt_one)
+    p = _sp(asp, "backup")
+    p.add_argument("--keep", type=int, help="number of most recent backups to keep")
+    p.set_defaults(func=h_plan_backup, fmt=_fmt_one)
 
     return parser
 
