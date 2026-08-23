@@ -434,6 +434,22 @@ def _fmt_stories(conn, items):
                  ["id", "name", "type", "state", "project", "owners", "done"])
 
 
+def _fmt_story_deadlines(conn, items):
+    """Text formatter for ``story deadlines``."""
+    today = db.now().split("T")[0]
+    rows = []
+    for s in items:
+        deadline = s.deadline or ""
+        status = ""
+        if deadline:
+            if deadline < today:
+                status = "OVERDUE"
+            elif deadline == today:
+                status = "DUE"
+        rows.append({"id": s.id, "name": s.name, "deadline": deadline, "status": status})
+    _print_table(rows, ["id", "name", "deadline", "status"])
+
+
 def _fmt_epics(conn, items):
     """Text formatter for ``epic list``."""
     rows = []
@@ -524,6 +540,11 @@ def h_story_list(conn, a):
         label_id=resolve_label(conn, a.label) if a.label else None,
         q=a.q, include_completed=a.include_completed,
         limit=a.limit, offset=a.offset)
+
+
+def h_story_deadlines(conn, a):
+    """Handle ``story deadlines``; return stories with deadlines, sorted by soonest."""
+    return stories.list_stories_with_deadlines(conn)
 
 
 def h_story_get(conn, a):
@@ -980,6 +1001,8 @@ def build_parser() -> argparse.ArgumentParser:
                                           action="store_false", default=True)
     _paging(p)
     p.set_defaults(func=h_story_list, fmt=lambda c, v: _fmt_stories(c, v))
+    p = _sp(asp, "deadlines")
+    p.set_defaults(func=h_story_deadlines, fmt=_fmt_story_deadlines)
     p = _sp(asp, "get"); _id_arg(p); p.set_defaults(func=h_story_get, fmt=_fmt_one)
     p = _sp(asp, "detail"); _id_arg(p); p.set_defaults(func=h_story_detail, fmt=_fmt_story_detail)
     p = _sp(asp, "create")

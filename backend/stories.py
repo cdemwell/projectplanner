@@ -90,6 +90,12 @@ def list_stories(conn: sqlite3.Connection, *, project_id=None, epic_id=None,
     return [Story.from_row(r) for r in conn.execute(sql, params)]
 
 
+def list_stories_with_deadlines(conn: sqlite3.Connection) -> list[Story]:
+    """List stories that have a deadline, sorted by deadline ascending."""
+    sql = "SELECT * FROM story WHERE deadline IS NOT NULL ORDER BY deadline ASC"
+    return [Story.from_row(r) for r in conn.execute(sql)]
+
+
 def get_story(conn: sqlite3.Connection, id) -> Story:
     """Fetch a single story by ID.
 
