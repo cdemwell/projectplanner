@@ -885,6 +885,8 @@ def build_parser() -> argparse.ArgumentParser:
                                      description="Local project planner (Shortcut-model-based).")
     parser.add_argument("--json", action="store_true", default=False)
     parser.add_argument("--db", help="path to planner.db (default: ./planner.db)")
+    parser.add_argument("--rotate-backup", type=int, default=0,
+                        help="auto-backup planner.db before writes, keeping N most recent")
     parser.add_argument("--dry-run", action="store_true", default=False,
                         help="run without modifying the database")
     sub = parser.add_subparsers(dest="resource", required=True)
@@ -1134,8 +1136,24 @@ def run(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
-    db_path = args.db if getattr(args, "db", None) else db.DEFAULT_DB_PATH
+    db_path_str = args.db if getattr(args, "db", None) else db.DEFAULT_DB_PATH
+    db_path = Path(db_path_str)
     is_dry_run = getattr(args, "dry_run", False)
+
+    if args.rotate_backup > 0 and not is_dry_run:
+        if db_path.exists():
+            timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+            backup_path = db_path.with_suffix(f"{db_path.suffix}.{timestamp}")
+            shutil.copy2(db_path, backup_path)
+
+            backups = sorted(
+                db_path.parent.glob(f"{db_path.name}.*"),
+                key=lambda p: p.stat().st_mtime,
+                reverse=True
+            )
+            for old_backup in backups[args.rotate_backup:]:
+                old_backup.unlink()
+            print(f"Backed up to {backup_path.name} (keeping {args.rotate_backup} rotations)")
 
     tmp_path = None
     if is_dry_run:

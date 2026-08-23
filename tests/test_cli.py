@@ -251,3 +251,26 @@ def test_dry_run(run_cli):
     rc, out, err = run_cli("--json", "story", "list")
     stories = json.loads(out)
     assert not any(st["name"] == "dry run story" for st in stories)
+
+
+def test_backup_rotation(run_cli, db_path):
+    """Verify --rotate-backup N creates backups and prunes old ones."""
+    import pathlib
+    import time
+    db_p = pathlib.Path(db_path)
+
+    # 1. Run commands with --rotate-backup 3
+    # Note: run_cli already passes --db db_path
+    for i in range(5):
+        rc, out, err = run_cli("--rotate-backup", "3", "story", "create", "--name", f"story {i}")
+        assert rc == 0
+        time.sleep(1.1)
+
+    # 2. Verify backup files are created
+    # Backups are named planner.db.<timestamp> but since we use --db db_path,
+    # they will be <db_path>.<timestamp>
+    backups = sorted(db_p.parent.glob(f"{db_p.name}.*"))
+    assert len(backups) == 3
+    # Verify they are indeed files
+    for b in backups:
+        assert b.is_file()
