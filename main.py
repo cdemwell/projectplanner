@@ -24,13 +24,15 @@ def main(argv: list[str] | None = None) -> int:
     """
     argv = list(sys.argv[1:] if argv is None else argv)
 
-    # Check if this looks like a CLI command (has a resource subcommand).
-    # Known CLI resources:
+    # Route to the CLI if the first token is a resource subcommand or a CLI
+    # flag. TUI-only flags (e.g. --auto-refresh) and no args launch the TUI.
     cli_resources = {"story", "epic", "iteration", "milestone", "project",
                      "label", "member", "group", "workflow", "task",
                      "comment", "link", "search", "plan", "config"}
+    cli_flags = {"--help", "-h", "--version", "--json", "--format", "--db",
+                 "--dry-run", "--rotate-backup", "--config", "--limit", "--offset"}
     first = argv[0] if argv else None
-    if first and first in cli_resources:
+    if first and (first in cli_resources or first in cli_flags):
         from cli.commands import run as run_cli
         return run_cli(argv)
 

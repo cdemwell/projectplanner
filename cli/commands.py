@@ -977,11 +977,35 @@ def _paging(p):
 
 def build_parser() -> argparse.ArgumentParser:
     """Construct the full argparse CLI: one subparser per resource, one nested
-    subparser per action, each wiring ``func`` (a handler) and ``fmt`` (a text
+    subparser per action, each adding ``func`` (a handler) and ``fmt`` (a text
     formatter). The top parser also carries ``--json`` (default False), ``--db``,
     ``--rotate-backup``, and ``--config``. Returns the parser."""
-    parser = argparse.ArgumentParser(prog="projectplanner",
-                                     description="Local project planner (Shortcut-model-based).")
+    parser = argparse.ArgumentParser(
+        prog="projectplanner",
+        description=(
+            "Local project-planning tool (Shortcut-model-inspired) over a single "
+            "SQLite file (planner.db).\n\n"
+            "Usage: python main.py <resource> <action> [flags]\n"
+            "       python main.py          # launch the interactive TUI\n\n"
+            "Resources: story epic iteration milestone project label member group\n"
+            "           workflow task comment link search plan config\n"
+            "Run 'python main.py <resource> -h' for that resource's actions.\n"
+            "Run 'python main.py <resource> <action> -h' for a specific command."
+        ),
+        epilog=(
+            "Examples:\n"
+            "  python main.py story create --name \"Fix login\" --project backend --type bug\n"
+            "  python main.py story list --project backend --state-type done\n"
+            "  python main.py story move 12 --state done\n"
+            "  python main.py epic create --name Auth --project backend\n"
+            "  python main.py search \"login OR auth\"\n"
+            "  python main.py plan export --file plan.json\n"
+            "Add --json (or --format json) for machine-readable output; --db to\n"
+            "point at a different database file."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument("--version", action="version", version="projectplanner 0.1.0")
     parser.add_argument("--json", action="store_true", default=False)
     parser.add_argument("--db", help="path to planner.db (default: ./planner.db)")
     parser.add_argument("--rotate-backup", type=int, default=None,
