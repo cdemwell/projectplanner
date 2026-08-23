@@ -122,72 +122,6 @@ class FilterScreen(ModalScreen[tuple]):
         self.dismiss(None)
 
 
-class CreateStoryScreen(ModalScreen[int]):
-    """Collects name, description, type, project, owner, and state for a new story.
-
-    Dismisses with:
-        int: The new story id, or None on cancel.
-    """
-
-    def __init__(self, conn: sqlite3.Connection) -> None:
-        super().__init__()
-        self.conn = conn
-
-    def compose(self) -> ComposeResult:
-        proj_opts = [("(no project)", _NONE_INT)]
-        for p in projects.list_projects(self.conn, include_archived=True):
-            proj_opts.append((p.name, p.id))
-        owner_opts = [("(no owner)", _NONE_INT)]
-        for m in members.list_members(self.conn):
-            owner_opts.append((m.name, m.id))
-        # States from the default (first) workflow.
-        wfs = workflows.list_workflows(self.conn)
-        state_opts = [("(workflow default)", _NONE_INT)]
-        if wfs:
-            for s in workflows.list_workflow_states(self.conn, wfs[0].id):
-                state_opts.append((f"{s.name} ({s.type})", s.id))
-        yield VerticalScroll(
-            Static("New story", classes="modal-title"),
-            Label("Name:"), Input(id="s-name"),
-            Label("Description:"), TextArea(id="s-desc"),
-            Label("Type:"), Select([("feature", "feature"), ("bug", "bug"), ("chore", "chore")],
-                                   value="feature", id="s-type"),
-            Label("Project:"), Select(proj_opts, value=_NONE_INT, id="s-proj"),
-            Label("Owner:"), Select(owner_opts, value=_NONE_INT, id="s-owner"),
-            Label("State:"), Select(state_opts, value=_NONE_INT, id="s-state"),
-            Horizontal(Button("Create", id="ok", variant="primary"), Button("Cancel", id="cancel")),
-            Label("", id="s-err", classes="err"),
-            classes="modal-box",
-        )
-
-    def on_mount(self) -> None:
-        self.query_one("#s-name", Input).focus()
-
-    @on(Button.Pressed, "#ok")
-    def _create(self) -> None:
-        name = self.query_one("#s-name", Input).value.strip()
-        if not name:
-            self.query_one("#s-err", Label).update("Name is required.")
-            return
-        desc = self.query_one("#s-desc", TextArea).text
-        stype = self.query_one("#s-type", Select).value
-        proj = _sel(self.query_one("#s-proj", Select).value)
-        owner = _sel(self.query_one("#s-owner", Select).value)
-        state = _sel(self.query_one("#s-state", Select).value)
-        owner_ids = [owner] if owner is not None else None
-        try:
-            sid = stories.create_story(
-                self.conn, name, description=desc, story_type=stype,
-                workflow_state_id=state, project_id=proj,
-                owner_ids=owner_ids)
-        except errors.PlannerError as e:
-            self.query_one("#s-err", Label).update(f"error: {e}")
-            return
-        self.dismiss(sid)
-
-    @on(Button.Pressed, "#cancel")
-    def _cancel(self) -> None:
-        self.dismiss(None)
 
 
 class EditStoryPane(Vertical):
@@ -295,6 +229,96 @@ class EditStoryPane(Vertical):
         self._save()
 
     @on(Button.Pressed, "#e-cancel")
+    def _cancel(self) -> None:
+        self.on_cancelled()
+
+
+class CreateStoryPane(Vertical):
+    """Collects name, description, type, project, owner, state, and labels for a new story.
+
+    Mounted into the ``#detail`` container when 'n' is pressed.
+    """
+
+    def __init__(self, conn: sqlite3.Connection, *, on_saved, on_cancelled) -> None:
+        super().__init__()
+        self.conn = conn
+        self.on_saved = on_saved
+        self.on_cancelled = on_cancelled
+
+    def compose(self) -> ComposeResult:
+        proj_opts = [("(no project)", _NONE_INT)]
+        for p in projects.list_projects(self.conn, include_archived=True):
+            proj_opts.append((p.name, p.id))
+        owner_opts = [("(no owner)", _NONE_INT)]
+        for m in members.list_members(self.conn):
+            owner_opts.append((m.name, m.id))
+        wfs = workflows.list_workflows(self.conn)
+        state_opts = [("(workflow default)", _NONE_INT)]
+        if wfs:
+            for s in workflows.list_workflow_states(self.conn, wfs[0].id):
+                state_opts.append((f"{s.name} ({s.type})", s.id))
+
+        yield Static("New story", classes="detail-title")
+        yield Label("Name:")
+        yield Input(id="c-name")
+        yield Label("Description:")
+        yield TextArea(id="c-desc")
+        yield Label("Type:")
+        yield Select([("feature", "feature"), ("bug", "bug"), ("chore", "chore")],
+                     value="feature", id="c-type")
+        yield Label("Project:")
+        yield Select(proj_opts, value=_NONE_INT, id="c-proj")
+        yield Label("Owner:")
+        yield Select(owner_opts, value=_NONE_INT, id="c-owner")
+        yield Label("State:")
+        yield Select(state_opts, value=_NONE_INT, id="c-state")
+        yield Label("Labels (comma-separated):")
+        yield Input(id="c-labels")
+        yield Horizontal(Button("Create", id="ok", variant="primary"),
+                         Button("Cancel", id="c-cancel"))
+        yield Label("", id="c-err", classes="err")
+
+    def on_mount(self) -> None:
+        self.query_one("#c-name", Input).focus()
+
+    def _save(self) -> None:
+        name = self.query_one("#c-name", Input).value.strip()
+        if not name:
+            self.query_one("#c-err", Label).update("Name is required.")
+            return
+        desc = self.query_one("#c-desc", TextArea).text
+        stype = self.query_one("#c-type", Select).value
+        proj = _sel(self.query_one("#c-proj", Select).value)
+        owner = _sel(self.query_one("#c-owner", Select).value)
+        state = _sel(self.query_one("#c-state", Select).value)
+        labels_str = self.query_one("#c-labels", Input).value.strip()
+
+        owner_ids = [owner] if owner is not None else None
+        try:
+            sid = stories.create_story(
+                self.conn, name, description=desc, story_type=stype,
+                workflow_state_id=state, project_id=proj,
+                owner_ids=owner_ids)
+
+            if labels_str:
+                for lb_name in labels_str.split(','):
+                    lb_name = lb_name.strip()
+                    if lb_name:
+                        # Find or create label
+                        res = self.conn.execute('SELECT id FROM label WHERE name = ?', (lb_name,)).fetchone()
+                        lid = res["id"] if res else labels.create_label(self.conn, lb_name).id
+                        stories.add_label(self.conn, sid, lid)
+
+        except errors.PlannerError as e:
+            self.query_one("#c-err", Label).update(f"error: {e}")
+            return
+        self.on_saved(sid)
+
+    @on(Button.Pressed, "#ok")
+    def _ok(self) -> None:
+        self._save()
+
+    @on(Button.Pressed, "#c-cancel")
     def _cancel(self) -> None:
         self.on_cancelled()
 
@@ -759,6 +783,7 @@ class PlannerApp(App):
         self.filters = {"project": None, "state_type": None, "q": None,
                         "epic": None, "iteration": None, "milestone": None}
         self._edit_pane: EditStoryPane | None = None
+        self._create_pane: CreateStoryPane | None = None
         # Off until the 'a' hotkey (or an explicit --auto-refresh N>0).
         self._auto_refresh_enabled = bool(auto_refresh)
         self._auto_refresh_interval = auto_refresh if auto_refresh else 1
@@ -1017,13 +1042,18 @@ class PlannerApp(App):
         self.show_current_detail()
 
     def action_new_story(self) -> None:
-        """Open modal to create a new story."""
+        """Create a new story in the right detail pane."""
         assert self.conn is not None
-        self.push_screen(CreateStoryScreen(self.conn), self._after_new)
+        self.query_one("#detail-view", RichLog).display = False
+        pane = CreateStoryPane(self.conn,
+                               on_saved=self._create_saved,
+                               on_cancelled=self._create_cancelled)
+        self._create_pane = pane
+        self.query_one("#detail", VerticalScroll).mount(pane)
 
-    def _after_new(self, sid: int | None) -> None:
-        if sid is None:
-            return
+
+    def _create_saved(self, sid: int) -> None:
+        self._close_create()
         self.refresh_stories()
         # Select the newly created row.
         table = self.query_one("#stories", DataTable)
@@ -1032,6 +1062,20 @@ class PlannerApp(App):
         except Exception:
             pass
         self.show_current_detail()
+
+    def _create_cancelled(self) -> None:
+        self._close_create()
+        self.show_current_detail()
+
+    def _close_create(self) -> None:
+        """Remove the create pane and restore the read-only detail view."""
+        if self._create_pane is not None:
+            try:
+                self._create_pane.remove()
+            except Exception:
+                pass
+            self._create_pane = None
+        self.query_one("#detail-view", RichLog).display = True
 
     def action_edit_story(self) -> None:
         """Edit the selected story in-place in the right detail pane."""

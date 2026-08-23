@@ -37,8 +37,14 @@ def seeded_db(db_path):
 
 
 async def _ok(pilot, app):
-    """Focus the active modal's #ok button and press Enter."""
-    app.screen.query_one("#ok", Button).focus()
+    """Focus the #ok button and press Enter.
+    Searches the app first, then the screen.
+    """
+    try:
+        btn = app.query_one("#ok", Button)
+    except Exception:
+        btn = app.screen.query_one("#ok", Button)
+    btn.focus()
     await pilot.pause()
     await pilot.press("enter")
     await pilot.pause(0.05)
