@@ -17,6 +17,7 @@ import dataclasses
 import json as _json
 import os
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -812,6 +813,8 @@ COMMON.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
                     help="emit JSON (machine-readable) [deprecated: use --format json]")
 COMMON.add_argument("--format", choices=["text", "json", "csv", "id-only"], default="text",
                     help="output format (default: text)")
+COMMON.add_argument("--dry-run", action="store_true", default=argparse.SUPPRESS,
+                    help="run without modifying the database")
 
 
 def _sp(parent, name, **kw):
@@ -839,6 +842,8 @@ def build_parser() -> argparse.ArgumentParser:
                                      description="Local project planner (Shortcut-model-based).")
     parser.add_argument("--json", action="store_true", default=False)
     parser.add_argument("--db", help="path to planner.db (default: ./planner.db)")
+    parser.add_argument("--dry-run", action="store_true", default=False,
+                        help="run without modifying the database")
     sub = parser.add_subparsers(dest="resource", required=True)
 
     # story ------------------------------------------------------------------
@@ -1081,7 +1086,20 @@ def run(argv: list[str] | None = None) -> int:
     """
     parser = build_parser()
     args = parser.parse_args(argv)
-    conn = db.connect(args.db) if getattr(args, "db", None) else db.connect()
+
+    db_path = args.db if getattr(args, "db", None) else db.DEFAULT_DB_PATH
+    is_dry_run = getattr(args, "dry_run", False)
+
+    tmp_path = None
+    if is_dry_run:
+        print("[dry-run]")
+        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp:
+            tmp_path = tmp.name
+            if os.path.exists(db_path):
+                shutil.copy2(db_path, tmp_path)
+
+    conn_path = tmp_path if is_dry_run else db_path
+    conn = db.connect(conn_path)
     try:
         value = args.func(conn, args)
         # Always use emit for consistent format handling (--json is deprecated alias for --format json)
@@ -1095,6 +1113,11 @@ def run(argv: list[str] | None = None) -> int:
         return 1
     finally:
         conn.close()
+        if tmp_path:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
     return 0
 
 
