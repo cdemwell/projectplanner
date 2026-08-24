@@ -54,6 +54,7 @@ from backend import (
     milestones,
     plan,
     projects,
+    search,
     stories,
     story_links,
     tasks,
@@ -115,6 +116,21 @@ _PALETTE_COMMANDS: list[tuple[str, str]] = [
     ("Move up", "move_up"),
     ("Toggle auto-refresh", "toggle_auto_refresh"),
     ("Quit", "quit"),
+]
+
+# Entity scope options for the search screen: (display label, backend key).
+# Keys match the CLI's ``search --entity`` choices and the backend ``search``
+# module's supported entities. "story" is the default so the search keeps its
+# long-standing behavior of filtering the story list.
+_SEARCH_ENTITIES: list[tuple[str, str]] = [
+    ("Story", "story"),
+    ("Epic", "epic"),
+    ("Project", "project"),
+    ("Milestone", "milestone"),
+    ("Iteration", "iteration"),
+    ("Label", "label"),
+    ("Comment", "comment"),
+    ("Task", "task"),
 ]
 
 
@@ -525,16 +541,24 @@ class TextScreen(ModalScreen[str]):
         self.dismiss(None)
 
 
-class SearchInputScreen(ModalScreen[str]):
-    """Collects a search query string.
+class SearchInputScreen(ModalScreen[tuple]):
+    """Collects a search query and an entity scope.
+
+    The entity is chosen from a keyboard-first :class:`Select` (default
+    "story"); the query is typed into an :class:`Input`. The chosen entity is
+    forwarded to the caller so it can be passed to the backend ``search.search``
+    function.
 
     Dismisses with:
-        str: The search query, or None on cancel.
+        tuple: (query: str, entity: str), or None on cancel.
     """
 
     def compose(self) -> ComposeResult:
         yield VerticalScroll(
-            Static("Search stories (name/description)", classes="modal-title"),
+            Static("Search", classes="modal-title"),
+            Label("Entity:"),
+            Select(_SEARCH_ENTITIES, value="story", id="s-entity"),
+            Label("Query:"),
             Input(id="q", placeholder="login OR auth"),
             Horizontal(Button("Search", id="ok", variant="primary"), Button("Cancel", id="cancel")),
             classes="modal-box",
@@ -543,16 +567,65 @@ class SearchInputScreen(ModalScreen[str]):
     def on_mount(self) -> None:
         self.query_one("#q", Input).focus()
 
+    def _result(self) -> tuple[str, str]:
+        """Return the (query, entity) the user chose."""
+        return (self.query_one("#q", Input).value,
+                _sel(self.query_one("#s-entity", Select).value) or "story")
+
     @on(Button.Pressed, "#ok")
     def _ok(self) -> None:
-        self.dismiss(self.query_one("#q", Input).value)
+        self.dismiss(self._result())
 
     @on(Button.Pressed, "#cancel")
     def _cancel(self) -> None:
         self.dismiss(None)
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
-        self.dismiss(event.value)
+        self.dismiss((event.value,
+                      _sel(self.query_one("#s-entity", Select).value) or "story"))
+
+
+class SearchResultsScreen(ModalScreen[bool]):
+    """Show ranked results for a non-story entity search.
+
+    Runs the backend ``search.search`` in ``on_mount`` and renders each hit in
+    a :class:`DataTable`. Backend errors (bad query syntax / unknown entity) are
+    surfaced in the ``#sr-err`` label. The main story list is left unchanged.
+
+    Dismisses with:
+        bool: True when the user is done, None on unmount.
+    """
+
+    def __init__(self, conn: sqlite3.Connection, query_text: str, entity: str) -> None:
+        super().__init__()
+        self.conn = conn
+        self.query_text = query_text
+        self.entity = entity
+
+    def compose(self) -> ComposeResult:
+        yield VerticalScroll(
+            Static(f"Search results — {self.entity}", classes="modal-title"),
+            DataTable(id="sr-table", cursor_type="row"),
+            Label("", id="sr-err", classes="err"),
+            Horizontal(Button("Done", id="cancel", variant="primary")),
+            classes="modal-box",
+        )
+
+    def on_mount(self) -> None:
+        table = self.query_one("#sr-table", DataTable)
+        table.add_columns("Entity", "ID", "Name", "Description", "Rank")
+        try:
+            results = search.search(self.conn, self.query_text, entity=self.entity)
+        except (errors.PlannerError, ValueError) as e:
+            self.query_one("#sr-err", Label).update(f"error: {e}")
+            return
+        for r in results:
+            desc = (r.description or "").replace("\n", " ")
+            table.add_row(r.entity, str(r.id), r.name, desc, f"{r.rank:.3f}")
+
+    @on(Button.Pressed, "#cancel")
+    def _done(self) -> None:
+        self.dismiss(True)
 
 
 class ConfirmScreen(ModalScreen[bool]):
@@ -3332,6 +3405,9 @@ class PlannerApp(App):
         self.filters = {"project": None, "state_type": [], "q": None,
                         "epic": None, "iteration": None, "milestone": None,
                         "owner": None, "label": None}
+        # Set of story ids from a story-entity search (via backend search.search).
+        # None = no active search result filter; empty set = show no stories.
+        self._search_ids: set[int] | None = None
         self._edit_pane: EditStoryPane | None = None
         self._create_pane: CreateStoryPane | None = None
         # Off until the 'a' hotkey (or an explicit --auto-refresh N>0).
@@ -3381,6 +3457,9 @@ class PlannerApp(App):
             epic_id=f["epic"], iteration_id=f["iteration"],
             milestone_id=f["milestone"], q=f["q"],
             owner_id=f["owner"], label_id=f["label"])
+        # Restrict to the ids returned by a story-entity search, if one is active.
+        if self._search_ids is not None:
+            items = [s for s in items if s.id in self._search_ids]
         table = self.query_one("#stories", DataTable)
         # Drop selections that no longer match the filter.
         self._selected &= {s.id for s in items}
@@ -3902,7 +3981,7 @@ class PlannerApp(App):
         self.refresh_stories()
 
     def action_search(self) -> None:
-        """Open modal to search stories by keyword."""
+        """Open modal to search by keyword, scoped to a chosen entity."""
         self.push_screen(SearchInputScreen(), self._after_search)
 
     def action_manage_workflows(self) -> None:
@@ -4016,11 +4095,32 @@ class PlannerApp(App):
         self.filters[kind] = entity_id
         self.refresh_stories()
 
-    def _after_search(self, q: str | None) -> None:
-        if q is None:
+    def _after_search(self, result: tuple | None) -> None:
+        """Apply a search scoped to the chosen entity.
+
+        A "story" search restricts the story list to the ids returned by the
+        backend ``search.search`` (FTS5). Any other entity opens a generic
+        :class:`SearchResultsScreen`. Backend errors (bad query / unknown
+        entity) surface as a toast.
+        """
+        if result is None:
             return
-        self.filters["q"] = q or None
-        self.refresh_stories()
+        q, entity = result
+        q = (q or "").strip()
+        assert self.conn is not None
+        if entity == "story":
+            self._search_ids = None
+            self.filters["q"] = None
+            if q:
+                try:
+                    self._search_ids = {
+                        r.id for r in search.search(self.conn, q, entity="story")}
+                except (errors.PlannerError, ValueError) as e:
+                    self.notify(f"error: {e}")
+                    return
+            self.refresh_stories()
+        elif q:
+            self.push_screen(SearchResultsScreen(self.conn, q, entity))
 
     def action_delete_story(self) -> None:
         """Open confirmation modal to delete the selected story or selection."""

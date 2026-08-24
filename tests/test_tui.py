@@ -12,7 +12,7 @@ import pytest
 
 textual = pytest.importorskip("textual")  # noqa: F841
 
-from textual.widgets import Button, TextArea  # noqa: E402
+from textual.widgets import Button, Select, TextArea  # noqa: E402
 
 from backend import comments as comments_mod
 from backend import projects  # noqa: E402
@@ -91,6 +91,7 @@ def test_tui_create_toggle_search_delete(seeded_db):
             app.filters = {"project": None, "state_type": None, "q": None,
                            "epic": None, "iteration": None, "milestone": None,
                            "owner": None, "label": None}
+            app._search_ids = None
             app.refresh_stories(); await pilot.pause()
 
             # add a comment
@@ -108,6 +109,63 @@ def test_tui_create_toggle_search_delete(seeded_db):
             # one story was deleted (3 -> 2)
             assert app.conn.execute("SELECT COUNT(*) FROM story").fetchone()[0] == 2
 
+            assert getattr(app, "_exception", None) is None
+            await pilot.press("q")
+    _run(main())
+
+
+def test_tui_search_entity_selector(seeded_db):
+    """The search screen offers an entity scope; non-story entities show a
+    generic results screen, and a bad query surfaces an error."""
+    from tui.app import SearchInputScreen, SearchResultsScreen
+
+    async def main():
+        app = PlannerApp(seeded_db)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+
+            # Open the search screen and pick the "epic" entity.
+            await pilot.press("slash"); await pilot.pause()
+            search_screen = app.screen
+            assert isinstance(search_screen, SearchInputScreen)
+            ent = search_screen.query_one("#s-entity", Select)
+            ent.value = "epic"; await pilot.pause()
+            await pilot.press(*"login"); await pilot.pause()
+            await _ok(pilot, app)
+            # A non-story entity opens the generic results screen.
+            assert isinstance(app.screen, SearchResultsScreen)
+            assert app.screen.query_one("#sr-table").row_count == 0
+            app.screen.query_one("#cancel", Button).focus()
+            await pilot.pause()
+            await pilot.press("enter"); await pilot.pause(0.05); await pilot.pause()
+            # The main story list is untouched by a non-story search.
+            assert app.query_one("#stories").row_count == 2
+
+            # A story-entity search still filters the story list (FTS5 backend).
+            await pilot.press("slash"); await pilot.pause()
+            assert isinstance(app.screen, SearchInputScreen)
+            await pilot.press(*"login"); await pilot.pause()
+            await _ok(pilot, app)
+            assert app.query_one("#stories").row_count == 1
+
+            assert getattr(app, "_exception", None) is None
+            await pilot.press("q")
+    _run(main())
+
+
+def test_tui_search_results_error(seeded_db):
+    """A malformed FTS query surfaces the backend error in the results screen."""
+    from tui.app import SearchResultsScreen
+
+    async def main():
+        app = PlannerApp(seeded_db)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            # Bad FTS syntax (bare ':') should surface in the error label.
+            app.push_screen(SearchResultsScreen(app.conn, "not a valid : query", "story"))
+            await pilot.pause()
+            err = str(app.screen.query_one("#sr-err").render())
+            assert "error:" in err
             assert getattr(app, "_exception", None) is None
             await pilot.press("q")
     _run(main())
