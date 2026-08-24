@@ -23,12 +23,11 @@ other context.
 
 **How to use this document to gather context quickly:**
 
-- If you are an **AI agent about to use the CLI as a tool**, read the
-  [Table of Contents](#table-of-contents) below, then jump to
-  [§ AI Agent Guide](#ai-agent-guide-using-the-cli-during-development) for
-  concrete recipes, and [§ CLI Conventions](#cli-conventions) for the parsing
-  contract (`--json`, exit codes, name-vs-id resolution). That is enough to
-  start driving the tool.
+- If you are an **AI agent about to use the CLI as a tool**, read
+  [AGENTS.md](AGENTS.md) — the focused operational guide distilled for agents
+  (when to use, the command contract, the work loop, anti-patterns, error
+  recovery). This README remains the full reference; AGENTS.md points back to it
+  for depth.
 - If you need to know **what entities exist and how they relate**, read
   [§ Data Model](#data-model).
 - If you need to know **how the tool is built and how concurrency works**
@@ -47,25 +46,25 @@ search them — all from the command line, against a local file.
 
 ## Table of Contents
 
-| # | Section | Lines |
-|---|---------|-------|
-| 1 | [Executive Summary](#executive-summary) | 18–47 |
-| 2 | [Table of Contents](#table-of-contents) | 48–71 |
-| 3 | [Intent & Design Goals](#intent--design-goals) | 72–97 |
-| 4 | [Requirements & Setup](#requirements--setup) | 98–121 |
-| 5 | [Quick Start](#quick-start) | 122–158 |
-| 6 | [Running the Tool: CLI vs TUI](#running-the-tool-cli-vs-tui) | 159–191 |
-| 7 | [CLI Conventions](#cli-conventions) | 192–246 |
-| 8 | [CLI Reference](#cli-reference) | 247–335 |
-| 9 | [AI Agent Guide: Using the CLI During Development](#ai-agent-guide-using-the-cli-during-development) | 336–450 |
-| 10 | [Data Model](#data-model) | 451–502 |
-| 11 | [Architecture & Concurrency](#architecture--concurrency) | 503–538 |
-| 12 | [Storage & Schema](#storage--schema) | 539–557 |
-| 13 | [Exit Codes & Errors](#exit-codes--errors) | 558–576 |
-| 14 | [Examples & Recipes](#examples--recipes) | 577–610 |
-| 15 | [Non-goals & Differences from Shortcut](#non-goals--differences-from-shortcut) | 611–625 |
-| 16 | [Tests](#tests) | 626–669 |
-| 17 | [Further Reading](#further-reading) | 670–678 |
+| # | Section |
+|---|---------|
+| 1 | [Executive Summary](#executive-summary) |
+| 2 | [Table of Contents](#table-of-contents) |
+| 3 | [Intent & Design Goals](#intent--design-goals) |
+| 4 | [Requirements & Setup](#requirements--setup) |
+| 5 | [Quick Start](#quick-start) |
+| 6 | [Running the Tool: CLI vs TUI](#running-the-tool-cli-vs-tui) |
+| 7 | [CLI Conventions](#cli-conventions) |
+| 8 | [CLI Reference](#cli-reference) |
+| 9 | [AI Agent Guide (see AGENTS.md)](#ai-agent-guide-using-the-cli-during-development) |
+| 10 | [Data Model](#data-model) |
+| 11 | [Architecture & Concurrency](#architecture--concurrency) |
+| 12 | [Storage & Schema](#storage--schema) |
+| 13 | [Exit Codes & Errors](#exit-codes--errors) |
+| 14 | [Examples & Recipes](#examples--recipes) |
+| 15 | [Non-goals & Differences from Shortcut](#non-goals--differences-from-shortcut) |
+| 16 | [Tests](#tests) |
+| 17 | [Further Reading](#further-reading) |
 
 ---
 
@@ -335,116 +334,14 @@ description) and comments (`text`) and tasks (`description`).
 
 ## AI Agent Guide: Using the CLI During Development
 
-This section is the operational playbook for an AI coding agent that uses
-`projectplanner` to track the work it is doing on a software project. Treat the
-CLI as a small, reliable tool you call between editing steps.
+The agent operational playbook now lives in **[AGENTS.md](AGENTS.md)** — a
+focused guide distilled for AI coding agents: when to use the tool (and when
+not to), the command contract, the create → move → comment → finish work loop
+with copy-paste recipes, anti-patterns, and error recovery.
 
-### Principles
-
-1. **Create before you code.** When you pick up a unit of work, create a story
-   for it first and capture the id. Cite that id in subsequent commands.
-2. **Move it to reflect reality.** Move a story to `started` when you begin and
-   `done` when it's finished. State is the source of truth for "what's in
-   flight".
-3. **Record decisions and findings as comments.** Comments are the durable
-   log; put reproduction steps, decisions, and blockers there.
-4. **Break work into tasks.** Use `task add` for checklist items so progress is
-   visible and resumable.
-5. **Use `--json` when you need to parse**, plain text when you need to read.
-6. **Always read back the id** from a mutating command's output before
-   referencing the new entity.
-
-### Recipe 1 — Start a session: see what's in flight
-
-```bash
-# What am I working on right now? (started, not done)
-python main.py story list --state-type started --no-completed --json
-
-# Full detail of a specific story (relations, tasks, comments)
-python main.py story detail 17
-```
-
-### Recipe 2 — Pick up a new task and begin
-
-```bash
-# Create the story; capture the id from the JSON output
-SID=$(python main.py story create --name "Refactor auth middleware" \
-      --project backend --type chore --owners "$(whoami)" --json \
-      | python -c "import sys,json; print(json.load(sys.stdin)['id'])")
-
-# Move it to "Started" and add sub-tasks
-python main.py story move "$SID" --state started
-python main.py task add --story "$SID" --desc "Extract session check"
-python main.py task add --story "$SID" --desc "Add tests for middleware"
-```
-
-### Recipe 3 — Log progress as you work
-
-```bash
-# Record a finding (a comment on the story)
-python main.py comment add --story 17 --text "Root cause: session cookie not set on redirect"
-
-# Mark a sub-task done as you finish it
-python main.py task complete 3
-
-# Note a blocker by linking to the story that's blocking this one
-python main.py link add --subject 17 --verb blocks --object 22
-```
-
-### Recipe 4 — Finish and verify
-
-```bash
-# Complete any remaining tasks, then mark the story done
-python main.py task complete 4
-python main.py story move 17 --state done        # completed_at is stamped automatically
-
-# Confirm it's done and read back the final state
-python main.py story get 17 --json
-```
-
-### Recipe 5 — Find related work before starting
-
-```bash
-# Full-text search across all entities
-python main.py search "auth login"
-
-# Scope to one entity type
-python main.py search "auth" --entity story --json
-
-# List everything in a project/iteration
-python main.py story list --project backend --iteration "Sprint 1" --json
-```
-
-### Recipe 6 — Track a feature as an epic with stories
-
-```bash
-python main.py epic create --name "Multi-factor auth" --project backend --milestone M1
-EID=$(python main.py epic create --name "Multi-factor auth" --project backend --json \
-      | python -c "import sys,json; print(json.load(sys.stdin)['id'])")
-python main.py story create --name "TOTP enrollment" --project backend --epic "$EID"
-python main.py story create --name "TOTP verification" --project backend --epic "$EID"
-python main.py epic stories "$EID"          # see the epic's stories
-```
-
-### Recipe 7 — Plan a timebox (iteration) and a milestone
-
-```bash
-python main.py iteration create --name "Sprint 2" --status planned \
-    --start 2026-09-15 --end 2026-09-28
-python main.py milestone create --name "M2 — Hardening" --state in_progress
-
-# Schedule a story into the iteration
-python main.py story update 17 --iteration "Sprint 2"
-```
-
-### Anti-patterns to avoid
-
-- Don't set `completed_at` yourself — it's automated by state moves.
-- Don't reference stories by name in scripts (names aren't unique); capture the
-  id from the create/move output.
-- Don't poll in a tight loop to "wait" for a writer — concurrent writers block
-  for up to 5s and then proceed; just retry on a non-zero exit if needed.
-- Don't parse the plain-text tables programmatically; use `--json`.
+Start there. This README remains the full reference (CLI surface, data model,
+architecture, schema); AGENTS.md links back to the relevant sections for
+depth.
 
 ---
 
