@@ -803,6 +803,87 @@ class CreateStoryPane(Vertical):
         self.on_cancelled()
 
 
+class EditEpicPane(Vertical):
+    """Edit an existing epic's fields in the right detail pane.
+
+    Mounted into the ``#detail`` container when 'u' is pressed while the parent
+    pane is browsing epics, replacing the read-only detail view. Fields: name,
+    description, state, project, milestone. State changes go through
+    ``epics.update_epic`` so ``completed_at`` stays consistent with the done-state
+    rule. Nullable parents are cleared via the ``(no …)`` option (maps to None).
+    Uses the full pane height, so it fits without a scrollbar.
+
+    Args:
+        conn: sqlite3.Connection.
+        epic_id: The epic being edited.
+        on_saved: Called with the epic id after a successful save.
+        on_cancelled: Called (with no args) when editing is cancelled.
+    """
+
+    def __init__(self, conn: sqlite3.Connection, epic_id: int, *,
+                 on_saved, on_cancelled) -> None:
+        super().__init__()
+        self.conn = conn
+        self.epic_id = epic_id
+        self.on_saved = on_saved
+        self.on_cancelled = on_cancelled
+        self.epic = epics.get_epic(conn, epic_id)
+
+    def compose(self) -> ComposeResult:
+        e = self.epic
+        proj_opts = [("(no project)", _NONE_INT)]
+        for p in projects.list_projects(self.conn, include_archived=True):
+            proj_opts.append((p.name, p.id))
+        ms_opts = [("(no milestone)", _NONE_INT)]
+        for ms in milestones.list_milestones(self.conn):
+            ms_opts.append((ms.name, ms.id))
+        state_opts = [(s, s) for s in epics.STATES]
+        yield Static(f"Edit epic #{e.id}", classes="detail-title")
+        yield Label("Name:")
+        yield Input(value=e.name, id="ee-name")
+        yield Label("Description:")
+        yield TextArea(id="ee-desc")
+        yield Label("State:")
+        yield Select(state_opts, value=e.state, id="ee-state")
+        yield Label("Project:")
+        yield Select(proj_opts, value=e.project_id or _NONE_INT, id="ee-proj")
+        yield Label("Milestone:")
+        yield Select(ms_opts, value=e.milestone_id or _NONE_INT, id="ee-ms")
+        yield Horizontal(Button("Save", id="ee-save", variant="primary"),
+                         Button("Cancel", id="ee-cancel"))
+        yield Label("", id="ee-err", classes="err")
+
+    def on_mount(self) -> None:
+        self.query_one("#ee-desc", TextArea).text = self.epic.description
+        self.query_one("#ee-name", Input).focus()
+
+    def _save(self) -> None:
+        name = self.query_one("#ee-name", Input).value.strip()
+        if not name:
+            self.query_one("#ee-err", Label).update("Name is required.")
+            return
+        desc = self.query_one("#ee-desc", TextArea).text
+        state = self.query_one("#ee-state", Select).value
+        proj = _sel(self.query_one("#ee-proj", Select).value)
+        ms = _sel(self.query_one("#ee-ms", Select).value)
+        try:
+            epics.update_epic(self.conn, self.epic_id, name=name,
+                              description=desc, state=state,
+                              project_id=proj, milestone_id=ms)
+        except errors.PlannerError as e:
+            self.query_one("#ee-err", Label).update(f"error: {e}")
+            return
+        self.on_saved(self.epic_id)
+
+    @on(Button.Pressed, "#ee-save")
+    def _ok(self) -> None:
+        self._save()
+
+    @on(Button.Pressed, "#ee-cancel")
+    def _cancel(self) -> None:
+        self.on_cancelled()
+
+
 class MoveStateScreen(ModalScreen[int]):
     """Collects a new workflow state for the selected story/stories.
 
@@ -3737,6 +3818,8 @@ class PlannerApp(App):
         Binding("J", "move_down", "Down"),
         Binding("K", "move_up", "Up"),
         Binding("d", "delete_story", "Delete"),
+        # Delete-with-confirmation for the selected epic (story 75).
+        Binding("D", "delete_epic", "Delete epic", show=False),
         Binding("e", "toggle_complete", "Complete"),
         Binding("v", "toggle_multiselect", "Multi"),
         Binding("space", "toggle_select", "Toggle", show=False),
@@ -3768,7 +3851,7 @@ class PlannerApp(App):
         # Set of story ids from a story-entity search (via backend search.search).
         # None = no active search result filter; empty set = show no stories.
         self._search_ids: set[int] | None = None
-        self._edit_pane: EditStoryPane | None = None
+        self._edit_pane: Vertical | None = None
         self._create_pane: CreateStoryPane | None = None
         # Off until the 'a' hotkey (or an explicit --auto-refresh N>0).
         self._auto_refresh_enabled = bool(auto_refresh)
@@ -4463,7 +4546,15 @@ class PlannerApp(App):
         self.query_one("#detail-view").display = True
 
     def action_edit_story(self) -> None:
-        """Edit the selected story in-place in the right detail pane."""
+        """Edit the selected entity in-place in the right detail pane.
+
+        Browsing epics opens the epic edit form; browsing stories opens the
+        story edit form. Any other parent entity kind is not inline-editable
+        and bells.
+        """
+        if self.parent_entity == "epic":
+            self._open_epic_edit()
+            return
         if self.parent_entity != "story":
             self.bell()
             return
@@ -4483,8 +4574,30 @@ class PlannerApp(App):
         self._edit_pane = pane
         self.query_one("#detail", VerticalScroll).mount(pane)
 
+    def _open_epic_edit(self) -> None:
+        """Mount the epic edit form into the right detail pane in-place."""
+        assert self.conn is not None
+        eid = self.query_one("#stories", EntityListPane).current_id
+        if eid is None:
+            self.bell()
+            return
+        if self._edit_pane is not None:
+            self.bell()  # already editing
+            return
+        # Hide the read-only view and mount the edit form in its place.
+        self.query_one("#detail-view").display = False
+        pane = EditEpicPane(self.conn, eid,
+                            on_saved=self._edit_saved,
+                            on_cancelled=self._edit_cancelled)
+        self._edit_pane = pane
+        self.query_one("#detail", VerticalScroll).mount(pane)
+
     def _edit_saved(self, sid: int) -> None:
         self._close_edit()
+        if self.parent_entity == "epic":
+            # refresh_parent preserves the cursor by id and re-renders detail.
+            self.refresh_parent()
+            return
         self.refresh_stories()
         # Keep the cursor on the edited story.
         table = self.query_one("#stories", DataTable)
@@ -4507,6 +4620,33 @@ class PlannerApp(App):
                 pass
             self._edit_pane = None
         self.query_one("#detail-view").display = True
+
+    def action_delete_epic(self) -> None:
+        """Delete the selected epic with confirmation (story 75)."""
+        if self.parent_entity != "epic":
+            self.bell()
+            return
+        assert self.conn is not None
+        eid = self.query_one("#stories", EntityListPane).current_id
+        if eid is None:
+            self.bell()
+            return
+        e = epics.get_epic(self.conn, eid)
+        self.push_screen(ConfirmScreen(f"Delete epic '#{e.id} {e.name}'?"),
+                         lambda ok: self._do_delete_epic(eid, ok))
+
+    def _do_delete_epic(self, eid: int, ok: bool | None) -> None:
+        """Perform the epic deletion after confirmation (or abort on cancel)."""
+        if not ok or self.conn is None:
+            return
+        try:
+            epics.delete_epic(self.conn, eid)
+        except errors.PlannerError as e:
+            self.notify(f"error: {e}")
+            return
+        if self._edit_pane is not None:
+            self._close_edit()
+        self.refresh_parent()
 
     def action_move_state(self) -> None:
         """Open modal to change the workflow state of the selected story/selection."""
