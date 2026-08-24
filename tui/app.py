@@ -2,15 +2,18 @@
 
 Built with Textual. Shares the *same* backend functions as the CLI — no separate
 data layer. Layout: a filterable story list (left) + a detail pane (right), with
-modal screens for create / move / comment / task / filter / search and keyboard
-shortcuts shown in the footer. See CONTEXT.md §10.
+modal screens for create / move / comment / task / filter / search / plan
+and keyboard shortcuts shown in the footer. See CONTEXT.md §10.
 
 Run: ``python main.py`` (no args). Requires the ``textual`` package.
 """
 
 from __future__ import annotations
 
+import shutil
 import sqlite3
+from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from rich.style import Style
@@ -47,6 +50,7 @@ from backend import (
     labels,
     members,
     milestones,
+    plan,
     projects,
     stories,
     story_links,
@@ -100,6 +104,7 @@ _PALETTE_COMMANDS: list[tuple[str, str]] = [
     ("Manage label catalog", "manage_label_catalog"),
     ("Manage member roster", "manage_member_catalog"),
     ("Manage groups", "manage_group_catalog"),
+    ("Manage plan", "manage_plan"),
     ("Toggle complete", "toggle_complete"),
     ("Delete story", "delete_story"),
     ("Refresh", "refresh"),
@@ -3021,6 +3026,130 @@ class GroupManagerScreen(ModalScreen[bool]):
         self.dismiss(self._dirty)
 
 
+class PlanManagerScreen(ModalScreen[bool]):
+    """Export, import, or back up the plan.
+
+    "Export" writes a portable JSON snapshot of the whole plan via
+    ``plan.export_to_file``. "Import" restores a snapshot via
+    ``plan.import_from_file`` after a destructive-overwrite confirmation
+    (:class:`ConfirmScreen`) — importing wipes the current plan and replaces it
+    with the snapshot's contents. "Backup" copies the SQLite file to a
+    timestamped file and prunes old backups. All plan operations go through the
+    backend ``plan`` module; backend and filesystem errors surface in a status
+    label.
+
+    Dismisses with:
+        bool: True if any change was made (caller refreshes), else None.
+    """
+
+    # Number of most recent backups to keep when rotating.
+    BACKUP_KEEP = 5
+
+    def __init__(self, conn: sqlite3.Connection, db_path: str) -> None:
+        super().__init__()
+        self.conn = conn
+        self.db_path = db_path
+        self._dirty = False
+
+    def compose(self) -> ComposeResult:
+        yield VerticalScroll(
+            Static("Plan management", classes="modal-title"),
+            Horizontal(
+                Button("Export", id="plan-export", variant="primary"),
+                Button("Import", id="plan-import"),
+                Button("Backup", id="plan-backup"),
+                Button("Done", id="plan-done"),
+            ),
+            Label("", id="plan-status", classes="err"),
+            classes="modal-box",
+        )
+
+    def _status(self, msg: str) -> None:
+        self.query_one("#plan-status", Label).update(msg)
+
+    def _export(self) -> None:
+        self.app.push_screen(
+            PromptScreen("Export plan to file", value="planner-export.json"),
+            self._do_export)
+
+    def _do_export(self, path: str | None) -> None:
+        if not path or not path.strip():
+            return
+        path = path.strip()
+        try:
+            data = plan.export_to_file(self.conn, path)
+        except (errors.PlannerError, OSError) as e:
+            self._status(f"error: {e}")
+            return
+        total = sum(len(v) for k, v in data.items() if k != "_meta")
+        self._status(f"Exported {total} rows to {path}")
+
+    def _import(self) -> None:
+        self.app.push_screen(
+            PromptScreen("Import plan from file", value=""),
+            self._import_confirm)
+
+    def _import_confirm(self, path: str | None) -> None:
+        if not path or not path.strip():
+            return
+        path = path.strip()
+        self.app.push_screen(
+            ConfirmScreen("Import will overwrite the current plan. Continue?"),
+            lambda ok: self._do_import(path, ok))
+
+    def _do_import(self, path: str, ok: bool | None) -> None:
+        if not ok:
+            return
+        try:
+            counts = plan.import_from_file(self.conn, path)
+        except (errors.PlannerError, ValueError, KeyError, OSError) as e:
+            self._status(f"error: {e}")
+            return
+        self._dirty = True
+        total = sum(counts.values())
+        self._status(f"Imported {total} rows from {path}")
+
+    def _backup(self) -> None:
+        db_path = Path(self.db_path)
+        if not db_path.exists():
+            self._status(f"Database file not found: {db_path}")
+            return
+        timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+        backup_path = db_path.with_suffix(f"{db_path.suffix}.{timestamp}")
+        try:
+            shutil.copy2(db_path, backup_path)
+        except OSError as e:
+            self._status(f"error: {e}")
+            return
+        # Prune old backups, keeping the most recent BACKUP_KEEP.
+        backups = sorted(
+            db_path.parent.glob(f"{db_path.name}.*"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True)
+        for old in backups[self.BACKUP_KEEP:]:
+            try:
+                old.unlink()
+            except OSError:
+                pass
+        self._status(f"Backup created: {backup_path.name}")
+
+    @on(Button.Pressed, "#plan-export")
+    def _b_export(self) -> None:
+        self._export()
+
+    @on(Button.Pressed, "#plan-import")
+    def _b_import(self) -> None:
+        self._import()
+
+    @on(Button.Pressed, "#plan-backup")
+    def _b_backup(self) -> None:
+        self._backup()
+
+    @on(Button.Pressed, "#plan-done")
+    def _b_done(self) -> None:
+        self.dismiss(self._dirty)
+
+
 # --------------------------------------------------------------------------- #
 # Main app
 # --------------------------------------------------------------------------- #
@@ -3080,6 +3209,7 @@ class PlannerApp(App):
         Binding("L", "manage_label_catalog", "Labels"),
         Binding("R", "manage_member_catalog", "Members"),
         Binding("G", "manage_group_catalog", "Groups"),
+        Binding("S", "manage_plan", "Plan"),
         Binding("r", "refresh", "Refresh"),
         Binding("a", "toggle_auto_refresh", "Auto↻"),
         Binding("J", "move_down", "Down"),
@@ -3749,6 +3879,17 @@ class PlannerApp(App):
                          self._after_group_manage)
 
     def _after_group_manage(self, changed: bool | None) -> None:
+        if changed:
+            self.refresh_stories()
+
+    def action_manage_plan(self) -> None:
+        """Open the plan export/import/backup screen."""
+        assert self.conn is not None
+        db_path = str(Path(self.db_path) if self.db_path else db.DEFAULT_DB_PATH)
+        self.push_screen(PlanManagerScreen(self.conn, db_path),
+                         self._after_plan_manage)
+
+    def _after_plan_manage(self, changed: bool | None) -> None:
         if changed:
             self.refresh_stories()
 

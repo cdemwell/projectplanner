@@ -1066,6 +1066,99 @@ def test_tui_group_management(db_path):
     _run(main())
 
 
+def test_tui_plan_export_import_backup(db_path, tmp_path):
+    """The 'S' plan manager exports a snapshot, backs up the DB file, and
+    imports a snapshot (overwriting the current plan) after confirmation.
+    Export/import go through the backend plan module; backup copies the SQLite
+    file. See Story 52."""
+    import json
+    from pathlib import Path
+
+    from textual.widgets import Button, Input
+
+    from backend import db
+    from backend import plan as plan_mod
+    from backend import projects as proj_mod
+    from backend import stories as stories_mod
+    from tui.app import PlanManagerScreen
+
+    c = db.connect(db_path)
+    p = proj_mod.create_project(c, "backend")
+    stories_mod.create_story(c, "alpha", project_id=p.id)
+    stories_mod.create_story(c, "beta", project_id=p.id)
+    c.close()
+
+    snap = str(tmp_path / "snap.json")
+
+    async def main():
+        app = PlannerApp(db_path)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+
+            async def click(btn_id: str):
+                app.screen.query_one(btn_id, Button).focus()
+                await pilot.pause()
+                await pilot.press("enter")
+                await pilot.pause(0.05)
+                await pilot.pause()
+
+            async def confirm_yes():
+                app.screen.query_one("#yes", Button).focus()
+                await pilot.pause()
+                await pilot.press("enter")
+                await pilot.pause(0.05)
+                await pilot.pause()
+
+            # open the plan manager with 'S'
+            await pilot.press("S"); await pilot.pause()
+            assert isinstance(app.screen, PlanManagerScreen)
+
+            # export a JSON snapshot; the count matches the backend's own tally
+            expected = sum(len(v) for k, v in plan_mod.export_plan(app.conn).items()
+                           if k != "_meta")
+            await click("#plan-export")
+            app.screen.query_one("#p-value", Input).value = snap
+            await click("#ok")
+            status = str(app.screen.query_one("#plan-status").render()).strip()
+            assert status == f"Exported {expected} rows to {snap}"
+            with open(snap) as f:
+                snap_data = json.load(f)
+            assert snap_data["story"][0]["name"] == "alpha"
+
+            # backup copies the DB file to a timestamped sibling
+            await click("#plan-backup")
+            backups = list(Path(db_path).parent.glob(f"{Path(db_path).name}.*"))
+            assert len(backups) == 1
+            assert backups[0].exists()
+
+            # wipe every story, then import the snapshot to restore them
+            for s in stories_mod.list_stories(app.conn):
+                stories_mod.delete_story(app.conn, s.id)
+            assert stories_mod.list_stories(app.conn) == []
+
+            # cancel the destructive confirmation -> still empty
+            await click("#plan-import")
+            app.screen.query_one("#p-value", Input).value = snap
+            await click("#ok")
+            app.screen.query_one("#cancel", Button).focus(); await pilot.pause()
+            await pilot.press("enter"); await pilot.pause(0.05); await pilot.pause()
+            assert stories_mod.list_stories(app.conn) == []
+
+            # confirm the import -> stories restored, plan overwritten
+            await click("#plan-import")
+            app.screen.query_one("#p-value", Input).value = snap
+            await click("#ok")
+            await confirm_yes()
+            restored = stories_mod.list_stories(app.conn)
+            assert {s.name for s in restored} == {"alpha", "beta"}
+
+            # Done closes the screen; refresh ran without error
+            await click("#plan-done")
+            assert getattr(app, "_exception", None) is None
+            await pilot.press("q")
+    _run(main())
+
+
 def test_tui_refresh_keeps_cursor_position(db_path):
     """refresh_stories must not yank the cursor back to the top row."""
     from backend import db

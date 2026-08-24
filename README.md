@@ -174,7 +174,7 @@ python main.py --help                         # full CLI overview with examples
 | `c` | add comment | | `x` | task toggle/edit |
 | `t` | add task | | `o` | owners |
 | `r` | refresh | | `l` | labels |
-| `h` | links | | | |
+| `h` | links | | `S` | plan (export/import/backup) |
 | `d` | delete story | | `J` | move down |
 | `K` | move up | | `q` | quit |
 | `Ctrl+P` | command palette | | `v` | multi-select |
