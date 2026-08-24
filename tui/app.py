@@ -95,6 +95,7 @@ _PALETTE_COMMANDS: list[tuple[str, str]] = [
     ("Manage projects", "manage_projects"),
     ("Manage label catalog", "manage_label_catalog"),
     ("Manage member roster", "manage_member_catalog"),
+    ("Manage groups", "manage_group_catalog"),
     ("Toggle complete", "toggle_complete"),
     ("Delete story", "delete_story"),
     ("Refresh", "refresh"),
@@ -2533,6 +2534,220 @@ class MemberManagerScreen(ModalScreen[bool]):
         self.dismiss(self._dirty)
 
 
+class GroupFormScreen(ModalScreen[dict]):
+    """Collect name/description for a group.
+
+    Used both for creating a new group (``group=None``) and for editing an
+    existing one (pre-populated from the given
+    :class:`~backend.models.Group`). Dismisses with a dict of field values, or
+    None on cancel.
+    """
+
+    def __init__(self, conn: sqlite3.Connection, group=None) -> None:
+        super().__init__()
+        self.conn = conn
+        self.group = group  # Group | None
+
+    def compose(self) -> ComposeResult:
+        g = self.group
+        title = f"Edit group #{g.id}" if g else "New group"
+        yield VerticalScroll(
+            Static(title, classes="modal-title"),
+            Label("Name:"),
+            Input(value=g.name if g else "", id="gf-name"),
+            Label("Description:"),
+            TextArea(id="gf-desc"),
+            Horizontal(Button("Save", id="ok", variant="primary"),
+                       Button("Cancel", id="cancel")),
+            Label("", id="gf-err", classes="err"),
+            classes="modal-box",
+        )
+
+    def on_mount(self) -> None:
+        if self.group and self.group.description:
+            self.query_one("#gf-desc", TextArea).text = self.group.description
+        self.query_one("#gf-name", Input).focus()
+
+    def _submit(self) -> None:
+        name = self.query_one("#gf-name", Input).value.strip()
+        if not name:
+            self.query_one("#gf-err", Label).update("Name is required.")
+            return
+        self.dismiss({
+            "name": name,
+            "description": self.query_one("#gf-desc", TextArea).text,
+        })
+
+    @on(Button.Pressed, "#ok")
+    def _ok(self) -> None:
+        self._submit()
+
+    @on(Button.Pressed, "#cancel")
+    def _cancel(self) -> None:
+        self.dismiss(None)
+
+
+class GroupManagerScreen(ModalScreen[bool]):
+    """Manage groups: create, edit, archive/unarchive, and delete.
+
+    An OptionList lists every group; New/Edit/Archive/Delete/Done buttons drive
+    the flow. Create and edit open :class:`GroupFormScreen`; delete confirms via
+    :class:`ConfirmScreen`. Every operation goes through the backend ``groups``
+    module; backend errors surface in a status label.
+
+    Dismisses with:
+        bool: True if any change was made (caller refreshes), else None.
+    """
+
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        super().__init__()
+        self.conn = conn
+        self._dirty = False
+        self._group_ids: list[int] = []
+
+    def compose(self) -> ComposeResult:
+        yield VerticalScroll(
+            Static("Manage Groups", classes="modal-title"),
+            OptionList(id="gm-groups"),
+            Horizontal(
+                Button("New", id="gm-new", variant="primary"),
+                Button("Edit", id="gm-edit"),
+                Button("Archive", id="gm-archive"),
+                Button("Delete", id="gm-delete", variant="error"),
+                Button("Done", id="gm-done"),
+            ),
+            Label("", id="gm-status", classes="err"),
+            classes="modal-box",
+        )
+
+    def _status(self, msg: str) -> None:
+        self.query_one("#gm-status", Label).update(msg)
+
+    def _selected_id(self) -> int | None:
+        idx = self.query_one("#gm-groups", OptionList).highlighted
+        if idx is None or not (0 <= idx < len(self._group_ids)):
+            return None
+        return self._group_ids[idx]
+
+    def on_mount(self) -> None:
+        self._refresh()
+
+    def _refresh(self) -> None:
+        opts = self.query_one("#gm-groups", OptionList)
+        prev = opts.get_option_at_index(opts.highlighted).id if opts.option_count else None
+        gs = groups.list_groups(self.conn, include_archived=True)
+        self._group_ids = [g.id for g in gs]
+        opts.clear_options()
+        for g in gs:
+            suffix = " (archived)" if g.archived else ""
+            opts.add_option(Option(f"#{g.id} {g.name}{suffix}", id=str(g.id)))
+        if self._group_ids:
+            idx = 0
+            if prev:
+                for i, gid in enumerate(self._group_ids):
+                    if str(gid) == prev:
+                        idx = i
+                        break
+            opts.highlighted = idx
+
+    def _new(self) -> None:
+        self.app.push_screen(GroupFormScreen(self.conn), self._do_create)
+
+    def _do_create(self, fields: dict | None) -> None:
+        if fields is None:
+            return
+        try:
+            groups.create_group(self.conn, fields["name"],
+                                description=fields["description"])
+        except errors.PlannerError as e:
+            self._status(f"error: {e}")
+            return
+        self._dirty = True
+        self._refresh()
+        self._status(f"Created group '{fields['name']}'.")
+
+    def _edit(self) -> None:
+        gid = self._selected_id()
+        if gid is None:
+            self._status("Select a group to edit.")
+            return
+        self.app.push_screen(GroupFormScreen(self.conn,
+                                              group=groups.get_group(self.conn, gid)),
+                             lambda fields: self._do_update(gid, fields))
+
+    def _do_update(self, gid: int, fields: dict | None) -> None:
+        if fields is None:
+            return
+        try:
+            groups.update_group(self.conn, gid,
+                                name=fields["name"],
+                                description=fields["description"])
+        except errors.PlannerError as e:
+            self._status(f"error: {e}")
+            return
+        self._dirty = True
+        self._refresh()
+        self._status(f"Updated group '{fields['name']}'.")
+
+    def _archive(self) -> None:
+        gid = self._selected_id()
+        if gid is None:
+            self._status("Select a group to archive/unarchive.")
+            return
+        g = groups.get_group(self.conn, gid)
+        try:
+            groups.archive_group(self.conn, gid, archived=not g.archived)
+        except errors.PlannerError as e:
+            self._status(f"error: {e}")
+            return
+        self._dirty = True
+        self._refresh()
+        verb = "Unarchived" if g.archived else "Archived"
+        self._status(f"{verb} group '{g.name}'.")
+
+    def _delete(self) -> None:
+        gid = self._selected_id()
+        if gid is None:
+            self._status("Select a group to delete.")
+            return
+        g = groups.get_group(self.conn, gid)
+        self.app.push_screen(
+            ConfirmScreen(f"Delete group '#{g.id} {g.name}'?"),
+            lambda ok: self._do_delete(gid, ok))
+
+    def _do_delete(self, gid: int, ok: bool | None) -> None:
+        if not ok:
+            return
+        try:
+            groups.delete_group(self.conn, gid)
+        except errors.PlannerError as e:
+            self._status(f"error: {e}")
+            return
+        self._dirty = True
+        self._refresh()
+        self._status("Deleted group.")
+
+    @on(Button.Pressed, "#gm-new")
+    def _b_new(self) -> None:
+        self._new()
+
+    @on(Button.Pressed, "#gm-edit")
+    def _b_edit(self) -> None:
+        self._edit()
+
+    @on(Button.Pressed, "#gm-archive")
+    def _b_archive(self) -> None:
+        self._archive()
+
+    @on(Button.Pressed, "#gm-delete")
+    def _b_delete(self) -> None:
+        self._delete()
+
+    @on(Button.Pressed, "#gm-done")
+    def _b_done(self) -> None:
+        self.dismiss(self._dirty)
+
+
 # --------------------------------------------------------------------------- #
 # Main app
 # --------------------------------------------------------------------------- #
@@ -2589,6 +2804,7 @@ class PlannerApp(App):
         Binding("P", "manage_projects", "Projects"),
         Binding("L", "manage_label_catalog", "Labels"),
         Binding("R", "manage_member_catalog", "Members"),
+        Binding("G", "manage_group_catalog", "Groups"),
         Binding("r", "refresh", "Refresh"),
         Binding("a", "toggle_auto_refresh", "Auto↻"),
         Binding("J", "move_down", "Down"),
@@ -3223,6 +3439,16 @@ class PlannerApp(App):
                          self._after_member_manage)
 
     def _after_member_manage(self, changed: bool | None) -> None:
+        if changed:
+            self.refresh_stories()
+
+    def action_manage_group_catalog(self) -> None:
+        """Open the group management screen."""
+        assert self.conn is not None
+        self.push_screen(GroupManagerScreen(self.conn),
+                         self._after_group_manage)
+
+    def _after_group_manage(self, changed: bool | None) -> None:
         if changed:
             self.refresh_stories()
 

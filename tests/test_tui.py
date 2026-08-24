@@ -888,6 +888,94 @@ def test_tui_member_management(db_path):
     _run(main())
 
 
+def test_tui_group_management(db_path):
+    """The 'G' group manager creates, edits, archives, and deletes groups.
+
+    Exercises every flow: create, edit (name + description), archive/unarchive,
+    and delete with confirmation. All operations call the backend groups module.
+    See Story 48.
+    """
+    from textual.widgets import Button, Input, TextArea
+
+    from backend import db
+    from backend import groups as groups_mod
+    from tui.app import GroupManagerScreen
+
+    c = db.connect(db_path)
+    c.close()
+
+    async def main():
+        app = PlannerApp(db_path)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+
+            async def click(btn_id: str):
+                app.screen.query_one(btn_id, Button).focus()
+                await pilot.pause()
+                await pilot.press("enter")
+                await pilot.pause(0.1)
+                await pilot.pause()
+
+            async def confirm_yes():
+                app.screen.query_one("#yes", Button).focus()
+                await pilot.pause()
+                await pilot.press("enter")
+                await pilot.pause(0.1)
+                await pilot.pause()
+
+            # open the group manager with 'G'; no groups are seeded, so it's empty
+            await pilot.press("G"); await pilot.pause()
+            assert isinstance(app.screen, GroupManagerScreen)
+            assert app.screen.query_one("#gm-groups").option_count == 0
+
+            # create a group
+            await click("#gm-new")
+            app.screen.query_one("#gf-name", Input).value = "Frontend"
+            app.screen.query_one("#gf-desc", TextArea).text = "Web team"
+            await click("#ok")
+            gs = groups_mod.list_groups(app.conn)
+            assert len(gs) == 1
+            gid = gs[0].id
+            g = groups_mod.get_group(app.conn, gid)
+            assert g.name == "Frontend"
+            assert g.description == "Web team"
+            assert g.archived == 0
+
+            # edit: rename + change description
+            from textual.widgets import OptionList
+            app.screen.query_one("#gm-groups", OptionList).highlighted = 0
+            await click("#gm-edit")
+            app.screen.query_one("#gf-name", Input).value = "Frontend Guild"
+            app.screen.query_one("#gf-desc", TextArea).text = "Web + design"
+            await click("#ok")
+            g = groups_mod.get_group(app.conn, gid)
+            assert g.name == "Frontend Guild"
+            assert g.description == "Web + design"
+
+            # archive, then unarchive
+            app.screen.query_one("#gm-groups", OptionList).highlighted = 0
+            await pilot.pause()
+            await click("#gm-archive")
+            assert groups_mod.get_group(app.conn, gid).archived == 1
+            app.screen.query_one("#gm-groups", OptionList).highlighted = 0
+            await pilot.pause()
+            await click("#gm-archive")
+            assert groups_mod.get_group(app.conn, gid).archived == 0
+
+            # delete with confirmation
+            app.screen.query_one("#gm-groups", OptionList).highlighted = 0
+            await pilot.pause()
+            await click("#gm-delete")
+            await confirm_yes()
+            assert len(groups_mod.list_groups(app.conn)) == 0
+
+            # Done closes the screen; refresh ran without error
+            await click("#gm-done")
+            assert getattr(app, "_exception", None) is None
+            await pilot.press("q")
+    _run(main())
+
+
 def test_tui_refresh_keeps_cursor_position(db_path):
     """refresh_stories must not yank the cursor back to the top row."""
     from backend import db
