@@ -33,7 +33,6 @@ from textual.widgets import (
     Input,
     Label,
     OptionList,
-    RichLog,
     Select,
     Static,
     TextArea,
@@ -61,6 +60,7 @@ from backend import (
     workflows,
 )
 from backend.models import StoryComment
+from tui.detail import EntityDetailPane
 
 # Sentinels for "no selection" inside Select widgets (kept as int/str so all
 # option values share a type and we dodge the blank-selection API).
@@ -3438,9 +3438,10 @@ class PlannerApp(App):
         with Horizontal():
             with Vertical(id="list-pane"):
                 yield DataTable(id="stories", cursor_type="row")
-            # Right pane: read-only detail view, or an EditStoryPane when editing.
+            # Right pane: read-only generic detail view, or an EditStoryPane
+            # when editing.
             with VerticalScroll(id="detail"):
-                yield RichLog(id="detail-view", wrap=True, markup=True)
+                yield EntityDetailPane(id="detail-view")
         yield Footer()
 
     # --- story list -------------------------------------------------------- #
@@ -3529,9 +3530,8 @@ class PlannerApp(App):
             table.cursor_coordinate = (new_row, prev_col or 0)  # type: ignore[assignment]
             self.show_current_detail()
         else:
-            log = self.query_one("#detail-view", RichLog)
-            log.clear()
-            log.write("(no stories match the current filter — press 'n' to create one)")
+            pane = self.query_one("#detail-view", EntityDetailPane)
+            pane.show_message("(no stories match the current filter — press 'n' to create one)")
 
     def name_of(self, table: str, id: int) -> str:
         """Look up a name for a given ID in the specified table.
@@ -3577,53 +3577,16 @@ class PlannerApp(App):
         return self._current_story_id()
 
     def show_current_detail(self) -> None:
-        """Render the highlighted story's full details into the RichLog.
-        """
+        """Render the highlighted story's full details into the detail pane."""
         sid = self._detail_story_id()
         if sid is None:
             return
         assert self.conn is not None
+        pane = self.query_one("#detail-view", EntityDetailPane)
         try:
-            detail = stories.get_story_detail(self.conn, sid)
+            pane.show(self.conn, "story", sid)
         except errors.NotFound:
             return
-        log = self.query_one("#detail-view", RichLog)
-        log.clear()
-        s = detail.story
-        log.write(f"[bold]#{s.id}  {s.name}[/bold]  [{s.story_type}]")
-        st = detail.workflow_state
-        log.write(f"state: {st.name} ({st.type})" if st else "state: (none)")
-        log.write(f"project: {self.name_of('project', s.project_id) if s.project_id else '-'}"
-                  f"   epic: {self.name_of('epic', s.epic_id) if s.epic_id else '-'}"
-                  f"   iteration: {self.name_of('iteration', s.iteration_id) if s.iteration_id else '-'}")
-        log.write(f"owners: {', '.join(o.name for o in detail.owners) or '-'}"
-                  f"   labels: {', '.join(lb.name for lb in detail.labels) or '-'}")
-        if s.description:
-            log.write(f"desc: {s.description}")
-        log.write("tasks:")
-        if detail.tasks:
-            for t in detail.tasks:
-                log.write(f"  [{'x' if t.complete else ' '}] #{t.id} {t.description}")
-        else:
-            log.write("  (none)")
-        log.write("comments:")
-        cms = comments.list_comments(self.conn, sid)
-        if cms:
-            for cm in cms:
-                author = self.name_of("member", cm.author_id) if cm.author_id else "-"
-                indent = "    " if cm.parent_id else "  "
-                log.write(f"{indent}#{cm.id} {author}: {cm.text}")
-        else:
-            log.write("  (none)")
-        links = story_links.list_links(self.conn, sid)
-        if links:
-            log.write("links:")
-            for lk in links:
-                subj = self.name_of("story", lk.subject_story_id)
-                obj = self.name_of("story", lk.object_story_id)
-                log.write(f"  #{lk.id} {subj} --{lk.verb}--> {obj}")
-        if s.completed_at:
-            log.write(f"[green]completed: {s.completed_at}[/green]")
 
     @on(DataTable.RowHighlighted)
     def _on_highlight(self, event: DataTable.RowHighlighted) -> None:
@@ -3768,7 +3731,7 @@ class PlannerApp(App):
     def action_new_story(self) -> None:
         """Create a new story in the right detail pane."""
         assert self.conn is not None
-        self.query_one("#detail-view", RichLog).display = False
+        self.query_one("#detail-view").display = False
         pane = CreateStoryPane(self.conn,
                                on_saved=self._create_saved,
                                on_cancelled=self._create_cancelled)
@@ -3799,7 +3762,7 @@ class PlannerApp(App):
             except Exception:
                 pass
             self._create_pane = None
-        self.query_one("#detail-view", RichLog).display = True
+        self.query_one("#detail-view").display = True
 
     def action_edit_story(self) -> None:
         """Edit the selected story in-place in the right detail pane."""
@@ -3812,7 +3775,7 @@ class PlannerApp(App):
             self.bell()  # already editing
             return
         # Hide the read-only view and mount the edit form in its place.
-        self.query_one("#detail-view", RichLog).display = False
+        self.query_one("#detail-view").display = False
         pane = EditStoryPane(self.conn, sid,
                              on_saved=self._edit_saved,
                              on_cancelled=self._edit_cancelled)
@@ -3842,7 +3805,7 @@ class PlannerApp(App):
             except Exception:
                 pass
             self._edit_pane = None
-        self.query_one("#detail-view", RichLog).display = True
+        self.query_one("#detail-view").display = True
 
     def action_move_state(self) -> None:
         """Open modal to change the workflow state of the selected story/selection."""
