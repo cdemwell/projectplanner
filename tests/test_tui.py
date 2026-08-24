@@ -578,6 +578,78 @@ def test_tui_iteration_management(db_path):
     _run(main())
 
 
+def test_tui_milestone_management(db_path):
+    """The 'M' milestone manager creates, edits, and deletes milestones.
+
+    Exercises every flow: create, edit (name/description/state), and delete
+    with confirmation. All operations call the backend milestones module. See
+    Story 44.
+    """
+    from textual.widgets import Button, Input, Select
+
+    from backend import db
+    from backend import milestones as ms_mod
+    from tui.app import MilestoneManagerScreen
+
+    c = db.connect(db_path)
+    c.close()
+
+    async def main():
+        app = PlannerApp(db_path)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+
+            async def click(btn_id: str):
+                app.screen.query_one(btn_id, Button).focus()
+                await pilot.pause()
+                await pilot.press("enter")
+                await pilot.pause(0.05)
+                await pilot.pause()
+
+            async def confirm_yes():
+                app.screen.query_one("#yes", Button).focus()
+                await pilot.pause()
+                await pilot.press("enter")
+                await pilot.pause(0.05)
+                await pilot.pause()
+
+            # open the milestone manager with 'M'
+            await pilot.press("M"); await pilot.pause()
+            assert isinstance(app.screen, MilestoneManagerScreen)
+            assert app.screen.query_one("#mm-milestones").option_count == 0
+
+            # create a milestone
+            await click("#mm-new")
+            app.screen.query_one("#mf-name", Input).value = "MVP"
+            app.screen.query_one("#mf-desc").text = "First release"
+            await click("#ok")
+            mss = ms_mod.list_milestones(app.conn)
+            assert len(mss) == 1
+            mid = mss[0].id
+            assert mss[0].state == "planned"
+            assert mss[0].description == "First release"
+
+            # edit: rename + state
+            await click("#mm-edit")
+            app.screen.query_one("#mf-name", Input).value = "Launch"
+            app.screen.query_one("#mf-state", Select).value = "in_progress"
+            await click("#ok")
+            ms = ms_mod.get_milestone(app.conn, mid)
+            assert ms.name == "Launch"
+            assert ms.state == "in_progress"
+
+            # delete with confirmation
+            await click("#mm-delete")
+            await confirm_yes()
+            assert ms_mod.list_milestones(app.conn) == []
+
+            # Done closes the screen; refresh ran without error
+            await click("#mm-done")
+            assert getattr(app, "_exception", None) is None
+            await pilot.press("q")
+    _run(main())
+
+
 def test_tui_refresh_keeps_cursor_position(db_path):
     """refresh_stories must not yank the cursor back to the top row."""
     from backend import db

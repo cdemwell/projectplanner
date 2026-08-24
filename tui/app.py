@@ -91,6 +91,7 @@ _PALETTE_COMMANDS: list[tuple[str, str]] = [
     ("Manage workflows", "manage_workflows"),
     ("Manage epics", "manage_epics"),
     ("Manage iterations", "manage_iterations"),
+    ("Manage milestones", "manage_milestones"),
     ("Toggle complete", "toggle_complete"),
     ("Delete story", "delete_story"),
     ("Refresh", "refresh"),
@@ -1717,6 +1718,206 @@ class IterationManagerScreen(ModalScreen[bool]):
         self.dismiss(self._dirty)
 
 
+class MilestoneFormScreen(ModalScreen[dict]):
+    """Collect name/description/state for a milestone.
+
+    Used both for creating a new milestone (``milestone=None``) and for editing
+    an existing one (pre-populated from the given
+    :class:`~backend.models.Milestone`). All operations call the backend
+    ``milestones`` module. Dismisses with a dict of field values, or None on
+    cancel.
+    """
+
+    def __init__(self, conn: sqlite3.Connection, milestone=None) -> None:
+        super().__init__()
+        self.conn = conn
+        self.milestone = milestone  # Milestone | None
+
+    def compose(self) -> ComposeResult:
+        ms = self.milestone
+        state_opts = [(s, s) for s in milestones.STATES]
+        title = f"Edit milestone #{ms.id}" if ms else "New milestone"
+        yield VerticalScroll(
+            Static(title, classes="modal-title"),
+            Label("Name:"),
+            Input(value=ms.name if ms else "", id="mf-name"),
+            Label("Description:"),
+            TextArea(id="mf-desc"),
+            Label("State:"),
+            Select(state_opts, value=(ms.state if ms else "planned"), id="mf-state"),
+            Horizontal(Button("Save", id="ok", variant="primary"),
+                       Button("Cancel", id="cancel")),
+            Label("", id="mf-err", classes="err"),
+            classes="modal-box",
+        )
+
+    def on_mount(self) -> None:
+        if self.milestone and self.milestone.description:
+            self.query_one("#mf-desc", TextArea).text = self.milestone.description
+        self.query_one("#mf-name", Input).focus()
+
+    def _submit(self) -> None:
+        name = self.query_one("#mf-name", Input).value.strip()
+        if not name:
+            self.query_one("#mf-err", Label).update("Name is required.")
+            return
+        state = self.query_one("#mf-state", Select).value
+        if state not in milestones.STATES:
+            self.query_one("#mf-err", Label).update("Invalid state.")
+            return
+        self.dismiss({
+            "name": name,
+            "description": self.query_one("#mf-desc", TextArea).text,
+            "state": state,
+        })
+
+    @on(Button.Pressed, "#ok")
+    def _ok(self) -> None:
+        self._submit()
+
+    @on(Button.Pressed, "#cancel")
+    def _cancel(self) -> None:
+        self.dismiss(None)
+
+
+class MilestoneManagerScreen(ModalScreen[bool]):
+    """Manage milestones: create, edit, and delete.
+
+    An OptionList lists every milestone; New/Edit/Delete/Done buttons drive the
+    flow. Create and edit open :class:`MilestoneFormScreen`; delete confirms via
+    :class:`ConfirmScreen`. Every operation goes through the backend
+    ``milestones`` module; backend errors surface in a status label.
+
+    Dismisses with:
+        bool: True if any change was made (caller refreshes), else None.
+    """
+
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        super().__init__()
+        self.conn = conn
+        self._dirty = False
+        self._milestone_ids: list[int] = []
+
+    def compose(self) -> ComposeResult:
+        yield VerticalScroll(
+            Static("Manage Milestones", classes="modal-title"),
+            OptionList(id="mm-milestones"),
+            Horizontal(
+                Button("New", id="mm-new", variant="primary"),
+                Button("Edit", id="mm-edit"),
+                Button("Delete", id="mm-delete", variant="error"),
+                Button("Done", id="mm-done"),
+            ),
+            Label("", id="mm-status", classes="err"),
+            classes="modal-box",
+        )
+
+    def _status(self, msg: str) -> None:
+        self.query_one("#mm-status", Label).update(msg)
+
+    def _selected_id(self) -> int | None:
+        idx = self.query_one("#mm-milestones", OptionList).highlighted
+        if idx is None or not (0 <= idx < len(self._milestone_ids)):
+            return None
+        return self._milestone_ids[idx]
+
+    def on_mount(self) -> None:
+        self._refresh()
+
+    def _refresh(self) -> None:
+        opts = self.query_one("#mm-milestones", OptionList)
+        prev = opts.get_option_at_index(opts.highlighted).id if opts.option_count else None
+        mss = milestones.list_milestones(self.conn)
+        self._milestone_ids = [m.id for m in mss]
+        opts.clear_options()
+        for ms in mss:
+            opts.add_option(Option(f"#{ms.id} {ms.name} ({ms.state})", id=str(ms.id)))
+        if self._milestone_ids:
+            idx = 0
+            if prev:
+                for i, mid in enumerate(self._milestone_ids):
+                    if str(mid) == prev:
+                        idx = i
+                        break
+            opts.highlighted = idx
+
+    def _new(self) -> None:
+        self.app.push_screen(MilestoneFormScreen(self.conn), self._do_create)
+
+    def _do_create(self, fields: dict | None) -> None:
+        if fields is None:
+            return
+        try:
+            milestones.create_milestone(self.conn, fields["name"],
+                                        description=fields["description"],
+                                        state=fields["state"])
+        except errors.PlannerError as e:
+            self._status(f"error: {e}")
+            return
+        self._dirty = True
+        self._refresh()
+        self._status(f"Created milestone '{fields['name']}'.")
+
+    def _edit(self) -> None:
+        mid = self._selected_id()
+        if mid is None:
+            self._status("Select a milestone to edit.")
+            return
+        self.app.push_screen(MilestoneFormScreen(self.conn, milestone=milestones.get_milestone(self.conn, mid)),
+                             lambda fields: self._do_update(mid, fields))
+
+    def _do_update(self, mid: int, fields: dict | None) -> None:
+        if fields is None:
+            return
+        try:
+            milestones.update_milestone(self.conn, mid, name=fields["name"],
+                                        description=fields["description"],
+                                        state=fields["state"])
+        except errors.PlannerError as e:
+            self._status(f"error: {e}")
+            return
+        self._dirty = True
+        self._refresh()
+        self._status(f"Updated milestone '{fields['name']}'.")
+
+    def _delete(self) -> None:
+        mid = self._selected_id()
+        if mid is None:
+            self._status("Select a milestone to delete.")
+            return
+        ms = milestones.get_milestone(self.conn, mid)
+        self.app.push_screen(ConfirmScreen(f"Delete milestone '#{ms.id} {ms.name}'?"),
+                             lambda ok: self._do_delete(mid, ok))
+
+    def _do_delete(self, mid: int, ok: bool | None) -> None:
+        if not ok:
+            return
+        try:
+            milestones.delete_milestone(self.conn, mid)
+        except errors.PlannerError as e:
+            self._status(f"error: {e}")
+            return
+        self._dirty = True
+        self._refresh()
+        self._status("Deleted milestone.")
+
+    @on(Button.Pressed, "#mm-new")
+    def _b_new(self) -> None:
+        self._new()
+
+    @on(Button.Pressed, "#mm-edit")
+    def _b_edit(self) -> None:
+        self._edit()
+
+    @on(Button.Pressed, "#mm-delete")
+    def _b_delete(self) -> None:
+        self._delete()
+
+    @on(Button.Pressed, "#mm-done")
+    def _b_done(self) -> None:
+        self.dismiss(self._dirty)
+
+
 # --------------------------------------------------------------------------- #
 # Main app
 # --------------------------------------------------------------------------- #
@@ -1769,6 +1970,7 @@ class PlannerApp(App):
         Binding("w", "manage_workflows", "Workflows"),
         Binding("E", "manage_epics", "Epics"),
         Binding("I", "manage_iterations", "Iterations"),
+        Binding("M", "manage_milestones", "Milestones"),
         Binding("r", "refresh", "Refresh"),
         Binding("a", "toggle_auto_refresh", "Auto↻"),
         Binding("J", "move_down", "Down"),
@@ -2363,6 +2565,16 @@ class PlannerApp(App):
                          self._after_iteration_manage)
 
     def _after_iteration_manage(self, changed: bool | None) -> None:
+        if changed:
+            self.refresh_stories()
+
+    def action_manage_milestones(self) -> None:
+        """Open the milestone management screen."""
+        assert self.conn is not None
+        self.push_screen(MilestoneManagerScreen(self.conn),
+                         self._after_milestone_manage)
+
+    def _after_milestone_manage(self, changed: bool | None) -> None:
         if changed:
             self.refresh_stories()
 
