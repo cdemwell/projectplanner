@@ -88,6 +88,7 @@ _PALETTE_COMMANDS: list[tuple[str, str]] = [
     ("Filter", "filter"),
     ("Browse", "browse"),
     ("Search", "search"),
+    ("Manage workflows", "manage_workflows"),
     ("Toggle complete", "toggle_complete"),
     ("Delete story", "delete_story"),
     ("Refresh", "refresh"),
@@ -910,6 +911,381 @@ class EntityBrowserScreen(ModalScreen[tuple]):
         self.dismiss(None)
 
 
+class PromptScreen(ModalScreen[str]):
+    """Collects a single line of text (a name).
+
+    Dismisses with:
+        str: The entered text, or None on cancel.
+    """
+
+    def __init__(self, title: str, value: str = "") -> None:
+        super().__init__()
+        self._title = title
+        self._value = value
+
+    def compose(self) -> ComposeResult:
+        yield VerticalScroll(
+            Static(self._title, classes="modal-title"),
+            Input(value=self._value, id="p-value"),
+            Horizontal(Button("OK", id="ok", variant="primary"),
+                       Button("Cancel", id="cancel")),
+            classes="modal-box",
+        )
+
+    def on_mount(self) -> None:
+        self.query_one("#p-value", Input).focus()
+
+    @on(Button.Pressed, "#ok")
+    def _ok(self) -> None:
+        self.dismiss(self.query_one("#p-value", Input).value)
+
+    @on(Button.Pressed, "#cancel")
+    def _cancel(self) -> None:
+        self.dismiss(None)
+
+    @on(Input.Submitted, "#p-value")
+    def _submitted(self, event: Input.Submitted) -> None:
+        self.dismiss(event.value)
+
+
+class AddStateScreen(ModalScreen[tuple]):
+    """Collects a name and type for a new workflow state.
+
+    Dismisses with:
+        tuple: (name, type), or None on cancel.
+    """
+
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        super().__init__()
+        self.conn = conn
+
+    def compose(self) -> ComposeResult:
+        yield VerticalScroll(
+            Static("Add workflow state", classes="modal-title"),
+            Label("Name:"),
+            Input(id="as-name"),
+            Label("Type:"),
+            Select([(t, t) for t in workflows.STATE_TYPES],
+                   value="unstarted", id="as-type"),
+            Horizontal(Button("Add", id="ok", variant="primary"),
+                       Button("Cancel", id="cancel")),
+            Label("", id="as-err", classes="err"),
+            classes="modal-box",
+        )
+
+    def on_mount(self) -> None:
+        self.query_one("#as-name", Input).focus()
+
+    @on(Button.Pressed, "#ok")
+    def _ok(self) -> None:
+        name = self.query_one("#as-name", Input).value.strip()
+        if not name:
+            self.query_one("#as-err", Label).update("Name is required.")
+            return
+        self.dismiss((name, self.query_one("#as-type", Select).value))
+
+    @on(Button.Pressed, "#cancel")
+    def _cancel(self) -> None:
+        self.dismiss(None)
+
+
+class WorkflowManagerScreen(ModalScreen[bool]):
+    """Manage workflows and their states.
+
+    A workflow selector (left) lists every workflow; a state selector (right)
+    lists the selected workflow's states in order. Buttons create/rename/delete
+    workflows and add/rename/delete/reorder states. Every operation goes
+    through the backend ``workflows`` module; destructive deletes confirm first
+    via :class:`ConfirmScreen`. Backend errors are shown in a status label.
+
+    Dismisses with:
+        bool: True if any change was made (caller refreshes), else None.
+    """
+
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        super().__init__()
+        self.conn = conn
+        self._dirty = False
+        self._wf_ids: list[int] = []
+        self._state_ids: list[int] = []
+
+    def compose(self) -> ComposeResult:
+        yield VerticalScroll(
+            Static("Workflows & States", classes="modal-title"),
+            Horizontal(
+                Vertical(Static("Workflows", classes="modal-subtitle"),
+                         OptionList(id="wm-workflows")),
+                Vertical(Static("States", classes="modal-subtitle"),
+                         OptionList(id="wm-states")),
+            ),
+            Horizontal(
+                Button("New WF", id="wf-new"),
+                Button("Rename WF", id="wf-rename"),
+                Button("Delete WF", id="wf-delete", variant="error"),
+            ),
+            Horizontal(
+                Button("Add State", id="st-add"),
+                Button("Rename State", id="st-rename"),
+                Button("Delete State", id="st-delete", variant="error"),
+                Button("↑", id="st-up"),
+                Button("↓", id="st-down"),
+            ),
+            Button("Done", id="done", variant="primary"),
+            Label("", id="wm-status", classes="err"),
+            classes="workflow-box",
+        )
+
+    # --- helpers ---------------------------------------------------------- #
+    @staticmethod
+    def _option_id(opts: OptionList) -> str | None:
+        """Return the id string of the highlighted option, or None."""
+        if opts.option_count == 0:
+            return None
+        return opts.get_option_at_index(opts.highlighted).id
+
+    def _selected_wf(self) -> int | None:
+        idx = self.query_one("#wm-workflows", OptionList).highlighted
+        if idx is None or not (0 <= idx < len(self._wf_ids)):
+            return None
+        return self._wf_ids[idx]
+
+    def _selected_state(self) -> int | None:
+        idx = self.query_one("#wm-states", OptionList).highlighted
+        if idx is None or not (0 <= idx < len(self._state_ids)):
+            return None
+        return self._state_ids[idx]
+
+    def _status(self, msg: str) -> None:
+        self.query_one("#wm-status", Label).update(msg)
+
+    # --- population ------------------------------------------------------- #
+    def on_mount(self) -> None:
+        self._refresh_workflows()
+
+    def _refresh_workflows(self) -> None:
+        opts = self.query_one("#wm-workflows", OptionList)
+        prev = self._option_id(opts)
+        wfs = workflows.list_workflows(self.conn)
+        self._wf_ids = [w.id for w in wfs]
+        opts.clear_options()
+        for w in wfs:
+            opts.add_option(Option(w.name, id=str(w.id)))
+        if self._wf_ids:
+            idx = 0
+            if prev:
+                for i, wid in enumerate(self._wf_ids):
+                    if str(wid) == prev:
+                        idx = i
+                        break
+            opts.highlighted = idx
+        self._refresh_states()
+
+    def _refresh_states(self) -> None:
+        opts = self.query_one("#wm-states", OptionList)
+        wf_id = self._selected_wf()
+        states = (workflows.list_workflow_states(self.conn, wf_id)
+                  if wf_id is not None else [])
+        self._state_ids = [s.id for s in states]
+        opts.clear_options()
+        for s in states:
+            opts.add_option(Option(f"{s.name} ({s.type})", id=str(s.id)))
+        if self._state_ids:
+            opts.highlighted = 0
+
+    @on(OptionList.OptionHighlighted, "#wm-workflows")
+    def _on_wf_highlight(self) -> None:
+        self._refresh_states()
+
+    # --- workflow actions ------------------------------------------------- #
+    def _new_workflow(self) -> None:
+        self.app.push_screen(PromptScreen("New workflow name"), self._create_workflow)
+
+    def _create_workflow(self, name: str | None) -> None:
+        if not name or not name.strip():
+            return
+        try:
+            workflows.create_workflow(self.conn, name.strip())
+        except errors.PlannerError as e:
+            self._status(f"error: {e}")
+            return
+        self._dirty = True
+        self._refresh_workflows()
+        self._status(f"Created workflow '{name.strip()}'")
+
+    def _rename_workflow(self) -> None:
+        wf_id = self._selected_wf()
+        if wf_id is None:
+            self._status("Select a workflow to rename.")
+            return
+        name = workflows.get_workflow(self.conn, wf_id).name
+        self.app.push_screen(PromptScreen("Rename workflow", value=name),
+                         lambda new: self._do_rename_workflow(wf_id, new))
+
+    def _do_rename_workflow(self, wf_id: int, new: str | None) -> None:
+        if not new or not new.strip():
+            return
+        try:
+            workflows.update_workflow(self.conn, wf_id, name=new.strip())
+        except errors.PlannerError as e:
+            self._status(f"error: {e}")
+            return
+        self._dirty = True
+        self._refresh_workflows()
+        self._status(f"Renamed workflow to '{new.strip()}'")
+
+    def _delete_workflow(self) -> None:
+        wf_id = self._selected_wf()
+        if wf_id is None:
+            self._status("Select a workflow to delete.")
+            return
+        wf = workflows.get_workflow(self.conn, wf_id)
+        self.app.push_screen(ConfirmScreen(f"Delete workflow '{wf.name}' and its states?"),
+                         lambda ok: self._do_delete_workflow(wf_id, ok))
+
+    def _do_delete_workflow(self, wf_id: int, ok: bool | None) -> None:
+        if not ok:
+            return
+        try:
+            workflows.delete_workflow(self.conn, wf_id)
+        except errors.PlannerError as e:
+            self._status(f"error: {e}")
+            return
+        self._dirty = True
+        self._refresh_workflows()
+        self._status("Deleted workflow.")
+
+    # --- state actions ---------------------------------------------------- #
+    def _add_state(self) -> None:
+        wf_id = self._selected_wf()
+        if wf_id is None:
+            self._status("Select a workflow first.")
+            return
+        self.app.push_screen(AddStateScreen(self.conn),
+                         lambda res: self._do_add_state(wf_id, res))
+
+    def _do_add_state(self, wf_id: int, res: tuple | None) -> None:
+        if res is None:
+            return
+        name, stype = res
+        try:
+            workflows.create_workflow_state(self.conn, wf_id, name, stype)
+        except errors.PlannerError as e:
+            self._status(f"error: {e}")
+            return
+        self._dirty = True
+        self._refresh_states()
+        self._status(f"Added state '{name}'.")
+
+    def _rename_state(self) -> None:
+        wf_id = self._selected_wf()
+        sid = self._selected_state()
+        if wf_id is None or sid is None:
+            self._status("Select a workflow and state to rename.")
+            return
+        st = workflows.get_workflow_state(self.conn, sid)
+        self.app.push_screen(PromptScreen("Rename state", value=st.name),
+                         lambda new: self._do_rename_state(sid, new))
+
+    def _do_rename_state(self, sid: int, new: str | None) -> None:
+        if not new or not new.strip():
+            return
+        try:
+            workflows.update_workflow_state(self.conn, sid, name=new.strip())
+        except errors.PlannerError as e:
+            self._status(f"error: {e}")
+            return
+        self._dirty = True
+        self._refresh_states()
+        self._status(f"Renamed state to '{new.strip()}'")
+
+    def _delete_state(self) -> None:
+        wf_id = self._selected_wf()
+        sid = self._selected_state()
+        if wf_id is None or sid is None:
+            self._status("Select a workflow and state to delete.")
+            return
+        st = workflows.get_workflow_state(self.conn, sid)
+        self.app.push_screen(ConfirmScreen(f"Delete state '{st.name}'?"),
+                         lambda ok: self._do_delete_state(sid, ok))
+
+    def _do_delete_state(self, sid: int, ok: bool | None) -> None:
+        if not ok:
+            return
+        try:
+            workflows.delete_workflow_state(self.conn, sid)
+        except errors.PlannerError as e:
+            self._status(f"error: {e}")
+            return
+        self._dirty = True
+        self._refresh_states()
+        self._status("Deleted state.")
+
+    def _move_state(self, delta: int) -> None:
+        wf_id = self._selected_wf()
+        sid = self._selected_state()
+        if wf_id is None or sid is None:
+            self._status("Select a state to move.")
+            return
+        states = workflows.list_workflow_states(self.conn, wf_id)
+        idx = next((i for i, s in enumerate(states) if s.id == sid), None)
+        if idx is None:
+            return
+        target = idx + delta
+        if target < 0 or target >= len(states):
+            self._status("Already at the edge.")
+            return
+        a, b = states[idx], states[target]
+        try:
+            pa, pb = a.position, b.position
+            workflows.update_workflow_state(self.conn, a.id, position=pb)
+            workflows.update_workflow_state(self.conn, b.id, position=pa)
+        except errors.PlannerError as e:
+            self._status(f"error: {e}")
+            return
+        self._dirty = True
+        self._refresh_states()
+        opts = self.query_one("#wm-states", OptionList)
+        opts.highlighted = target
+        self._status(f"Moved state '{a.name}'.")
+
+    # --- button dispatch -------------------------------------------------- #
+    @on(Button.Pressed, "#wf-new")
+    def _b_wf_new(self) -> None:
+        self._new_workflow()
+
+    @on(Button.Pressed, "#wf-rename")
+    def _b_wf_rename(self) -> None:
+        self._rename_workflow()
+
+    @on(Button.Pressed, "#wf-delete")
+    def _b_wf_delete(self) -> None:
+        self._delete_workflow()
+
+    @on(Button.Pressed, "#st-add")
+    def _b_st_add(self) -> None:
+        self._add_state()
+
+    @on(Button.Pressed, "#st-rename")
+    def _b_st_rename(self) -> None:
+        self._rename_state()
+
+    @on(Button.Pressed, "#st-delete")
+    def _b_st_delete(self) -> None:
+        self._delete_state()
+
+    @on(Button.Pressed, "#st-up")
+    def _b_st_up(self) -> None:
+        self._move_state(-1)
+
+    @on(Button.Pressed, "#st-down")
+    def _b_st_down(self) -> None:
+        self._move_state(1)
+
+    @on(Button.Pressed, "#done")
+    def _done(self) -> None:
+        self.dismiss(self._dirty)
+
+
 # --------------------------------------------------------------------------- #
 # Main app
 # --------------------------------------------------------------------------- #
@@ -932,6 +1308,13 @@ class PlannerApp(App):
         width: 60; height: auto; max-height: 60%;
         background: $panel; border: solid $primary; padding: 1 2;
     }
+    .workflow-box {
+        width: 96; height: auto; max-height: 85%;
+        background: $panel; border: solid $primary; padding: 1 2;
+    }
+    .modal-subtitle { text-style: bold; margin-bottom: 1; }
+    #wm-workflows { height: 14; }
+    #wm-states { height: 14; }
     #pal-options { height: auto; max-height: 30; }
     .modal-title { text-style: bold; margin-bottom: 1; }
     .err { color: $error; }
@@ -952,6 +1335,7 @@ class PlannerApp(App):
         Binding("f", "filter", "Filter"),
         Binding("b", "browse", "Browse"),
         Binding("slash", "search", "Search"),  # '/'
+        Binding("w", "manage_workflows", "Workflows"),
         Binding("r", "refresh", "Refresh"),
         Binding("a", "toggle_auto_refresh", "Auto↻"),
         Binding("J", "move_down", "Down"),
@@ -1519,6 +1903,16 @@ class PlannerApp(App):
     def action_search(self) -> None:
         """Open modal to search stories by keyword."""
         self.push_screen(SearchInputScreen(), self._after_search)
+
+    def action_manage_workflows(self) -> None:
+        """Open the workflow & states management screen."""
+        assert self.conn is not None
+        self.push_screen(WorkflowManagerScreen(self.conn),
+                         self._after_workflow_manage)
+
+    def _after_workflow_manage(self, changed: bool | None) -> None:
+        if changed:
+            self.refresh_stories()
 
     def action_browse(self) -> None:
         """Open a menu to browse a container entity, then filter stories by it."""

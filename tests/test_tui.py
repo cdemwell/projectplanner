@@ -336,6 +336,92 @@ def test_tui_command_palette(db_path):
     _run(main())
 
 
+def test_tui_manage_workflows_and_states(db_path):
+    """The 'w' workflow manager creates/renames/deletes workflows and states.
+
+    Exercises every button: rename workflow, add state, rename state, reorder a
+    state, delete a state, delete a workflow — all via the backend. Deletes
+    confirm first. See Story 41.
+    """
+    from textual.widgets import Button, Input
+
+    from backend import db, workflows
+    from tui.app import WorkflowManagerScreen
+
+    c = db.connect(db_path)  # db_path fixture seeds the default workflow
+    wf = workflows.list_workflows(c)[0]
+    c.close()
+
+    async def main():
+        app = PlannerApp(db_path)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+
+            async def click(btn_id: str):
+                app.screen.query_one(btn_id, Button).focus()
+                await pilot.pause()
+                await pilot.press("enter")
+                await pilot.pause(0.05)
+                await pilot.pause()
+
+            async def confirm_yes():
+                app.screen.query_one("#yes", Button).focus()
+                await pilot.pause()
+                await pilot.press("enter")
+                await pilot.pause(0.05)
+                await pilot.pause()
+
+            # open the workflow manager with 'w'
+            await pilot.press("w"); await pilot.pause()
+            assert isinstance(app.screen, WorkflowManagerScreen)
+            assert app.screen.query_one("#wm-workflows").option_count == 1
+
+            # rename the workflow
+            await click("#wf-rename")
+            app.screen.query_one("#p-value", Input).value = "Renamed WF"
+            await click("#ok")
+            assert workflows.get_workflow(app.conn, wf.id).name == "Renamed WF"
+
+            # add a state (name "Review", default unstarted type)
+            await click("#st-add")
+            app.screen.query_one("#as-name", Input).value = "Review"
+            await click("#ok")
+            assert [s.name for s in workflows.list_workflow_states(app.conn, wf.id)] \
+                == ["Unstarted", "Started", "Done", "Review"]
+
+            # rename the just-added state
+            app.screen.query_one("#wm-states").highlighted = 3
+            await click("#st-rename")
+            app.screen.query_one("#p-value", Input).value = "QA"
+            await click("#ok")
+            assert [s.name for s in workflows.list_workflow_states(app.conn, wf.id)] \
+                == ["Unstarted", "Started", "Done", "QA"]
+
+            # reorder: move the first state (Unstarted) down one slot
+            app.screen.query_one("#wm-states").highlighted = 0
+            await click("#st-down")
+            names = [s.name for s in workflows.list_workflow_states(app.conn, wf.id)]
+            assert names == ["Started", "Unstarted", "Done", "QA"], names
+
+            # delete the QA state (with confirmation)
+            app.screen.query_one("#wm-states").highlighted = 3
+            await click("#st-delete")
+            await confirm_yes()
+            assert [s.name for s in workflows.list_workflow_states(app.conn, wf.id)] \
+                == ["Started", "Unstarted", "Done"]
+
+            # delete the workflow (with confirmation)
+            await click("#wf-delete")
+            await confirm_yes()
+            assert workflows.list_workflows(app.conn) == []
+
+            # Done closes the screen; refresh ran without error
+            await click("#done")
+            assert getattr(app, "_exception", None) is None
+            await pilot.press("q")
+    _run(main())
+
+
 def test_tui_refresh_keeps_cursor_position(db_path):
     """refresh_stories must not yank the cursor back to the top row."""
     from backend import db
