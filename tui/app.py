@@ -340,6 +340,22 @@ _PARENT_LISTERS: dict[str, Callable[[sqlite3.Connection], list[Any]]] = {
     "member": members.list_members,
 }
 
+# Backend delete function for each parent entity kind that supports deletion.
+# Used by generic multi-select bulk delete (story 80); single-item delete flows
+# (stories 74-79) keep their own per-kind helpers.
+_BULK_DELETERS: dict[str, Callable[[sqlite3.Connection, int], None]] = {
+    "story": stories.delete_story,
+    "epic": epics.delete_epic,
+    "iteration": iterations.delete_iteration,
+    "milestone": milestones.delete_milestone,
+    "project": projects.delete_project,
+    "group": groups.delete_group,
+    "workflow": workflows.delete_workflow,
+    "workflow_state": workflows.delete_workflow_state,
+    "label": labels.delete_label,
+    "member": members.delete_member,
+}
+
 
 class EntityListPane(DataTable):
     """A reusable DataTable that renders any entity type.
@@ -4692,21 +4708,24 @@ class PlannerApp(App):
         items = self._parent_rows()
         pane = self.query_one("#stories", EntityListPane)
         pane.set_columns(ENTITY_COLUMNS[entity])
-        pane.set_items(items, conn=self.conn)
-        # Selections are story-specific; reset them for other parent kinds.
-        self._selected = set()
+        # Keep the multi-select scoped to the currently-focused parent entity
+        # type; drop ids that no longer exist so reverse-highlighting stays
+        # correct (story 80).
+        self._selected &= {it.id for it in items}
+        pane.set_items(items, conn=self.conn, selected=self._selected)
         scope = self._drill_scope()
+        multi = self._multi_caption()
         if scope is not None:
             parent_kind, parent_id = scope
             label = self.name_of(parent_kind, parent_id)
             self.query_one("#filter-bar", Static).update(
-                f"{label} ▸ {entity}  ({len(items)} rows)")
+                f"{label} ▸ {entity}  ({len(items)} rows){multi}")
         elif entity == "story":
             self.query_one("#filter-bar", Static).update(
-                f"(all stories)  ({len(items)} stories)")
+                f"(all stories)  ({len(items)} stories){multi}")
         else:
             self.query_one("#filter-bar", Static).update(
-                f"browsing {entity}  ({len(items)} rows)")
+                f"browsing {entity}  ({len(items)} rows){multi}")
         self.refresh_children()
         if items:
             self.show_current_detail()
@@ -4828,6 +4847,9 @@ class PlannerApp(App):
             return
         self._drill_stack.clear()
         self.parent_entity = entity
+        # A multi-select is scoped to the previous kind; reset it on switch.
+        self._multi_select = False
+        self._selected.clear()
         self.refresh_parent()
 
     def action_switch_to_story(self) -> None:
@@ -4944,6 +4966,12 @@ class PlannerApp(App):
             return []
         return sorted(self._selected)
 
+    def _multi_caption(self) -> str:
+        """A ``[MULTI]`` caption suffix when multi-select has active selections."""
+        if not self._multi_select:
+            return ""
+        return f"  [MULTI] {len(self._selected)} selected"
+
     def action_toggle_multiselect(self) -> None:
         """Enter or exit multi-select (visual) mode."""
         if self._multi_select:
@@ -4963,20 +4991,22 @@ class PlannerApp(App):
         self.refresh_stories()
 
     def action_toggle_select(self) -> None:
-        """Toggle the current row's selection (Space) in multi-select mode."""
-        if self.parent_entity != "story":
-            self.bell()
-            return
+        """Toggle the current row's selection (Space) in multi-select mode.
+
+        Works on any parent entity kind (stories plus the other browsable
+        kinds), since :attr:`_selected` tracks ids of the currently-focused
+        parent entity type (story 80).
+        """
         if not self._multi_select:
             return
-        sid = self._current_story_id()
-        if sid is None:
+        eid = self._current_story_id()
+        if eid is None:
             self.bell()
             return
-        if sid in self._selected:
-            self._selected.discard(sid)
+        if eid in self._selected:
+            self._selected.discard(eid)
         else:
-            self._selected.add(sid)
+            self._selected.add(eid)
         self.refresh_stories()
 
     def action_refresh(self) -> None:
@@ -5284,7 +5314,9 @@ class PlannerApp(App):
         self.query_one("#detail-view").display = True
 
     def action_delete_epic(self) -> None:
-        """Delete the selected epic with confirmation (story 75)."""
+        """Delete the selected epic (or bulk selection) with confirmation."""
+        if self._bulk_delete_current():
+            return
         if self.parent_entity != "epic":
             self.bell()
             return
@@ -5615,10 +5647,12 @@ class PlannerApp(App):
     def action_delete_story(self) -> None:
         """Open confirmation modal to delete the selected entity.
 
-        Deletes the selected story (or bulk selection), iteration, milestone,
-        project, or group after a :class:`ConfirmScreen`. Other parent kinds
-        bell.
+        In multi-select mode the whole selection is deleted after a single
+        :class:`ConfirmScreen` (story 80). Otherwise the highlighted single
+        entity is deleted after confirmation. Other parent kinds bell.
         """
+        if self._bulk_delete_current():
+            return
         if self.parent_entity == "iteration":
             self._delete_selected_iteration()
             return
@@ -5646,12 +5680,6 @@ class PlannerApp(App):
         if self.parent_entity != "story":
             self.bell()
             return
-        ids = self._selected_ids()
-        if self._multi_select and ids:
-            n = len(ids)
-            self.push_screen(ConfirmScreen(f"Delete {n} selected stories?"),
-                             lambda ok: self._after_bulk_delete(ok))
-            return
         sid = self._current_story_id()
         if sid is None:
             self.bell()
@@ -5667,13 +5695,40 @@ class PlannerApp(App):
         stories.delete_story(self.conn, sid)
         self.refresh_stories()
 
-    def _after_bulk_delete(self, ok: bool | None) -> None:
+    def _bulk_delete_current(self) -> bool:
+        """Confirm once and delete the current multi-select, if active.
+
+        When multi-select mode is on with a non-empty selection, pushes a
+        single confirmation for all selected ids of the currently-focused
+        parent entity kind and deletes them through the backend delete function
+        for that kind. Returns ``True`` when a bulk delete was triggered (or is
+        awaiting confirmation); ``False`` when not in multi-select or the kind
+        has no bulk deleter, so single-item delete flows continue unchanged.
+        """
+        ids = self._selected_ids()
+        if not ids:
+            return False
+        deleter = _BULK_DELETERS.get(self.parent_entity)
+        if deleter is None:
+            return False
+        noun = self.parent_entity.replace("_", " ")
+        self.push_screen(ConfirmScreen(f"Delete {len(ids)} selected {noun}?"),
+                         lambda ok: self._after_bulk_delete(ok, deleter))
+        return True
+
+    def _after_bulk_delete(self, ok: bool | None,
+                           deleter: Callable[[sqlite3.Connection, int], None]) -> None:
+        """Delete every id in :attr:`_selected` after a single confirmation."""
         if not ok:
             return
         assert self.conn is not None
-        for sid in list(self._selected):
-            stories.delete_story(self.conn, sid)
+        for eid in list(self._selected):
+            try:
+                deleter(self.conn, eid)
+            except errors.PlannerError as e:
+                self.notify(f"error: {e}")
         self._selected.clear()
+        self._close_edit()
         self.refresh_stories()
 
     def _delete_selected_iteration(self) -> None:

@@ -451,6 +451,54 @@ def test_tui_multiselect_bulk_delete(seeded_db):
     _run(main())
 
 
+def test_tui_multiselect_bulk_delete_labels(db_path):
+    """Multi-select two labels and bulk-delete them with a single confirmation.
+
+    Story 80 generalizes the story-only multi-select to every entity kind:
+    'L' browses labels, 'v' enters multi-select, Space toggles two rows, and
+    'd' confirms once and deletes the whole selection.
+    """
+    from backend import db
+    from backend import labels as labels_mod
+    from tui.app import ConfirmScreen
+
+    c = db.connect(db_path)
+    l1 = labels_mod.create_label(c, "bug")
+    l2 = labels_mod.create_label(c, "chore")
+    c.close()
+
+    async def main():
+        app = PlannerApp(db_path)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+
+            # Browse labels in the parent pane.
+            await pilot.press("L"); await pilot.pause()
+            assert app.parent_entity == "label"
+            assert app.query_one("#stories").row_count == 2
+
+            # Enter multi-select and toggle the two labels.
+            await pilot.press("v"); await pilot.pause()
+            assert app._multi_select is True
+            app.query_one("#stories").move_cursor(row=0); await pilot.pause()
+            await pilot.press("space"); await pilot.pause()
+            app.query_one("#stories").move_cursor(row=1); await pilot.pause()
+            await pilot.press("space"); await pilot.pause()
+            assert sorted(app._selected) == sorted([l1.id, l2.id])
+
+            # 'd' confirms once for the whole selection, then deletes both.
+            await pilot.press("d"); await pilot.pause()
+            assert isinstance(app.screen, ConfirmScreen)
+            app.screen.query_one("#yes", Button).focus(); await pilot.pause()
+            await pilot.press("enter"); await pilot.pause(0.05); await pilot.pause()
+
+            assert labels_mod.list_labels(app.conn) == []
+            assert len(app._selected) == 0
+            assert getattr(app, "_exception", None) is None
+            await pilot.press("q")
+    _run(main())
+
+
 def test_tui_reorder_stories(db_path):
     """'J'/'K' swap a story with its neighbor by updating position."""
     from backend import db
