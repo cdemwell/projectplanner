@@ -1099,3 +1099,64 @@ def test_tui_refresh_keeps_cursor_position(db_path):
             assert getattr(app, "_exception", None) is None
             await pilot.press("q")
     _run(main())
+
+
+def test_tui_story_link_add_and_delete(db_path):
+    """The 'h' story-link modal adds a directed link and deletes one with
+    confirmation. All operations call the backend story_links module. See
+    Story 51."""
+    from textual.widgets import Button
+
+    from backend import db
+    from backend import stories as stories_mod
+    from backend import story_links as links_mod
+    from tui.app import _NONE_INT, StoryLinkActionScreen
+
+    c = db.connect(db_path)
+    a = stories_mod.create_story(c, "alpha")
+    b = stories_mod.create_story(c, "beta")
+    c.close()
+
+    async def main():
+        app = PlannerApp(db_path)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+
+            # select story 'alpha' (row 0) and open the link manager with 'h'
+            app.query_one("#stories").move_cursor(row=0); await pilot.pause()
+            assert app._current_story_id() == a.id
+            await pilot.press("h"); await pilot.pause()
+            assert isinstance(app.screen, StoryLinkActionScreen)
+            assert app.screen.query_one("#sl-link").value == _NONE_INT  # "(no links)"
+
+            # add a link: alpha --blocks--> beta
+            app.screen.query_one("#add", Button).focus(); await pilot.pause()
+            await pilot.press("enter"); await pilot.pause(0.05); await pilot.pause()
+            # the LinkAddScreen defaults to the first target story (beta) + "blocks"
+            app.screen.query_one("#ok", Button).focus(); await pilot.pause()
+            await pilot.press("enter"); await pilot.pause(0.05); await pilot.pause()
+            links = links_mod.list_links(app.conn, a.id)
+            assert len(links) == 1
+            assert links[0].subject_story_id == a.id
+            assert links[0].object_story_id == b.id
+            assert links[0].verb == "blocks"
+
+            # reopen and delete the link (cancel first, then confirm)
+            await pilot.press("h"); await pilot.pause()
+            assert app.screen.query_one("#sl-link").value != _NONE_INT  # link listed
+            app.screen.query_one("#delete", Button).focus(); await pilot.pause()
+            await pilot.press("enter"); await pilot.pause(0.05); await pilot.pause()
+            app.screen.query_one("#cancel", Button).focus(); await pilot.pause()
+            await pilot.press("enter"); await pilot.pause(0.05); await pilot.pause()
+            assert len(links_mod.list_links(app.conn, a.id)) == 1  # kept
+
+            await pilot.press("h"); await pilot.pause()
+            app.screen.query_one("#delete", Button).focus(); await pilot.pause()
+            await pilot.press("enter"); await pilot.pause(0.05); await pilot.pause()
+            app.screen.query_one("#yes", Button).focus(); await pilot.pause()
+            await pilot.press("enter"); await pilot.pause(0.05); await pilot.pause()
+            assert links_mod.list_links(app.conn, a.id) == []
+
+            assert getattr(app, "_exception", None) is None
+            await pilot.press("q")
+    _run(main())

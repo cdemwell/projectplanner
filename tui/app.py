@@ -49,6 +49,7 @@ from backend import (
     milestones,
     projects,
     stories,
+    story_links,
     tasks,
     workflows,
 )
@@ -87,6 +88,7 @@ _PALETTE_COMMANDS: list[tuple[str, str]] = [
     ("Task action", "task_action"),
     ("Manage owners", "manage_owners"),
     ("Manage labels", "manage_labels"),
+    ("Manage links", "manage_links"),
     ("Filter", "filter"),
     ("Browse", "browse"),
     ("Search", "search"),
@@ -757,6 +759,152 @@ class CommentActionScreen(ModalScreen[bool]):
 
     @on(Button.Pressed, "#cancel")
     def _cancel(self) -> None:
+        self.dismiss(None)
+
+
+class LinkAddScreen(ModalScreen[tuple]):
+    """Collect a target story and verb to link from the current story.
+
+    The current story is the link's *subject*; the chosen story becomes the
+    *object* of a directed ``subject --verb--> object`` link. Every other
+    story is offered as a target. Dismisses with a ``(object_story_id, verb)``
+    tuple, or None on cancel.
+    """
+
+    def __init__(self, conn: sqlite3.Connection, subject_id: int) -> None:
+        super().__init__()
+        self.conn = conn
+        self.subject_id = subject_id
+
+    def compose(self) -> ComposeResult:
+        story_opts = [
+            (f"#{s.id} {s.name}", s.id)
+            for s in stories.list_stories(self.conn)
+            if s.id != self.subject_id
+        ]
+        if not story_opts:
+            story_opts = [("(no other stories)", _NONE_INT)]
+        verb_opts = [(v, v) for v in story_links.VERBS]
+        yield VerticalScroll(
+            Static("Add story link", classes="modal-title"),
+            Label("To story:"),
+            Select(story_opts, value=story_opts[0][1], id="la-object"),
+            Label("Verb:"),
+            Select(verb_opts, value="blocks", id="la-verb"),
+            Horizontal(Button("Add", id="ok", variant="primary"),
+                       Button("Cancel", id="cancel")),
+            Label("", id="la-err", classes="err"),
+            classes="modal-box",
+        )
+
+    def on_mount(self) -> None:
+        self.query_one("#la-object", Select).focus()
+
+    @on(Button.Pressed, "#ok")
+    def _add(self) -> None:
+        obj = _sel(self.query_one("#la-object", Select).value)
+        if obj is None:
+            self.query_one("#la-err", Label).update("No target story.")
+            return
+        self.dismiss((obj, self.query_one("#la-verb", Select).value))
+
+    @on(Button.Pressed, "#cancel")
+    def _cancel(self) -> None:
+        self.dismiss(None)
+
+
+class StoryLinkActionScreen(ModalScreen[bool]):
+    """Add or delete a directed link involving the selected story.
+
+    Lists the story's links (as subject or object) in a Select. "Add" opens
+    :class:`LinkAddScreen` to create a link *from* this story to another with a
+    verb; "Delete" removes the selected link after a confirmation via
+    :class:`ConfirmScreen`. All operations go through the backend
+    ``story_links`` module; backend errors surface in the ``#sl-err`` label.
+
+    Dismisses with:
+        bool: True if a change was made (caller refreshes), else None.
+    """
+
+    def __init__(self, conn: sqlite3.Connection, story_id: int) -> None:
+        super().__init__()
+        self.conn = conn
+        self.story_id = story_id
+
+    def _link_opts(self) -> list[tuple[str, int]]:
+        links = story_links.list_links(self.conn, self.story_id)
+        return [(self._render_link(lk), lk.id) for lk in links]
+
+    def _render_link(self, lk) -> str:
+        subj = self._story_name(lk.subject_story_id)
+        obj = self._story_name(lk.object_story_id)
+        return f"#{lk.id} {subj} --{lk.verb}--> {obj}"
+
+    def _story_name(self, sid: int) -> str:
+        row = self.conn.execute(
+            'SELECT name FROM "story" WHERE id = ?', (sid,)).fetchone()
+        return row["name"] if row else str(sid)
+
+    def compose(self) -> ComposeResult:
+        opts = self._link_opts()
+        if not opts:
+            opts = [("(no links)", _NONE_INT)]
+        yield VerticalScroll(
+            Static("Story links", classes="modal-title"),
+            Label("Link:"), Select(opts, value=opts[0][1], id="sl-link"),
+            Horizontal(Button("Add", id="add", variant="primary"),
+                       Button("Delete", id="delete", variant="error"),
+                       Button("Done", id="cancel")),
+            Label("", id="sl-err", classes="err"),
+            classes="modal-box",
+        )
+
+    def on_mount(self) -> None:
+        self.query_one("#sl-link", Select).focus()
+
+    def _link_id(self) -> int | None:
+        return _sel(self.query_one("#sl-link", Select).value)
+
+    def _add(self) -> None:
+        self.app.push_screen(LinkAddScreen(self.conn, self.story_id),
+                             self._do_add)
+
+    def _do_add(self, res: tuple | None) -> None:
+        if res is None:
+            return
+        obj, verb = res
+        try:
+            story_links.create_link(self.conn, self.story_id, verb, obj)
+        except errors.PlannerError as e:
+            self.query_one("#sl-err", Label).update(f"error: {e}")
+            return
+        self.dismiss(True)
+
+    @on(Button.Pressed, "#delete")
+    def _delete(self) -> None:
+        lid = self._link_id()
+        if lid is None:
+            self.query_one("#sl-err", Label).update("No link to delete.")
+            return
+        self.app.push_screen(ConfirmScreen(f"Delete story link #{lid}?"),
+                             lambda ok: self._do_delete(lid, ok))
+
+    def _do_delete(self, lid: int, ok: bool | None) -> None:
+        if not ok:
+            return
+        try:
+            story_links.delete_link(self.conn, lid)
+        except errors.PlannerError as e:
+            self.query_one("#sl-err", Label).update(f"error: {e}")
+            return
+        self.dismiss(True)
+
+    @on(Button.Pressed, "#add")
+    def _b_add(self) -> None:
+        self._add()
+
+    @on(Button.Pressed, "#cancel")
+    def _done(self) -> None:
         self.dismiss(None)
 
 
@@ -2920,6 +3068,7 @@ class PlannerApp(App):
         Binding("x", "task_action", "Task⇄"),
         Binding("o", "manage_owners", "Owners"),
         Binding("l", "manage_labels", "Labels"),
+        Binding("h", "manage_links", "Links"),
         Binding("f", "filter", "Filter"),
         Binding("b", "browse", "Browse"),
         Binding("slash", "search", "Search"),  # '/'
@@ -3155,6 +3304,13 @@ class PlannerApp(App):
                 log.write(f"{indent}#{cm.id} {author}: {cm.text}")
         else:
             log.write("  (none)")
+        links = story_links.list_links(self.conn, sid)
+        if links:
+            log.write("links:")
+            for lk in links:
+                subj = self.name_of("story", lk.subject_story_id)
+                obj = self.name_of("story", lk.object_story_id)
+                log.write(f"  #{lk.id} {subj} --{lk.verb}--> {obj}")
         if s.completed_at:
             log.write(f"[green]completed: {s.completed_at}[/green]")
 
@@ -3472,6 +3628,15 @@ class PlannerApp(App):
         for sid in ids:
             stories.add_label(self.conn, sid, lid)
         self.show_current_detail()
+
+    def action_manage_links(self) -> None:
+        """Open modal to add or delete a link on the selected story."""
+        sid = self._current_story_id()
+        if sid is None or self.conn is None:
+            self.bell()
+            return
+        self.push_screen(StoryLinkActionScreen(self.conn, sid),
+                         lambda changed: self.show_current_detail() if changed else None)
 
     def _do_comment(self, sid: int, text: str | None) -> None:
         if not text or not text.strip() or self.conn is None:
