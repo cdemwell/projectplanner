@@ -114,6 +114,49 @@ def test_tui_create_toggle_search_delete(seeded_db):
     _run(main())
 
 
+def test_tui_edit_and_delete_story(db_path):
+    """Inline edit updates name + a field, then delete-with-confirmation removes it."""
+    from textual.widgets import Input, Select
+
+    from backend import db
+    from backend import stories as stories_mod
+
+    c = db.connect(db_path)
+    s = stories_mod.create_story(c, "Original", story_type="feature")
+    c.close()
+
+    async def main():
+        app = PlannerApp(db_path)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            app.query_one("#stories").move_cursor(row=0); await pilot.pause()
+            sid = app._current_story_id()
+            assert sid == s.id
+
+            async def save():
+                app.screen.query_one("#e-save", Button).focus(); await pilot.pause()
+                await pilot.press("enter"); await pilot.pause(0.05); await pilot.pause()
+
+            # edit inline: rename and change the type field
+            await pilot.press("u"); await pilot.pause()
+            app.screen.query_one("#e-name", Input).value = "Edited"
+            app.screen.query_one("#e-type", Select).value = "bug"
+            await save()
+            row = app.conn.execute(
+                "SELECT name, story_type FROM story WHERE id=?", (sid,)).fetchone()
+            assert (row["name"], row["story_type"]) == ("Edited", "bug")
+
+            # delete-with-confirmation
+            await pilot.press("d"); await pilot.pause()
+            app.screen.query_one("#yes", Button).focus(); await pilot.pause()
+            await pilot.press("enter"); await pilot.pause(0.05); await pilot.pause()
+            assert app.conn.execute("SELECT COUNT(*) FROM story WHERE id=?", (sid,)).fetchone()[0] == 0
+
+            assert getattr(app, "_exception", None) is None
+            await pilot.press("q")
+    _run(main())
+
+
 def test_tui_search_entity_selector(seeded_db):
     """The search screen offers an entity scope; non-story entities show a
     generic results screen, and a bad query surfaces an error."""
