@@ -861,6 +861,148 @@ class EditMilestonePane(Vertical):
         self.on_cancelled()
 
 
+class EditProjectPane(Vertical):
+    """Edit an existing project's fields in the right detail pane.
+
+    Mounted into the ``#detail`` container when 'u' is pressed while the parent
+    pane is browsing projects, replacing the read-only detail view. Fields:
+    name, description, abbreviation, color, archive. Saves via
+    ``projects.update_project`` (archive included, matching the manager
+    screen's Archive/Unarchive toggle) and surfaces backend errors inline.
+
+    Args:
+        conn: sqlite3.Connection.
+        project_id: The project being edited.
+        on_saved: Called with the project id after a successful save.
+        on_cancelled: Called (with no args) when editing is cancelled.
+    """
+
+    def __init__(self, conn: sqlite3.Connection, project_id: int, *,
+                 on_saved, on_cancelled) -> None:
+        super().__init__()
+        self.conn = conn
+        self.project_id = project_id
+        self.on_saved = on_saved
+        self.on_cancelled = on_cancelled
+        self.project = projects.get_project(conn, project_id)
+
+    def compose(self) -> ComposeResult:
+        p = self.project
+        archive_opts = [("Active", 0), ("Archived", 1)]
+        yield Static(f"Edit project #{p.id}", classes="detail-title")
+        yield Label("Name:")
+        yield Input(value=p.name, id="pe-name")
+        yield Label("Description:")
+        yield TextArea(id="pe-desc")
+        yield Label("Abbreviation:")
+        yield Input(value=p.abbreviation, id="pe-abbr")
+        yield Label("Color:")
+        yield Input(value=p.color, id="pe-color")
+        yield Label("Archive:")
+        yield Select(archive_opts, value=int(p.archived), id="pe-archive")
+        yield Horizontal(Button("Save", id="pe-save", variant="primary"),
+                         Button("Cancel", id="pe-cancel"))
+        yield Label("", id="pe-err", classes="err")
+
+    def on_mount(self) -> None:
+        if self.project.description:
+            self.query_one("#pe-desc", TextArea).text = self.project.description
+        self.query_one("#pe-name", Input).focus()
+
+    def _save(self) -> None:
+        name = self.query_one("#pe-name", Input).value.strip()
+        if not name:
+            self.query_one("#pe-err", Label).update("Name is required.")
+            return
+        try:
+            projects.update_project(
+                self.conn, self.project_id, name=name,
+                description=self.query_one("#pe-desc", TextArea).text,
+                abbreviation=self.query_one("#pe-abbr", Input).value.strip(),
+                color=self.query_one("#pe-color", Input).value.strip(),
+                archived=self.query_one("#pe-archive", Select).value)
+        except errors.PlannerError as e:
+            self.query_one("#pe-err", Label).update(f"error: {e}")
+            return
+        self.on_saved(self.project_id)
+
+    @on(Button.Pressed, "#pe-save")
+    def _ok(self) -> None:
+        self._save()
+
+    @on(Button.Pressed, "#pe-cancel")
+    def _cancel(self) -> None:
+        self.on_cancelled()
+
+
+class EditGroupPane(Vertical):
+    """Edit an existing group's fields in the right detail pane.
+
+    Mounted into the ``#detail`` container when 'u' is pressed while the parent
+    pane is browsing groups, replacing the read-only detail view. Fields: name,
+    description, archive. Saves via ``groups.update_group`` (archive included,
+    matching the manager screen's Archive toggle) and surfaces backend errors
+    inline.
+
+    Args:
+        conn: sqlite3.Connection.
+        group_id: The group being edited.
+        on_saved: Called with the group id after a successful save.
+        on_cancelled: Called (with no args) when editing is cancelled.
+    """
+
+    def __init__(self, conn: sqlite3.Connection, group_id: int, *,
+                 on_saved, on_cancelled) -> None:
+        super().__init__()
+        self.conn = conn
+        self.group_id = group_id
+        self.on_saved = on_saved
+        self.on_cancelled = on_cancelled
+        self.group = groups.get_group(conn, group_id)
+
+    def compose(self) -> ComposeResult:
+        g = self.group
+        archive_opts = [("Active", 0), ("Archived", 1)]
+        yield Static(f"Edit group #{g.id}", classes="detail-title")
+        yield Label("Name:")
+        yield Input(value=g.name, id="ge-name")
+        yield Label("Description:")
+        yield TextArea(id="ge-desc")
+        yield Label("Archive:")
+        yield Select(archive_opts, value=int(g.archived), id="ge-archive")
+        yield Horizontal(Button("Save", id="ge-save", variant="primary"),
+                         Button("Cancel", id="ge-cancel"))
+        yield Label("", id="ge-err", classes="err")
+
+    def on_mount(self) -> None:
+        if self.group.description:
+            self.query_one("#ge-desc", TextArea).text = self.group.description
+        self.query_one("#ge-name", Input).focus()
+
+    def _save(self) -> None:
+        name = self.query_one("#ge-name", Input).value.strip()
+        if not name:
+            self.query_one("#ge-err", Label).update("Name is required.")
+            return
+        try:
+            groups.update_group(
+                self.conn, self.group_id, name=name,
+                description=self.query_one("#ge-desc", TextArea).text,
+                archived=self.query_one("#ge-archive", Select).value)
+        except errors.PlannerError as e:
+            self.query_one("#ge-err", Label).update(f"error: {e}")
+            return
+        self.on_saved(self.group_id)
+
+    @on(Button.Pressed, "#ge-save")
+    def _ok(self) -> None:
+        self._save()
+
+    @on(Button.Pressed, "#ge-cancel")
+    def _cancel(self) -> None:
+        self.on_cancelled()
+
+
 class CreateStoryPane(Vertical):
     """Collects name, description, type, project, owner, state, and labels for a new story.
 
@@ -4697,13 +4839,14 @@ class PlannerApp(App):
         """Edit the selected entity in-place in the right detail pane.
 
         'u' edits the kind currently being browsed: a story, epic, iteration,
-        or milestone each opens its inline form in the detail pane; other
-        parent kinds bell and no-op.
+        milestone, project, or group each opens its inline form in the detail
+        pane; other parent kinds bell and no-op.
         """
         if self.parent_entity == "epic":
             self._open_epic_edit()
             return
-        if self.parent_entity not in ("story", "iteration", "milestone"):
+        if self.parent_entity not in ("story", "iteration", "milestone",
+                                      "project", "group"):
             self.bell()
             return
         assert self.conn is not None
@@ -4724,10 +4867,18 @@ class PlannerApp(App):
             pane = EditIterationPane(self.conn, eid,
                                      on_saved=self._edit_saved,
                                      on_cancelled=self._edit_cancelled)
-        else:  # milestone
+        elif self.parent_entity == "milestone":
             pane = EditMilestonePane(self.conn, eid,
                                      on_saved=self._edit_saved,
                                      on_cancelled=self._edit_cancelled)
+        elif self.parent_entity == "project":
+            pane = EditProjectPane(self.conn, eid,
+                                   on_saved=self._edit_saved,
+                                   on_cancelled=self._edit_cancelled)
+        else:  # group
+            pane = EditGroupPane(self.conn, eid,
+                                 on_saved=self._edit_saved,
+                                 on_cancelled=self._edit_cancelled)
         self._edit_pane = pane
         self.query_one("#detail", VerticalScroll).mount(pane)
 
@@ -5112,14 +5263,21 @@ class PlannerApp(App):
     def action_delete_story(self) -> None:
         """Open confirmation modal to delete the selected entity.
 
-        Deletes the selected story (or bulk selection), iteration, or milestone
-        after a :class:`ConfirmScreen` (story 76). Other parent kinds bell.
+        Deletes the selected story (or bulk selection), iteration, milestone,
+        project, or group after a :class:`ConfirmScreen`. Other parent kinds
+        bell.
         """
         if self.parent_entity == "iteration":
             self._delete_selected_iteration()
             return
         if self.parent_entity == "milestone":
             self._delete_selected_milestone()
+            return
+        if self.parent_entity == "project":
+            self._delete_selected_project()
+            return
+        if self.parent_entity == "group":
+            self._delete_selected_group()
             return
         if self.parent_entity != "story":
             self.bell()
@@ -5194,6 +5352,52 @@ class PlannerApp(App):
         assert self.conn is not None
         try:
             milestones.delete_milestone(self.conn, mid)
+        except errors.PlannerError as e:
+            self.notify(f"error: {e}")
+            return
+        self._close_edit()
+        self.refresh_stories()
+
+    def _delete_selected_project(self) -> None:
+        """Confirm and delete the highlighted project (story 77)."""
+        assert self.conn is not None
+        pid = self._current_story_id()
+        if pid is None:
+            self.bell()
+            return
+        p = projects.get_project(self.conn, pid)
+        self.push_screen(ConfirmScreen(f"Delete project '#{p.id} {p.name}'?"),
+                         lambda ok: self._do_delete_project(pid, ok))
+
+    def _do_delete_project(self, pid: int, ok: bool | None) -> None:
+        if not ok:
+            return
+        assert self.conn is not None
+        try:
+            projects.delete_project(self.conn, pid)
+        except errors.PlannerError as e:
+            self.notify(f"error: {e}")
+            return
+        self._close_edit()
+        self.refresh_stories()
+
+    def _delete_selected_group(self) -> None:
+        """Confirm and delete the highlighted group (story 77)."""
+        assert self.conn is not None
+        gid = self._current_story_id()
+        if gid is None:
+            self.bell()
+            return
+        g = groups.get_group(self.conn, gid)
+        self.push_screen(ConfirmScreen(f"Delete group '#{g.id} {g.name}'?"),
+                         lambda ok: self._do_delete_group(gid, ok))
+
+    def _do_delete_group(self, gid: int, ok: bool | None) -> None:
+        if not ok:
+            return
+        assert self.conn is not None
+        try:
+            groups.delete_group(self.conn, gid)
         except errors.PlannerError as e:
             self.notify(f"error: {e}")
             return

@@ -746,6 +746,125 @@ def test_tui_epic_inline_edit_and_delete(db_path):
     _run(main())
 
 
+def test_tui_project_inline_edit_and_delete(db_path):
+    """Story 77: the detail pane edits a project inline and deletes it with
+    confirmation, reusing the backend projects module."""
+    from textual.widgets import Button, Input, Select
+
+    from backend import db
+    from backend import projects as proj_mod
+
+    c = db.connect(db_path)
+    p1 = proj_mod.create_project(c, "backend", abbreviation="be",
+                                 color="#ff0000")
+    p2 = proj_mod.create_project(c, "frontend", abbreviation="fe")
+    c.close()
+
+    async def main():
+        app = PlannerApp(db_path)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            # Switch the parent pane to projects and select p1 by id (rows are
+            # ordered by name, so select by key to stay robust).
+            await pilot.press("P"); await pilot.pause()
+            assert app.parent_entity == "project"
+            app.query_one("#stories").move_cursor(
+                row=app.query_one("#stories").get_row_index(str(p1.id)))
+            await pilot.pause()
+            assert app._current_story_id() == p1.id
+
+            async def save():
+                app.screen.query_one("#pe-save", Button).focus(); await pilot.pause()
+                await pilot.press("enter"); await pilot.pause(0.05); await pilot.pause()
+
+            async def confirm_yes():
+                app.screen.query_one("#yes", Button).focus(); await pilot.pause()
+                await pilot.press("enter"); await pilot.pause(0.05); await pilot.pause()
+
+            # Inline edit: rename + change color, then save.
+            await pilot.press("u"); await pilot.pause()
+            app.screen.query_one("#pe-name", Input).value = "Platform"
+            app.screen.query_one("#pe-color", Input).value = "#0000ff"
+            await save()
+            p = proj_mod.get_project(app.conn, p1.id)
+            assert p.name == "Platform"
+            assert p.color == "#0000ff"
+            assert p.abbreviation == "be"
+            assert p.archived == 0
+
+            # Archive via a second inline edit. Archived projects drop out of
+            # the active parent list (which excludes archived).
+            await pilot.press("u"); await pilot.pause()
+            app.screen.query_one("#pe-archive", Select).value = 1
+            await save()
+            assert proj_mod.get_project(app.conn, p1.id).archived == 1
+
+            # The active list now leads with the still-active sibling p2.
+            app.query_one("#stories").move_cursor(row=0); await pilot.pause()
+            assert app._current_story_id() == p2.id
+
+            # Delete-with-confirmation removes p2; the archived p1 survives.
+            await pilot.press("d"); await pilot.pause()
+            await confirm_yes()
+            ids = [x.id for x in proj_mod.list_projects(app.conn, include_archived=True)]
+            assert p2.id not in ids
+            assert p1.id in ids
+
+            assert getattr(app, "_exception", None) is None
+            await pilot.press("q")
+    _run(main())
+
+
+def test_tui_group_inline_edit(db_path):
+    """Story 77: the detail pane edits a group inline, reusing the backend
+    groups module."""
+    from textual.widgets import Button, Input, Select
+
+    from backend import db
+    from backend import groups as groups_mod
+
+    c = db.connect(db_path)
+    g1 = groups_mod.create_group(c, "Frontend", description="Web team")
+    g2 = groups_mod.create_group(c, "Backend")
+    c.close()
+
+    async def main():
+        app = PlannerApp(db_path)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            # Switch the parent pane to groups and select g1 by id (rows are
+            # ordered by name, so select by key to stay robust).
+            await pilot.press("G"); await pilot.pause()
+            assert app.parent_entity == "group"
+            app.query_one("#stories").move_cursor(
+                row=app.query_one("#stories").get_row_index(str(g1.id)))
+            await pilot.pause()
+            assert app._current_story_id() == g1.id
+
+            async def save():
+                app.screen.query_one("#ge-save", Button).focus(); await pilot.pause()
+                await pilot.press("enter"); await pilot.pause(0.05); await pilot.pause()
+
+            # Inline edit: rename + archive, then save.
+            await pilot.press("u"); await pilot.pause()
+            app.screen.query_one("#ge-name", Input).value = "Frontend Guild"
+            app.screen.query_one("#ge-archive", Select).value = 1
+            await save()
+            g = groups_mod.get_group(app.conn, g1.id)
+            assert g.name == "Frontend Guild"
+            assert g.description == "Web team"
+            assert g.archived == 1
+
+            # The sibling is untouched.
+            g2b = groups_mod.get_group(app.conn, g2.id)
+            assert g2b.name == "Backend"
+            assert g2b.archived == 0
+
+            assert getattr(app, "_exception", None) is None
+            await pilot.press("q")
+    _run(main())
+
+
 def test_tui_iteration_management(db_path):
     """The 'I' iteration manager creates, edits, and deletes iterations.
 
