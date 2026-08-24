@@ -650,6 +650,94 @@ def test_tui_milestone_management(db_path):
     _run(main())
 
 
+def test_tui_project_management(db_path):
+    """The 'P' project manager creates, edits, archives, and deletes projects.
+
+    Exercises every flow: create, edit (name/abbreviation/color), archive,
+    unarchive, and delete with confirmation. All operations call the backend
+    projects module. See Story 45.
+    """
+    from textual.widgets import Button, Input
+
+    from backend import db
+    from backend import projects as proj_mod
+    from tui.app import ProjectManagerScreen
+
+    c = db.connect(db_path)
+    c.close()
+
+    async def main():
+        app = PlannerApp(db_path)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+
+            async def click(btn_id: str):
+                app.screen.query_one(btn_id, Button).focus()
+                await pilot.pause()
+                await pilot.press("enter")
+                await pilot.pause(0.05)
+                await pilot.pause()
+
+            async def confirm_yes():
+                app.screen.query_one("#yes", Button).focus()
+                await pilot.pause()
+                await pilot.press("enter")
+                await pilot.pause(0.05)
+                await pilot.pause()
+
+            # open the project manager with 'P'
+            await pilot.press("P"); await pilot.pause()
+            assert isinstance(app.screen, ProjectManagerScreen)
+            assert app.screen.query_one("#pm-projects").option_count == 0
+
+            # create a project
+            await click("#pm-new")
+            app.screen.query_one("#pf-name", Input).value = "backend"
+            app.screen.query_one("#pf-abbr", Input).value = "be"
+            app.screen.query_one("#pf-color", Input).value = "#ff0000"
+            await click("#ok")
+            ps = proj_mod.list_projects(app.conn)
+            assert len(ps) == 1
+            pid = ps[0].id
+            assert ps[0].name == "backend"
+            assert ps[0].abbreviation == "be"
+            assert ps[0].color == "#ff0000"
+            assert ps[0].archived == 0
+
+            # edit: rename + color (abbreviation preserved)
+            await click("#pm-edit")
+            app.screen.query_one("#pf-name", Input).value = "Platform"
+            app.screen.query_one("#pf-color", Input).value = "#0000ff"
+            await click("#ok")
+            p = proj_mod.get_project(app.conn, pid)
+            assert p.name == "Platform"
+            assert p.color == "#0000ff"
+            assert p.abbreviation == "be"
+
+            # archive (non-destructive, no confirmation)
+            await click("#pm-archive")
+            assert proj_mod.get_project(app.conn, pid).archived == 1
+            # archived projects still appear in the list
+            assert app.screen.query_one("#pm-projects").option_count == 1
+
+            # unarchive (pause lets the refresh settle before the same button
+            # can be re-activated by Enter, mirroring a human's read-time)
+            await pilot.pause(0.15)
+            await click("#pm-archive")
+            assert proj_mod.get_project(app.conn, pid).archived == 0
+
+            # delete with confirmation
+            await click("#pm-delete")
+            await confirm_yes()
+            assert proj_mod.list_projects(app.conn) == []
+
+            # Done closes the screen; refresh ran without error
+            await click("#pm-done")
+            assert getattr(app, "_exception", None) is None
+            await pilot.press("q")
+    _run(main())
+
+
 def test_tui_refresh_keeps_cursor_position(db_path):
     """refresh_stories must not yank the cursor back to the top row."""
     from backend import db

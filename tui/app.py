@@ -92,6 +92,7 @@ _PALETTE_COMMANDS: list[tuple[str, str]] = [
     ("Manage epics", "manage_epics"),
     ("Manage iterations", "manage_iterations"),
     ("Manage milestones", "manage_milestones"),
+    ("Manage projects", "manage_projects"),
     ("Toggle complete", "toggle_complete"),
     ("Delete story", "delete_story"),
     ("Refresh", "refresh"),
@@ -1918,6 +1919,231 @@ class MilestoneManagerScreen(ModalScreen[bool]):
         self.dismiss(self._dirty)
 
 
+class ProjectFormScreen(ModalScreen[dict]):
+    """Collect name/description/abbreviation/color for a project.
+
+    Used both for creating a new project (``project=None``) and for editing an
+    existing one (pre-populated from the given :class:`~backend.models.Project`).
+    All operations call the backend ``projects`` module. Dismisses with a dict
+    of field values, or None on cancel.
+    """
+
+    def __init__(self, conn: sqlite3.Connection, project=None) -> None:
+        super().__init__()
+        self.conn = conn
+        self.project = project  # Project | None
+
+    def compose(self) -> ComposeResult:
+        p = self.project
+        title = f"Edit project #{p.id}" if p else "New project"
+        yield VerticalScroll(
+            Static(title, classes="modal-title"),
+            Label("Name:"),
+            Input(value=p.name if p else "", id="pf-name"),
+            Label("Description:"),
+            TextArea(id="pf-desc"),
+            Label("Abbreviation:"),
+            Input(value=p.abbreviation if p else "", id="pf-abbr"),
+            Label("Color:"),
+            Input(value=p.color if p else "", id="pf-color"),
+            Horizontal(Button("Save", id="ok", variant="primary"),
+                       Button("Cancel", id="cancel")),
+            Label("", id="pf-err", classes="err"),
+            classes="modal-box",
+        )
+
+    def on_mount(self) -> None:
+        if self.project and self.project.description:
+            self.query_one("#pf-desc", TextArea).text = self.project.description
+        self.query_one("#pf-name", Input).focus()
+
+    def _submit(self) -> None:
+        name = self.query_one("#pf-name", Input).value.strip()
+        if not name:
+            self.query_one("#pf-err", Label).update("Name is required.")
+            return
+        self.dismiss({
+            "name": name,
+            "description": self.query_one("#pf-desc", TextArea).text,
+            "abbreviation": self.query_one("#pf-abbr", Input).value.strip(),
+            "color": self.query_one("#pf-color", Input).value.strip(),
+        })
+
+    @on(Button.Pressed, "#ok")
+    def _ok(self) -> None:
+        self._submit()
+
+    @on(Button.Pressed, "#cancel")
+    def _cancel(self) -> None:
+        self.dismiss(None)
+
+
+class ProjectManagerScreen(ModalScreen[bool]):
+    """Manage projects: create, edit, archive/unarchive, and delete.
+
+    An OptionList lists every project (including archived ones); New/Edit/
+    Archive/Done buttons drive the flow. Create and edit open
+    :class:`ProjectFormScreen`; delete confirms via :class:`ConfirmScreen`.
+    Archive/unarchive is reversible and runs without confirmation. Every
+    operation goes through the backend ``projects`` module; backend errors
+    surface in a status label.
+
+    Dismisses with:
+        bool: True if any change was made (caller refreshes), else None.
+    """
+
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        super().__init__()
+        self.conn = conn
+        self._dirty = False
+        self._project_ids: list[int] = []
+
+    def compose(self) -> ComposeResult:
+        yield VerticalScroll(
+            Static("Manage Projects", classes="modal-title"),
+            OptionList(id="pm-projects"),
+            Horizontal(
+                Button("New", id="pm-new", variant="primary"),
+                Button("Edit", id="pm-edit"),
+                Button("Archive/Unarchive", id="pm-archive"),
+                Button("Delete", id="pm-delete", variant="error"),
+                Button("Done", id="pm-done"),
+            ),
+            Label("", id="pm-status", classes="err"),
+            classes="modal-box",
+        )
+
+    def _status(self, msg: str) -> None:
+        self.query_one("#pm-status", Label).update(msg)
+
+    def _selected_id(self) -> int | None:
+        idx = self.query_one("#pm-projects", OptionList).highlighted
+        if idx is None or not (0 <= idx < len(self._project_ids)):
+            return None
+        return self._project_ids[idx]
+
+    def on_mount(self) -> None:
+        self._refresh()
+
+    def _refresh(self) -> None:
+        opts = self.query_one("#pm-projects", OptionList)
+        prev = opts.get_option_at_index(opts.highlighted).id if opts.option_count else None
+        ps = projects.list_projects(self.conn, include_archived=True)
+        self._project_ids = [p.id for p in ps]
+        opts.clear_options()
+        for p in ps:
+            label = f"#{p.id} {p.name}"
+            if p.archived:
+                label += " (archived)"
+            opts.add_option(Option(label, id=str(p.id)))
+        if self._project_ids:
+            idx = 0
+            if prev:
+                for i, pid in enumerate(self._project_ids):
+                    if str(pid) == prev:
+                        idx = i
+                        break
+            opts.highlighted = idx
+
+    def _new(self) -> None:
+        self.app.push_screen(ProjectFormScreen(self.conn), self._do_create)
+
+    def _do_create(self, fields: dict | None) -> None:
+        if fields is None:
+            return
+        try:
+            projects.create_project(self.conn, fields["name"],
+                                    description=fields["description"],
+                                    abbreviation=fields["abbreviation"],
+                                    color=fields["color"])
+        except errors.PlannerError as e:
+            self._status(f"error: {e}")
+            return
+        self._dirty = True
+        self._refresh()
+        self._status(f"Created project '{fields['name']}'.")
+
+    def _edit(self) -> None:
+        pid = self._selected_id()
+        if pid is None:
+            self._status("Select a project to edit.")
+            return
+        self.app.push_screen(ProjectFormScreen(self.conn,
+                                               project=projects.get_project(self.conn, pid)),
+                             lambda fields: self._do_update(pid, fields))
+
+    def _do_update(self, pid: int, fields: dict | None) -> None:
+        if fields is None:
+            return
+        try:
+            projects.update_project(self.conn, pid, name=fields["name"],
+                                    description=fields["description"],
+                                    abbreviation=fields["abbreviation"],
+                                    color=fields["color"])
+        except errors.PlannerError as e:
+            self._status(f"error: {e}")
+            return
+        self._dirty = True
+        self._refresh()
+        self._status(f"Updated project '{fields['name']}'.")
+
+    def _archive(self) -> None:
+        pid = self._selected_id()
+        if pid is None:
+            self._status("Select a project to archive.")
+            return
+        p = projects.get_project(self.conn, pid)
+        try:
+            projects.archive_project(self.conn, pid, archived=not bool(p.archived))
+        except errors.PlannerError as e:
+            self._status(f"error: {e}")
+            return
+        self._dirty = True
+        self._refresh()
+        self._status("Unarchived project." if p.archived else "Archived project.")
+
+    def _delete(self) -> None:
+        pid = self._selected_id()
+        if pid is None:
+            self._status("Select a project to delete.")
+            return
+        p = projects.get_project(self.conn, pid)
+        self.app.push_screen(ConfirmScreen(f"Delete project '#{p.id} {p.name}'?"),
+                             lambda ok: self._do_delete(pid, ok))
+
+    def _do_delete(self, pid: int, ok: bool | None) -> None:
+        if not ok:
+            return
+        try:
+            projects.delete_project(self.conn, pid)
+        except errors.PlannerError as e:
+            self._status(f"error: {e}")
+            return
+        self._dirty = True
+        self._refresh()
+        self._status("Deleted project.")
+
+    @on(Button.Pressed, "#pm-new")
+    def _b_new(self) -> None:
+        self._new()
+
+    @on(Button.Pressed, "#pm-edit")
+    def _b_edit(self) -> None:
+        self._edit()
+
+    @on(Button.Pressed, "#pm-archive")
+    def _b_archive(self) -> None:
+        self._archive()
+
+    @on(Button.Pressed, "#pm-delete")
+    def _b_delete(self) -> None:
+        self._delete()
+
+    @on(Button.Pressed, "#pm-done")
+    def _b_done(self) -> None:
+        self.dismiss(self._dirty)
+
+
 # --------------------------------------------------------------------------- #
 # Main app
 # --------------------------------------------------------------------------- #
@@ -1971,6 +2197,7 @@ class PlannerApp(App):
         Binding("E", "manage_epics", "Epics"),
         Binding("I", "manage_iterations", "Iterations"),
         Binding("M", "manage_milestones", "Milestones"),
+        Binding("P", "manage_projects", "Projects"),
         Binding("r", "refresh", "Refresh"),
         Binding("a", "toggle_auto_refresh", "Auto↻"),
         Binding("J", "move_down", "Down"),
@@ -2575,6 +2802,16 @@ class PlannerApp(App):
                          self._after_milestone_manage)
 
     def _after_milestone_manage(self, changed: bool | None) -> None:
+        if changed:
+            self.refresh_stories()
+
+    def action_manage_projects(self) -> None:
+        """Open the project management screen."""
+        assert self.conn is not None
+        self.push_screen(ProjectManagerScreen(self.conn),
+                         self._after_project_manage)
+
+    def _after_project_manage(self, changed: bool | None) -> None:
         if changed:
             self.refresh_stories()
 
