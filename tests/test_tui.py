@@ -1159,6 +1159,63 @@ def test_tui_plan_export_import_backup(db_path, tmp_path):
     _run(main())
 
 
+def test_tui_config_init_and_show(db_path, tmp_path):
+    """The 'B' config manager writes a default config file (init) and prints the
+    resolved settings (show). Init/show go through the backend config module
+    (save_config / load_config); errors surface in the status label. See Story 53.
+    """
+    from pathlib import Path
+
+    from textual.widgets import Button, Input
+
+    from backend import config as config_mod
+    from tui.app import ConfigManagerScreen
+
+    async def main():
+        app = PlannerApp(db_path)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+
+            async def click(btn_id: str):
+                app.screen.query_one(btn_id, Button).focus()
+                await pilot.pause()
+                await pilot.press("enter")
+                await pilot.pause(0.05)
+                await pilot.pause()
+
+            # open the config manager with 'B'
+            await pilot.press("B"); await pilot.pause()
+            assert isinstance(app.screen, ConfigManagerScreen)
+
+            # show with no file present -> resolves to built-in defaults
+            await click("#cfg-show")
+            app.screen.query_one("#p-value", Input).value = cfg_path
+            await click("#ok")
+            out = str(app.screen.query_one("#cfg-output").render()).strip()
+            assert "default_project: backend" in out
+            assert "auto_refresh_seconds: 5" in out
+
+            # init writes the default config file via the backend
+            await click("#cfg-init")
+            app.screen.query_one("#p-value", Input).value = cfg_path
+            await click("#ok")
+            status = str(app.screen.query_one("#cfg-status").render()).strip()
+            assert status == f"Initialized {cfg_path}"
+            assert Path(cfg_path).exists()
+            # the file round-trips through the backend loader
+            loaded = config_mod.load_config(cfg_path)
+            assert loaded.default_project == "backend"
+            assert loaded.auto_refresh_seconds == 5
+
+            # Done closes the screen; no exception surfaced
+            await click("#cfg-done")
+            assert getattr(app, "_exception", None) is None
+            await pilot.press("q")
+
+    cfg_path = str(tmp_path / "planner.yaml")
+    _run(main())
+
+
 def test_tui_refresh_keeps_cursor_position(db_path):
     """refresh_stories must not yank the cursor back to the top row."""
     from backend import db

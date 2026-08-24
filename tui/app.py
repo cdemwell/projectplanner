@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import shutil
 import sqlite3
+from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -42,6 +43,7 @@ from textual.widgets.option_list import Option
 
 from backend import (
     comments,
+    config,
     db,
     epics,
     errors,
@@ -105,6 +107,7 @@ _PALETTE_COMMANDS: list[tuple[str, str]] = [
     ("Manage member roster", "manage_member_catalog"),
     ("Manage groups", "manage_group_catalog"),
     ("Manage plan", "manage_plan"),
+    ("Config", "manage_config"),
     ("Toggle complete", "toggle_complete"),
     ("Delete story", "delete_story"),
     ("Refresh", "refresh"),
@@ -3150,6 +3153,99 @@ class PlanManagerScreen(ModalScreen[bool]):
         self.dismiss(self._dirty)
 
 
+class ConfigManagerScreen(ModalScreen[bool]):
+    """Initialize or view the planner config file (``planner.yaml``).
+
+    "Init" writes a default config file via ``config.save_config``. "Show"
+    prints the resolved settings — defaults merged with any values from the
+    file — via ``config.load_config``. Both go through the backend ``config``
+    module (the same functions the CLI ``config init``/``config show``
+    subcommands use); backend and filesystem errors surface in a status label.
+
+    The target file path is collected by :class:`PromptScreen`, defaulting to
+    ``planner.yaml`` to match the CLI.
+
+    Dismisses with:
+        bool: True if a change was made (e.g. a config was written), else None.
+    """
+
+    DEFAULT_FILE = "planner.yaml"
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._dirty = False
+
+    def compose(self) -> ComposeResult:
+        yield VerticalScroll(
+            Static("Config management", classes="modal-title"),
+            Horizontal(
+                Button("Init", id="cfg-init", variant="primary"),
+                Button("Show", id="cfg-show"),
+                Button("Done", id="cfg-done"),
+            ),
+            Static("", id="cfg-output"),
+            Label("", id="cfg-status", classes="err"),
+            classes="config-box",
+        )
+
+    def _status(self, msg: str) -> None:
+        self.query_one("#cfg-status", Label).update(msg)
+
+    def _clear_output(self) -> None:
+        self.query_one("#cfg-output", Static).update("")
+
+    # --- init -------------------------------------------------------------- #
+    def _init(self) -> None:
+        self._clear_output()
+        self.app.push_screen(
+            PromptScreen("Write default config to file", value=self.DEFAULT_FILE),
+            self._do_init)
+
+    def _do_init(self, path: str | None) -> None:
+        if not path or not path.strip():
+            return
+        path = path.strip()
+        try:
+            config.save_config(config.Config(), path)
+        except (errors.PlannerError, OSError) as e:
+            self._status(f"error: {e}")
+            return
+        self._dirty = True
+        self._status(f"Initialized {path}")
+
+    # --- show -------------------------------------------------------------- #
+    def _show(self) -> None:
+        self.app.push_screen(
+            PromptScreen("Show resolved config from file", value=self.DEFAULT_FILE),
+            self._do_show)
+
+    def _do_show(self, path: str | None) -> None:
+        if not path or not path.strip():
+            return
+        path = path.strip()
+        try:
+            cfg = config.load_config(path)
+        except (errors.PlannerError, OSError) as e:
+            self._status(f"error: {e}")
+            return
+        lines = [f"{k}: {v}" for k, v in asdict(cfg).items()]
+        self.query_one("#cfg-output", Static).update("\n".join(lines))
+        self._status(f"Resolved settings from {path}")
+
+    # --- button dispatch --------------------------------------------------- #
+    @on(Button.Pressed, "#cfg-init")
+    def _b_init(self) -> None:
+        self._init()
+
+    @on(Button.Pressed, "#cfg-show")
+    def _b_show(self) -> None:
+        self._show()
+
+    @on(Button.Pressed, "#cfg-done")
+    def _b_done(self) -> None:
+        self.dismiss(self._dirty)
+
+
 # --------------------------------------------------------------------------- #
 # Main app
 # --------------------------------------------------------------------------- #
@@ -3176,6 +3272,11 @@ class PlannerApp(App):
         width: 96; height: auto; max-height: 85%;
         background: $panel; border: solid $primary; padding: 1 2;
     }
+    .config-box {
+        width: 72; height: auto; max-height: 80%;
+        background: $panel; border: solid $primary; padding: 1 2;
+    }
+    #cfg-output { height: auto; max-height: 20; margin-top: 1; }
     .modal-subtitle { text-style: bold; margin-bottom: 1; }
     #wm-workflows { height: 14; }
     #wm-states { height: 14; }
@@ -3210,6 +3311,7 @@ class PlannerApp(App):
         Binding("R", "manage_member_catalog", "Members"),
         Binding("G", "manage_group_catalog", "Groups"),
         Binding("S", "manage_plan", "Plan"),
+        Binding("B", "manage_config", "Config"),
         Binding("r", "refresh", "Refresh"),
         Binding("a", "toggle_auto_refresh", "Auto↻"),
         Binding("J", "move_down", "Down"),
@@ -3892,6 +3994,10 @@ class PlannerApp(App):
     def _after_plan_manage(self, changed: bool | None) -> None:
         if changed:
             self.refresh_stories()
+
+    def action_manage_config(self) -> None:
+        """Open the config init/show screen."""
+        self.push_screen(ConfigManagerScreen())
 
     def action_browse(self) -> None:
         """Open a menu to browse a container entity, then filter stories by it."""
