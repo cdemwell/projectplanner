@@ -1368,3 +1368,82 @@ def test_tui_story_link_add_and_delete(db_path):
             assert getattr(app, "_exception", None) is None
             await pilot.press("q")
     _run(main())
+
+
+def test_tui_entity_list_pane_stories(seeded_db):
+    """Story 67: the story list is an EntityListPane with the story column
+    schema, and every row is keyed by the story's DB id."""
+    from tui.app import EntityListPane, _story_columns
+
+    async def main():
+        app = PlannerApp(seeded_db)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            pane = app.query_one("#stories", EntityListPane)
+            assert [c.label for c in pane.columns_schema] == \
+                ["ID", "Name", "Type", "State", "Project", "Owners", "✓"]
+            assert pane.row_count == 2
+            sids = [s.id for s in stories_mod.list_stories(app.conn)]
+            assert pane.row_keys == [str(i) for i in sids]
+            # selection (cursor) resolves back to the DB id of the row
+            assert pane.current_id == sids[0]
+            assert app._current_story_id() == sids[0]
+            # an empty filter shows no rows and no cursor id
+            pane.set_items([], conn=app.conn)
+            assert pane.row_count == 0
+            assert pane.current_id is None
+            assert getattr(app, "_exception", None) is None
+            await pilot.press("q")
+    _run(main())
+
+
+def test_tui_entity_list_pane_epics(db_path):
+    """Story 67: an EntityListPane renders any entity type — here epics with a
+    different column schema — and still keys rows by DB id and preserves the
+    cursor across a refresh."""
+    from textual.app import App as TextualApp
+    from textual.containers import Vertical
+
+    from backend import db
+    from backend import epics as epics_mod
+    from backend import projects as proj_mod
+    from tui.app import EntityListPane, _epic_columns
+
+    c = db.connect(db_path)
+    p = proj_mod.create_project(c, "backend")
+    epics_mod.create_epic(c, "Auth", project_id=p.id)
+    epics_mod.create_epic(c, "Payments", project_id=p.id)
+    c.close()
+
+    class PaneHost(TextualApp):
+        """Minimal host that mounts a single pane for headless pilot control."""
+
+        def __init__(self, pane: EntityListPane) -> None:
+            super().__init__()
+            self.pane = pane
+
+        def compose(self):
+            yield Vertical(self.pane)
+
+    async def main():
+        conn = db.connect(db_path)
+        pane = EntityListPane(columns=_epic_columns(), id="epics")
+        host = PaneHost(pane)
+        async with host.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            items = epics_mod.list_epics(conn)
+            pane.set_items(items, conn=conn)
+            await pilot.pause()
+            assert [c.label for c in pane.columns_schema] == \
+                ["ID", "Name", "State", "Project", "Milestone"]
+            assert pane.row_count == 2
+            assert pane.row_keys == [str(e.id) for e in items]
+            assert pane.current_id == items[0].id
+            # a refresh rebuilds the rows but keeps the cursor on the same epic
+            pane.move_cursor(row=1); await pilot.pause()
+            assert pane.current_id == items[1].id
+            pane.set_items(items, conn=conn); await pilot.pause()
+            assert pane.current_id == items[1].id
+            assert getattr(host, "_exception", None) is None
+        conn.close()
+    _run(main())

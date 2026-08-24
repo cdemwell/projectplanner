@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import shutil
 import sqlite3
+from collections.abc import Callable
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
@@ -132,6 +133,266 @@ _SEARCH_ENTITIES: list[tuple[str, str]] = [
     ("Comment", "comment"),
     ("Task", "task"),
 ]
+
+
+# --------------------------------------------------------------------------- #
+# Reusable entity list pane
+# --------------------------------------------------------------------------- #
+
+class Column:
+    """Definition of one column in an :class:`EntityListPane`.
+
+    ``field`` is either an attribute name on the row model (e.g. ``"name"``) or
+    a callable ``(item, conn) -> value`` for computed cells that need a lookup
+    (e.g. a related entity's display name). Row keys are always the entity's DB
+    id, so selection survives sort/filter/refresh.
+    """
+
+    __slots__ = ("label", "field")
+
+    def __init__(self, label: str,
+                 field: str | Callable[[Any, Any], Any]) -> None:
+        self.label = label
+        self.field = field
+
+    def render(self, item: Any, conn: sqlite3.Connection | None = None) -> str:
+        """Render this column's cell for ``item``."""
+        field = self.field
+        if callable(field):
+            return str(field(item, conn))
+        return str(getattr(item, field, "") or "")
+
+
+def _related_name(conn: sqlite3.Connection | None, getter, fk_id) -> str:
+    """Display name of a related entity via a backend ``get_*``, or '' if unknown."""
+    if conn is None or fk_id is None:
+        return ""
+    try:
+        return getter(conn, fk_id).name
+    except errors.NotFound:
+        return ""
+
+
+def _story_columns() -> list[Column]:
+    """Column schema for the story list (keys = story DB ids)."""
+    def state(item, conn: sqlite3.Connection | None) -> str:
+        if conn is None or item.workflow_state_id is None:
+            return ""
+        try:
+            return workflows.get_workflow_state(conn, item.workflow_state_id).name
+        except errors.NotFound:
+            return ""
+
+    def owners(item, conn: sqlite3.Connection | None) -> str:
+        if conn is None:
+            return ""
+        return ",".join(m.mention_name for m in stories.list_owners(conn, item.id))
+
+    return [
+        Column("ID", "id"),
+        Column("Name", "name"),
+        Column("Type", "story_type"),
+        Column("State", state),
+        Column("Project",
+               lambda it, c: _related_name(c, projects.get_project, it.project_id)),
+        Column("Owners", owners),
+        Column("✓", lambda it, c: "✓" if it.completed_at else ""),
+    ]
+
+
+def _epic_columns() -> list[Column]:
+    """Column schema for an epic list (keys = epic DB ids)."""
+    return [
+        Column("ID", "id"),
+        Column("Name", "name"),
+        Column("State", "state"),
+        Column("Project",
+             lambda it, c: _related_name(c, projects.get_project, it.project_id)),
+        Column("Milestone",
+             lambda it, c: _related_name(c, milestones.get_milestone, it.milestone_id)),
+    ]
+
+
+def _iteration_columns() -> list[Column]:
+    """Column schema for an iteration list."""
+    return [
+        Column("ID", "id"),
+        Column("Name", "name"),
+        Column("Status", "status"),
+        Column("Start", lambda it, c: it.start_date or ""),
+        Column("End", lambda it, c: it.end_date or ""),
+    ]
+
+
+def _milestone_columns() -> list[Column]:
+    """Column schema for a milestone list."""
+    return [
+        Column("ID", "id"),
+        Column("Name", "name"),
+        Column("State", "state"),
+    ]
+
+
+def _project_columns() -> list[Column]:
+    """Column schema for a project list."""
+    return [
+        Column("ID", "id"),
+        Column("Name", "name"),
+        Column("Abbreviation", "abbreviation"),
+        Column("Archived", lambda it, c: "yes" if it.archived else ""),
+    ]
+
+
+def _label_columns() -> list[Column]:
+    """Column schema for a label list."""
+    return [
+        Column("ID", "id"),
+        Column("Name", "name"),
+        Column("Color", "color"),
+    ]
+
+
+def _member_columns() -> list[Column]:
+    """Column schema for a member list."""
+    return [
+        Column("ID", "id"),
+        Column("Name", "name"),
+        Column("Mention", "mention_name"),
+    ]
+
+
+def _group_columns() -> list[Column]:
+    """Column schema for a group list."""
+    return [
+        Column("ID", "id"),
+        Column("Name", "name"),
+        Column("Archived", lambda it, c: "yes" if it.archived else ""),
+    ]
+
+
+def _workflow_columns() -> list[Column]:
+    """Column schema for a workflow list."""
+    return [
+        Column("ID", "id"),
+        Column("Name", "name"),
+    ]
+
+
+def _workflow_state_columns() -> list[Column]:
+    """Column schema for a workflow-state list."""
+    return [
+        Column("ID", "id"),
+        Column("Workflow",
+             lambda it, c: _related_name(c, workflows.get_workflow, it.workflow_id)),
+        Column("Name", "name"),
+        Column("Type", "type"),
+        Column("Position", "position"),
+    ]
+
+
+# Per-entity column schemas keyed by entity name. Every pane is an instance of
+# :class:`EntityListPane` configured with one of these.
+ENTITY_COLUMNS: dict[str, list[Column]] = {
+    "story": _story_columns(),
+    "epic": _epic_columns(),
+    "iteration": _iteration_columns(),
+    "milestone": _milestone_columns(),
+    "project": _project_columns(),
+    "label": _label_columns(),
+    "member": _member_columns(),
+    "group": _group_columns(),
+    "workflow": _workflow_columns(),
+    "workflow_state": _workflow_state_columns(),
+}
+
+
+class EntityListPane(DataTable):
+    """A reusable DataTable that renders any entity type.
+
+    Configure with a :class:`Column` schema (which columns, and which model
+    field / callable maps to each). Every row is keyed by the entity's DB id,
+    so selection survives sort/filter/refresh; ``set_items`` restores the cursor
+    to the row it was on before a rebuild.
+
+    The main story list (:class:`PlannerApp`) is one instance of this pane; the
+    Miller-columns browser will be more.
+    """
+
+    def __init__(self, *, columns: list[Column], id: str | None = None,
+                 **kwargs: Any) -> None:
+        super().__init__(id=id, cursor_type="row", **kwargs)
+        self._columns = list(columns)
+        self._row_keys: list[str] = []
+
+    @property
+    def columns_schema(self) -> list[Column]:
+        """The column schema this pane was built with."""
+        return self._columns
+
+    @property
+    def row_keys(self) -> list[str]:
+        """DB ids (as strings) of the rows currently shown, in display order."""
+        return self._row_keys
+
+    def set_items(self, items: list[Any],
+                  conn: sqlite3.Connection | None = None,
+                  selected: set[int] | None = None) -> int | None:
+        """Replace the table's rows with ``items``.
+
+        Every row is keyed by ``item.id``. The cursor is restored to the row it
+        was on before the rebuild (by id, else by index, clamped). Returns the
+        id now under the cursor, or ``None`` if there are no rows.
+
+        Args:
+            items: Entity model instances (any type with an ``id``).
+            conn: Connection passed to callable columns (related-name lookups).
+            selected: Optional set of ids to render reverse-highlighted
+                (used by story multi-select mode).
+        """
+        prev_row = prev_col = None
+        prev_key: str | None = None
+        if self.row_count:
+            coord = self.cursor_coordinate
+            prev_row, prev_col = coord.row, coord.column
+            try:
+                prev_key = self.coordinate_to_cell_key(coord).row_key.value
+            except Exception:
+                prev_key = None
+        self.clear(columns=True)
+        if not self.columns:
+            self.add_columns(*[c.label for c in self._columns])
+        self._row_keys = [str(it.id) for it in items]
+        for it in items:
+            cells = [c.render(it, conn) for c in self._columns]
+            if selected is not None and it.id in selected:
+                self.add_row(*[Text(c, style=Style(reverse=True)) for c in cells],
+                             key=str(it.id))
+            else:
+                self.add_row(*cells, key=str(it.id))
+        if not items:
+            return None
+        if prev_key is not None and prev_key in self._row_keys:
+            new_row = self._row_keys.index(prev_key)
+        elif prev_row is not None:
+            new_row = max(0, min(prev_row, len(self._row_keys) - 1))
+        else:
+            new_row = 0
+        self.cursor_coordinate = (new_row, prev_col or 0)
+        return int(self._row_keys[new_row])
+
+    @property
+    def current_id(self) -> int | None:
+        """The id of the row under the cursor, or ``None``."""
+        try:
+            key = self.coordinate_to_cell_key(self.cursor_coordinate).row_key
+        except Exception:
+            return None
+        if key is None or key.value is None:
+            return None
+        try:
+            return int(key.value)
+        except (TypeError, ValueError):
+            return None
 
 
 # --------------------------------------------------------------------------- #
@@ -3437,7 +3698,7 @@ class PlannerApp(App):
         yield Static("(all stories)", id="filter-bar")
         with Horizontal():
             with Vertical(id="list-pane"):
-                yield DataTable(id="stories", cursor_type="row")
+                yield EntityListPane(columns=_story_columns(), id="stories")
             # Right pane: read-only detail view, or an EditStoryPane when editing.
             with VerticalScroll(id="detail"):
                 yield RichLog(id="detail-view", wrap=True, markup=True)
@@ -3445,7 +3706,7 @@ class PlannerApp(App):
 
     # --- story list -------------------------------------------------------- #
     def refresh_stories(self) -> None:
-        """Query stories based on active filters and populate the DataTable.
+        """Query stories based on active filters and populate the story pane.
 
         ``self.filters`` is a dict with keys project/state_type/q/epic/iteration/
         milestone (each id|str|None), mapped to ``stories.list_stories`` params.
@@ -3460,44 +3721,12 @@ class PlannerApp(App):
         # Restrict to the ids returned by a story-entity search, if one is active.
         if self._search_ids is not None:
             items = [s for s in items if s.id in self._search_ids]
-        table = self.query_one("#stories", DataTable)
+        pane = self.query_one("#stories", EntityListPane)
         # Drop selections that no longer match the filter.
         self._selected &= {s.id for s in items}
-        # Remember where the cursor was so the rebuild doesn't yank it to the top.
-        prev_row = prev_col = None
-        prev_key: str | None = None
-        if table.row_count:
-            coord = table.cursor_coordinate
-            prev_row, prev_col = coord.row, coord.column
-            try:
-                prev_key = table.coordinate_to_cell_key(coord).row_key.value
-            except Exception:
-                prev_key = None
-        table.clear(columns=True)
-        if not table.columns:
-            table.add_columns("ID", "Name", "Type", "State", "Project", "Owners", "✓")
-        for s in items:
-            state = ""
-            if s.workflow_state_id is not None:
-                row = self.conn.execute("SELECT name FROM workflow_state WHERE id = ?",
-                                        (s.workflow_state_id,)).fetchone()
-                state = row["name"] if row else ""
-            projname = ""
-            if s.project_id is not None:
-                row = self.conn.execute("SELECT name FROM project WHERE id = ?",
-                                        (s.project_id,)).fetchone()
-                projname = row["name"] if row else ""
-            owners = ",".join(m["mention_name"] for m in self.conn.execute(
-                "SELECT m.mention_name AS mention_name FROM member m "
-                "JOIN story_owner so ON so.member_id = m.id WHERE so.story_id = ?", (s.id,)))
-            cells = [str(s.id), s.name, s.story_type, state, projname,
-                     owners, "✓" if s.completed_at else ""]
-            if s.id in self._selected:
-                # Highlight selected rows in multi-select (visual) mode.
-                table.add_row(*[Text(c, style=Style(reverse=True)) for c in cells],
-                              key=str(s.id))
-            else:
-                table.add_row(*cells, key=str(s.id))
+        # Rebuild rows keyed by story id (cursor restored inside the pane).
+        # Selected ids are reverse-highlighted in multi-select (visual) mode.
+        pane.set_items(items, conn=self.conn, selected=self._selected)
         # Filter-bar caption.
         parts = []
         parts.append(f"project={'any' if f['project'] is None else self.name_of('project', f['project'])}")
@@ -3517,16 +3746,8 @@ class PlannerApp(App):
         if self._multi_select:
             parts.append(f"  [MULTI] {len(self._selected)} selected")
         self.query_one("#filter-bar", Static).update("  ".join(parts))
-        # Restore the cursor to the story it was on before the rebuild.
-        keys = [str(s.id) for s in items]
+        # The pane restored the cursor; now render the highlighted story's detail.
         if items:
-            if prev_key is not None and prev_key in keys:
-                new_row = keys.index(prev_key)
-            elif prev_row is not None:
-                new_row = max(0, min(prev_row, len(keys) - 1))
-            else:
-                new_row = 0
-            table.cursor_coordinate = (new_row, prev_col or 0)  # type: ignore[assignment]
             self.show_current_detail()
         else:
             log = self.query_one("#detail-view", RichLog)
@@ -3554,17 +3775,7 @@ class PlannerApp(App):
         Returns:
             The story ID as an int, or None if no row is selected.
         """
-        table = self.query_one("#stories", DataTable)
-        try:
-            key = table.coordinate_to_cell_key(table.cursor_coordinate).row_key
-        except Exception:
-            return None
-        if key is None or key.value is None:
-            return None
-        try:
-            return int(key.value)
-        except (TypeError, ValueError):
-            return None
+        return self.query_one("#stories", EntityListPane).current_id
 
     def _detail_story_id(self) -> int | None:
         """Story id to render in the detail pane.
