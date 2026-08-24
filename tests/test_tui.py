@@ -2303,3 +2303,110 @@ def test_tui_inline_edit_and_delete_workflow_state(db_path):
             assert getattr(app, "_exception", None) is None
             await pilot.press("q")
     _run(main())
+
+
+def test_tui_inline_edit_and_delete_label(db_path):
+    """Story 79: a label's inline form renders, an edit persists, and delete
+    removes it with confirmation via the 'd' action while browsing labels."""
+    from textual.widgets import Input
+
+    from backend import db
+    from backend import labels as lbl_mod
+    from tui.app import ConfirmScreen, EditLabelPane
+
+    c = db.connect(db_path)
+    lb = lbl_mod.create_label(c, "bug", color="#ff0000",
+                              description="a bug")
+    c.close()
+
+    async def main():
+        app = PlannerApp(db_path)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+
+            # Switch the parent pane to labels (key 'L'); the highlighted row
+            # is now a label id.
+            await pilot.press("L"); await pilot.pause()
+            assert app.parent_entity == "label"
+            assert app.query_one("#stories").current_id == lb.id
+
+            # 'u' opens the inline label edit form in the detail pane.
+            await pilot.press("u"); await pilot.pause()
+            assert isinstance(app._edit_pane, EditLabelPane)
+
+            # Edit name, color, and description.
+            app.screen.query_one("#el-name", Input).value = "critical"
+            app.screen.query_one("#el-color", Input).value = "#0000ff"
+            app.screen.query_one("#el-desc", TextArea).text = "a critical bug"
+            await pilot.pause()
+            app.screen.query_one("#el-save", Button).focus(); await pilot.pause()
+            await pilot.press("enter"); await pilot.pause(0.05); await pilot.pause()
+            assert app._edit_pane is None
+
+            row = app.conn.execute(
+                "SELECT name, color, description FROM label WHERE id=?",
+                (lb.id,)).fetchone()
+            assert row["name"] == "critical"
+            assert row["color"] == "#0000ff"
+            assert row["description"] == "a critical bug"
+
+            # 'd' while browsing labels deletes with confirmation.
+            await pilot.press("d"); await pilot.pause()
+            assert isinstance(app.screen, ConfirmScreen)
+            app.screen.query_one("#yes", Button).focus(); await pilot.pause()
+            await pilot.press("enter"); await pilot.pause(0.05); await pilot.pause()
+            assert lbl_mod.list_labels(app.conn) == []
+
+            assert getattr(app, "_exception", None) is None
+            await pilot.press("q")
+    _run(main())
+
+
+def test_tui_inline_edit_member(db_path):
+    """Story 79: a member's inline form renders and an edit persists."""
+    from textual.widgets import Input
+
+    from backend import db
+    from backend import members as mb_mod
+    from tui.app import EditMemberPane, EntityListPane
+
+    c = db.connect(db_path)
+    m = mb_mod.create_member(c, "Ada Lovelace", mention_name="ada")
+    c.close()
+
+    async def main():
+        app = PlannerApp(db_path)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+
+            # Switch the parent pane to members (key 'R'). A local member is
+            # seeded (id 1), so our new member is the second row; move the
+            # cursor down to it.
+            await pilot.press("R"); await pilot.pause()
+            assert app.parent_entity == "member"
+            stories_pane = app.query_one("#stories", EntityListPane)
+            stories_pane.cursor_coordinate = (1, 0)
+            await pilot.pause()
+            assert stories_pane.current_id == m.id
+
+            # 'u' opens the inline member edit form in the detail pane.
+            await pilot.press("u"); await pilot.pause()
+            assert isinstance(app._edit_pane, EditMemberPane)
+
+            # Edit name and mention_name.
+            app.screen.query_one("#mb-name", Input).value = "Ada Byron"
+            app.screen.query_one("#mb-mention", Input).value = "ada_b"
+            await pilot.pause()
+            app.screen.query_one("#mb-save", Button).focus(); await pilot.pause()
+            await pilot.press("enter"); await pilot.pause(0.05); await pilot.pause()
+            assert app._edit_pane is None
+
+            row = app.conn.execute(
+                "SELECT name, mention_name FROM member WHERE id=?",
+                (m.id,)).fetchone()
+            assert row["name"] == "Ada Byron"
+            assert row["mention_name"] == "ada_b"
+
+            assert getattr(app, "_exception", None) is None
+            await pilot.press("q")
+    _run(main())

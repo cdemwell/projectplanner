@@ -1313,6 +1313,134 @@ class EditEpicPane(Vertical):
         self.on_cancelled()
 
 
+class EditLabelPane(Vertical):
+    """Edit an existing label's fields in the right detail pane.
+
+    Mounted into the ``#detail`` container when 'u' is pressed while the parent
+    pane is browsing labels, replacing the read-only detail view. Fields: name,
+    color, description. Saves via ``labels.update_label`` and surfaces backend
+    errors inline.
+
+    Args:
+        conn: sqlite3.Connection.
+        label_id: The label being edited.
+        on_saved: Called with the label id after a successful save.
+        on_cancelled: Called (with no args) when editing is cancelled.
+    """
+
+    def __init__(self, conn: sqlite3.Connection, label_id: int, *,
+                 on_saved, on_cancelled) -> None:
+        super().__init__()
+        self.conn = conn
+        self.label_id = label_id
+        self.on_saved = on_saved
+        self.on_cancelled = on_cancelled
+        self.label = labels.get_label(conn, label_id)
+
+    def compose(self) -> ComposeResult:
+        label = self.label
+        yield Static(f"Edit label #{label.id}", classes="detail-title")
+        yield Label("Name:")
+        yield Input(value=label.name, id="el-name")
+        yield Label("Color:")
+        yield Input(value=label.color, id="el-color")
+        yield Label("Description:")
+        yield TextArea(id="el-desc")
+        yield Horizontal(Button("Save", id="el-save", variant="primary"),
+                         Button("Cancel", id="el-cancel"))
+        yield Label("", id="el-err", classes="err")
+
+    def on_mount(self) -> None:
+        if self.label.description:
+            self.query_one("#el-desc", TextArea).text = self.label.description
+        self.query_one("#el-name", Input).focus()
+
+    def _save(self) -> None:
+        name = self.query_one("#el-name", Input).value.strip()
+        if not name:
+            self.query_one("#el-err", Label).update("Name is required.")
+            return
+        try:
+            labels.update_label(
+                self.conn, self.label_id, name=name,
+                color=self.query_one("#el-color", Input).value.strip(),
+                description=self.query_one("#el-desc", TextArea).text)
+        except errors.PlannerError as e:
+            self.query_one("#el-err", Label).update(f"error: {e}")
+            return
+        self.on_saved(self.label_id)
+
+    @on(Button.Pressed, "#el-save")
+    def _ok(self) -> None:
+        self._save()
+
+    @on(Button.Pressed, "#el-cancel")
+    def _cancel(self) -> None:
+        self.on_cancelled()
+
+
+class EditMemberPane(Vertical):
+    """Edit an existing member's fields in the right detail pane.
+
+    Mounted into the ``#detail`` container when 'u' is pressed while the parent
+    pane is browsing members, replacing the read-only detail view. Fields: name,
+    mention_name. Saves via ``members.update_member`` and surfaces backend
+    errors inline.
+
+    Args:
+        conn: sqlite3.Connection.
+        member_id: The member being edited.
+        on_saved: Called with the member id after a successful save.
+        on_cancelled: Called (with no args) when editing is cancelled.
+    """
+
+    def __init__(self, conn: sqlite3.Connection, member_id: int, *,
+                 on_saved, on_cancelled) -> None:
+        super().__init__()
+        self.conn = conn
+        self.member_id = member_id
+        self.on_saved = on_saved
+        self.on_cancelled = on_cancelled
+        self.member = members.get_member(conn, member_id)
+
+    def compose(self) -> ComposeResult:
+        member = self.member
+        yield Static(f"Edit member #{member.id}", classes="detail-title")
+        yield Label("Name:")
+        yield Input(value=member.name, id="mb-name")
+        yield Label("Mention name:")
+        yield Input(value=member.mention_name, id="mb-mention")
+        yield Horizontal(Button("Save", id="mb-save", variant="primary"),
+                         Button("Cancel", id="mb-cancel"))
+        yield Label("", id="mb-err", classes="err")
+
+    def on_mount(self) -> None:
+        self.query_one("#mb-name", Input).focus()
+
+    def _save(self) -> None:
+        name = self.query_one("#mb-name", Input).value.strip()
+        if not name:
+            self.query_one("#mb-err", Label).update("Name is required.")
+            return
+        mention = self.query_one("#mb-mention", Input).value.strip() or None
+        try:
+            members.update_member(
+                self.conn, self.member_id, name=name,
+                mention_name=mention)
+        except errors.PlannerError as e:
+            self.query_one("#mb-err", Label).update(f"error: {e}")
+            return
+        self.on_saved(self.member_id)
+
+    @on(Button.Pressed, "#mb-save")
+    def _ok(self) -> None:
+        self._save()
+
+    @on(Button.Pressed, "#mb-cancel")
+    def _cancel(self) -> None:
+        self.on_cancelled()
+
+
 class MoveStateScreen(ModalScreen[int]):
     """Collects a new workflow state for the selected story/stories.
 
@@ -4990,6 +5118,12 @@ class PlannerApp(App):
         if self.parent_entity == "workflow_state":
             self._open_workflow_state_edit()
             return
+        if self.parent_entity == "label":
+            self._open_label_edit()
+            return
+        if self.parent_entity == "member":
+            self._open_member_edit()
+            return
         if self.parent_entity not in ("story", "iteration", "milestone",
                                       "project", "group"):
             self.bell()
@@ -5078,6 +5212,42 @@ class PlannerApp(App):
         pane = EditWorkflowStatePane(self.conn, sid,
                                      on_saved=self._edit_saved,
                                      on_cancelled=self._edit_cancelled)
+        self._edit_pane = pane
+        self.query_one("#detail", VerticalScroll).mount(pane)
+
+    def _open_label_edit(self) -> None:
+        """Mount the label edit form into the right detail pane in-place."""
+        assert self.conn is not None
+        eid = self.query_one("#stories", EntityListPane).current_id
+        if eid is None:
+            self.bell()
+            return
+        if self._edit_pane is not None:
+            self.bell()  # already editing
+            return
+        # Hide the read-only view and mount the edit form in its place.
+        self.query_one("#detail-view").display = False
+        pane = EditLabelPane(self.conn, eid,
+                             on_saved=self._edit_saved,
+                             on_cancelled=self._edit_cancelled)
+        self._edit_pane = pane
+        self.query_one("#detail", VerticalScroll).mount(pane)
+
+    def _open_member_edit(self) -> None:
+        """Mount the member edit form into the right detail pane in-place."""
+        assert self.conn is not None
+        eid = self.query_one("#stories", EntityListPane).current_id
+        if eid is None:
+            self.bell()
+            return
+        if self._edit_pane is not None:
+            self.bell()  # already editing
+            return
+        # Hide the read-only view and mount the edit form in its place.
+        self.query_one("#detail-view").display = False
+        pane = EditMemberPane(self.conn, eid,
+                              on_saved=self._edit_saved,
+                              on_cancelled=self._edit_cancelled)
         self._edit_pane = pane
         self.query_one("#detail", VerticalScroll).mount(pane)
 
@@ -5467,6 +5637,12 @@ class PlannerApp(App):
         if self.parent_entity == "workflow_state":
             self._delete_selected_workflow_state()
             return
+        if self.parent_entity == "label":
+            self._delete_selected_label()
+            return
+        if self.parent_entity == "member":
+            self._delete_selected_member()
+            return
         if self.parent_entity != "story":
             self.bell()
             return
@@ -5633,6 +5809,52 @@ class PlannerApp(App):
         assert self.conn is not None
         try:
             workflows.delete_workflow_state(self.conn, sid)
+        except errors.PlannerError as e:
+            self.notify(f"error: {e}")
+            return
+        self._close_edit()
+        self.refresh_stories()
+
+    def _delete_selected_label(self) -> None:
+        """Confirm and delete the highlighted label (story 79)."""
+        assert self.conn is not None
+        lid = self._current_story_id()
+        if lid is None:
+            self.bell()
+            return
+        label = labels.get_label(self.conn, lid)
+        self.push_screen(ConfirmScreen(f"Delete label '#{label.id} {label.name}'?"),
+                         lambda ok: self._do_delete_label(lid, ok))
+
+    def _do_delete_label(self, lid: int, ok: bool | None) -> None:
+        if not ok:
+            return
+        assert self.conn is not None
+        try:
+            labels.delete_label(self.conn, lid)
+        except errors.PlannerError as e:
+            self.notify(f"error: {e}")
+            return
+        self._close_edit()
+        self.refresh_stories()
+
+    def _delete_selected_member(self) -> None:
+        """Confirm and delete the highlighted member (story 79)."""
+        assert self.conn is not None
+        mid = self._current_story_id()
+        if mid is None:
+            self.bell()
+            return
+        member = members.get_member(self.conn, mid)
+        self.push_screen(ConfirmScreen(f"Delete member '#{member.id} {member.name}'?"),
+                         lambda ok: self._do_delete_member(mid, ok))
+
+    def _do_delete_member(self, mid: int, ok: bool | None) -> None:
+        if not ok:
+            return
+        assert self.conn is not None
+        try:
+            members.delete_member(self.conn, mid)
         except errors.PlannerError as e:
             self.notify(f"error: {e}")
             return
