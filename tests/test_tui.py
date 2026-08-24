@@ -1770,3 +1770,104 @@ def test_tui_drill_in_out_and_related_link_navigation(db_path):
             assert getattr(app, "_exception", None) is None
             await pilot.press("q")
     _run(main())
+
+
+def test_tui_zoom_stories_two_pane_and_restore(db_path):
+    """Story 73: 'z' collapses the three-pane browser to a two-pane
+    master-detail (parent list + detail), re-deriving the right detail from the
+    left list's selection; pressing 'z' again restores the three panes with the
+    selection preserved."""
+    from backend import db
+    from backend import tasks as tasks_mod
+    from tui.app import EntityListPane
+
+    c = db.connect(db_path)
+    p = projects.create_project(c, "backend")
+    st = stories_mod.create_story(c, "Fix login bug", project_id=p.id)
+    tasks_mod.create_task(c, st.id, "write a test")
+    c.close()
+
+    async def main():
+        app = PlannerApp(db_path)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+
+            # Three panes initially (parent list, child list, detail).
+            stories = app.query_one("#stories", EntityListPane)
+            children = app.query_one("#children", EntityListPane)
+            assert stories.row_count == 1
+            assert children.row_count == 1
+            assert app.query_one("#detail")
+            sid = stories.current_id
+            assert sid == st.id
+
+            # Zoom in: collapse to a two-pane master-detail on the parent list.
+            await pilot.press("z"); await pilot.pause()
+            assert app._zoomed is True
+            assert app._zoom_left == "stories"
+            assert app.query_one("#left-col").has_class("zoom-master-stories")
+            # The child list is hidden, so only the parent list + detail remain.
+            assert children.display is False
+            # The surviving list fills the whole left column and has focus.
+            assert app.focused.id == "stories"
+            # The right detail shows the selected story's detail.
+            assert "Fix login bug" in _pane_text(app.query_one("#detail-view"))
+
+            # Zoom back out: restore the three-pane view and the selection.
+            await pilot.press("z"); await pilot.pause()
+            assert app._zoomed is False
+            assert not app.query_one("#left-col").has_class("zoom-master-stories")
+            assert children.display is True
+            assert children.row_count == 1
+            assert stories.current_id == sid
+            assert "Fix login bug" in _pane_text(app.query_one("#detail-view"))
+
+            assert getattr(app, "_exception", None) is None
+            await pilot.press("q")
+    _run(main())
+
+
+def test_tui_zoom_children_master_detail(db_path):
+    """Story 73: zooming while the child list is focused makes the child list
+    the master on the left (hiding the parent list) and re-derives the right
+    detail from the child list's selection."""
+    from backend import db
+    from backend import epics as epics_mod
+
+    c = db.connect(db_path)
+    p = projects.create_project(c, "backend")
+    e = epics_mod.create_epic(c, "Auth epic", project_id=p.id)
+    stories_mod.create_story(c, "Fix login bug", project_id=p.id, epic_id=e.id)
+    c.close()
+
+    async def main():
+        app = PlannerApp(db_path)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            # Switch parent to epics; the child pane lists the epic's stories.
+            await pilot.press("E"); await pilot.pause()
+            assert app.parent_entity == "epic"
+            assert app.query_one("#children").row_count == 1
+
+            # Focus the child pane, then zoom.
+            await pilot.press("tab"); await pilot.pause()
+            assert app.focused.id == "children"
+            await pilot.press("z"); await pilot.pause()
+            assert app._zoomed is True
+            assert app._zoom_left == "children"
+            assert app.query_one("#left-col").has_class("zoom-master-children")
+            # The parent list is hidden; the child list fills the left column.
+            assert app.query_one("#stories").display is False
+            assert app.focused.id == "children"
+            # The right detail re-derives from the child (story) selection.
+            assert "Fix login bug" in _pane_text(app.query_one("#detail-view"))
+
+            # Zoom back out restores the three-pane view.
+            await pilot.press("z"); await pilot.pause()
+            assert app._zoomed is False
+            assert app.query_one("#stories").display is True
+            assert not app.query_one("#left-col").has_class("zoom-master-children")
+
+            assert getattr(app, "_exception", None) is None
+            await pilot.press("q")
+    _run(main())

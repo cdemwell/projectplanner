@@ -3669,6 +3669,12 @@ class PlannerApp(App):
     #stories { height: 1fr; border: solid $surface; }
     #children { height: 1fr; border: solid $surface; }
     #detail { width: 1fr; border: solid $surface; }
+    /* Zoom (story 73): collapse the three-pane browser to a two-pane
+       master-detail. The focused list pane (parent #stories or child
+       #children) fills the whole left column; the other list pane is hidden
+       and the right detail re-derives from the surviving list's selection. */
+    #left-col.zoom-master-children #stories { display: none; }
+    #left-col.zoom-master-stories #children { display: none; }
     #stories.pane-focused, #children.pane-focused, #detail.pane-focused {
         border: double $primary;
         background: $surface;
@@ -3745,6 +3751,9 @@ class PlannerApp(App):
         # binding; the chain otherwise resolves Screen before App.
         Binding("tab", "focus_next_pane", "Next pane", priority=True, show=False),
         Binding("shift+tab", "focus_prev_pane", "Prev pane", priority=True, show=False),
+        # Zoom (story 73): collapse the three-pane browser to a two-pane
+        # master-detail; pressing 'z' again restores the three panes.
+        Binding("z", "zoom", "Zoom", show=False),
     ]
 
     def __init__(self, db_path: str | None = None,
@@ -3784,6 +3793,13 @@ class PlannerApp(App):
         # frame (drill into the selected row's children); Esc/Left pops one
         # (return to the parent level).
         self._drill_stack: list[tuple[str, int, str]] = []
+        # Zoom (story 73): when ``_zoomed`` is True the three-pane browser is
+        # collapsed to a two-pane master-detail. ``_zoom_left`` is the list
+        # pane that survives on the left ("stories" = parent or "children" =
+        # child); the other list pane is hidden and the right detail re-derives
+        # from the surviving list's selected entity.
+        self._zoomed = False
+        self._zoom_left = "stories"
 
     # --- lifecycle --------------------------------------------------------- #
     def on_mount(self) -> None:
@@ -3820,14 +3836,26 @@ class PlannerApp(App):
         yield Footer()
 
     # --- three-pane focus -------------------------------------------------- #
+    def _cycle_ids(self) -> list[str]:
+        """Pane ids in focus-cycling order for the current zoom state.
+
+        When zoomed, the hidden list pane is skipped so Tab/Shift+Tab cycle
+        only the surviving master list and the detail pane.
+        """
+        if not self._zoomed:
+            return self._pane_ids
+        return [self._zoom_left, "detail"]
+
     def _activate_pane(self, index: int) -> None:
-        """Focus the pane at ``index`` in :attr:`_pane_ids` and mark it active.
+        """Focus the pane at ``index`` in :attr:`_cycle_ids` and mark it active.
 
         The active pane is visually distinguished via the ``pane-focused``
-        class (a doubled border), so Tab/Shift+Tab cycling is obvious.
+        class (a doubled border), so Tab/Shift+Tab cycling is obvious. When
+        zoomed, the hidden list pane is never a focus target.
         """
-        self._active_pane = index % len(self._pane_ids)
-        pane_selector = f"#{self._pane_ids[self._active_pane]}"
+        ids = self._cycle_ids()
+        self._active_pane = index % len(ids)
+        pane_selector = f"#{ids[self._active_pane]}"
         # Clear the highlight from every pane, then apply it to the target.
         for other in self._pane_ids:
             try:
@@ -3848,6 +3876,15 @@ class PlannerApp(App):
             # Focus is best-effort (e.g. a modal is open); the marker still moves.
             pass
 
+    def _parent_focused(self) -> bool:
+        """True when the parent (#stories) list pane has focus.
+
+        Drill-in/out (story 72) applies only to the parent pane, so the
+        actions gate on this rather than a bare pane index — keeping them
+        correct even when zoomed onto the child list.
+        """
+        return self.focused is not None and self.focused.id == "stories"
+
     def action_focus_next_pane(self) -> None:
         """Cycle focus to the next pane (parent -> child -> detail)."""
         self._activate_pane(self._active_pane + 1)
@@ -3855,6 +3892,67 @@ class PlannerApp(App):
     def action_focus_prev_pane(self) -> None:
         """Cycle focus to the previous pane (detail -> child -> parent)."""
         self._activate_pane(self._active_pane - 1)
+
+    # --- zoom: three-pane <-> two-pane master-detail (story 73) ------------ #
+    def action_zoom(self) -> None:
+        """Toggle between the three-pane browser and a two-pane master-detail.
+
+        Entering zoom collapses the focused list pane (parent or child) to fill
+        the whole left column and hides the other list, re-deriving the right
+        detail from the surviving list's selection. Leaving zoom restores the
+        three panes with their selections intact. When zoomed on stories this
+        reproduces the original story-centric one-list + detail browsing.
+        """
+        if self._zoomed:
+            # Restore the three-pane view, preserving panes and selections.
+            self._zoomed = False
+            self._apply_zoom_classes()
+            target = self._pane_ids.index(self._zoom_left or "stories")
+            self._activate_pane(target)
+            self.refresh_children()
+            self.show_current_detail()
+            return
+        # Entering zoom: decide which list becomes the master.
+        if self._active_pane == 1 and valid_children(self.parent_entity):
+            self._zoom_left = "children"
+        else:
+            self._zoom_left = "stories"
+        self._zoomed = True
+        self._apply_zoom_classes()
+        # Focus the surviving master list (cycle index 0) and show its detail.
+        self._activate_pane(0)
+        self.show_zoom_detail()
+
+    def _apply_zoom_classes(self) -> None:
+        """Sync the ``#left-col`` zoom-master classes with the zoom state."""
+        left = self.query_one("#left-col")
+        for cls in ("zoom-master-stories", "zoom-master-children"):
+            left.remove_class(cls)
+        if self._zoomed:
+            left.add_class(f"zoom-master-{self._zoom_left}")
+
+    def show_zoom_detail(self) -> None:
+        """Re-derive the detail pane from the zoomed master list's selection."""
+        if self._zoom_left == "children":
+            kinds = valid_children(self.parent_entity)
+            if not kinds:
+                self.query_one("#detail-view", EntityDetailPane).show_message(
+                    "(no child rows)")
+                return
+            entity = kinds[0]
+            eid = self.query_one("#children", EntityListPane).current_id
+        else:
+            entity = self.parent_entity
+            eid = (self._detail_story_id() if entity == "story"
+                   else self.query_one("#stories", EntityListPane).current_id)
+        if eid is None:
+            return
+        assert self.conn is not None
+        pane = self.query_one("#detail-view", EntityDetailPane)
+        try:
+            pane.show(self.conn, entity, eid)
+        except (errors.NotFound, KeyError):
+            pane.show_message(f"(no detail for {entity} #{eid})")
 
     # --- story list -------------------------------------------------------- #
     def refresh_stories(self) -> None:
@@ -4051,6 +4149,12 @@ class PlannerApp(App):
 
     @on(DataTable.RowHighlighted)
     def _on_highlight(self, event: DataTable.RowHighlighted) -> None:
+        if self._zoomed:
+            # In the zoomed view the only meaningful highlight is the surviving
+            # master list; re-derive its detail. The hidden list can't change.
+            if event.data_table.id == self._zoom_left:
+                self.show_zoom_detail()
+            return
         if event.data_table.id == "stories":
             # Moving the selection while editing abandons the edit and shows
             # the newly selected story's children and detail instead.
@@ -4136,7 +4240,7 @@ class PlannerApp(App):
         if isinstance(focused, RelatedLink):
             self._open_related(focused)
             return
-        if self._active_pane != 0:
+        if not self._parent_focused():
             return
         pane = self.query_one("#stories", EntityListPane)
         parent_id = pane.current_id
@@ -4155,7 +4259,7 @@ class PlannerApp(App):
         Pops the drill navigation history; when none is left this no-ops
         (bell) rather than leaving the current root view.
         """
-        if self._active_pane != 0:
+        if not self._parent_focused():
             return
         if not self._drill_stack:
             self.bell()
@@ -4169,7 +4273,7 @@ class PlannerApp(App):
         if self._multi_select:
             self.action_exit_multiselect()
             return
-        if self._active_pane == 0 and self._drill_stack:
+        if self._parent_focused() and self._drill_stack:
             self.action_drill_out()
 
     def _open_related(self, link: RelatedLink) -> None:
