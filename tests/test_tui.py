@@ -2183,3 +2183,123 @@ def test_tui_inline_edit_milestone(db_path):
             assert getattr(app, "_exception", None) is None
             await pilot.press("q")
     _run(main())
+
+
+def test_tui_inline_edit_and_delete_workflow(db_path):
+    """Story 78: a workflow's inline form edits name/default-state ('u'), and
+    'd' deletes it after confirmation."""
+    from textual.widgets import Button, Input, Select
+
+    from backend import db
+    from backend import workflows as wf_mod
+
+    c = db.connect(db_path)
+    wf = wf_mod.create_workflow(c, "Original", states=[
+        {"name": "Todo", "type": "unstarted", "position": 0},
+        {"name": "Doing", "type": "started", "position": 1},
+    ])
+    c.close()
+
+    async def main():
+        app = PlannerApp(db_path)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+
+            # Switch the parent pane to workflows and select ours.
+            await pilot.press("W"); await pilot.pause()
+            assert app.parent_entity == "workflow"
+            pane = app.query_one("#stories")
+            pane.move_cursor(row=pane.row_keys.index(str(wf.id))); await pilot.pause()
+            assert app._current_story_id() == wf.id
+
+            # Inline edit: rename + set the default state, then save.
+            await pilot.press("u"); await pilot.pause()
+            assert app._edit_pane is not None
+            app.screen.query_one("#wfe-name", Input).value = "Renamed"
+            doing = next(s for s in wf_mod.list_workflow_states(app.conn, wf.id)
+                         if s.name == "Doing")
+            app.screen.query_one("#wfe-default", Select).value = doing.id
+            await pilot.pause()
+            app.screen.query_one("#wfe-save", Button).focus(); await pilot.pause()
+            await pilot.press("enter"); await pilot.pause(0.05); await pilot.pause()
+            assert app._edit_pane is None
+
+            row = app.conn.execute(
+                "SELECT name, default_state_id FROM workflow WHERE id=?",
+                (wf.id,)).fetchone()
+            assert row["name"] == "Renamed"
+            assert row["default_state_id"] == doing.id
+
+            # Delete the workflow with confirmation ('d' -> #yes).
+            await pilot.press("d"); await pilot.pause()
+            app.screen.query_one("#yes", Button).focus(); await pilot.pause()
+            await pilot.press("enter"); await pilot.pause(0.05); await pilot.pause()
+            assert wf.id not in [x.id for x in wf_mod.list_workflows(app.conn)]
+
+            assert getattr(app, "_exception", None) is None
+            await pilot.press("q")
+    _run(main())
+
+
+def test_tui_inline_edit_and_delete_workflow_state(db_path):
+    """Story 78: a workflow state's inline form edits name/type/position ('u'),
+    and 'd' deletes it after confirmation (drilling into the workflow first)."""
+    from textual.widgets import Button, Input, Select
+
+    from backend import db
+    from backend import workflows as wf_mod
+
+    c = db.connect(db_path)
+    wf = wf_mod.create_workflow(c, "Dev", states=[
+        {"name": "Todo", "type": "unstarted", "position": 0},
+        {"name": "Doing", "type": "started", "position": 1},
+        {"name": "Done", "type": "done", "position": 2},
+    ])
+    c.close()
+
+    async def main():
+        app = PlannerApp(db_path)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+
+            # Switch to workflows, select ours, and drill into its states.
+            await pilot.press("W"); await pilot.pause()
+            assert app.parent_entity == "workflow"
+            pane = app.query_one("#stories")
+            pane.move_cursor(row=pane.row_keys.index(str(wf.id))); await pilot.pause()
+            await pilot.press("enter"); await pilot.pause()
+            assert app.parent_entity == "workflow_state"
+            assert app._drill_stack == [("workflow", wf.id, "workflow_state")]
+
+            # Select the "Doing" state and open its inline edit.
+            st = next(s for s in wf_mod.list_workflow_states(app.conn, wf.id)
+                      if s.name == "Doing")
+            pane.move_cursor(row=pane.row_keys.index(str(st.id))); await pilot.pause()
+            assert app._current_story_id() == st.id
+
+            await pilot.press("u"); await pilot.pause()
+            assert app._edit_pane is not None
+            app.screen.query_one("#wse-name", Input).value = "In Progress"
+            app.screen.query_one("#wse-type", Select).value = "started"
+            app.screen.query_one("#wse-position", Input).value = "5"
+            await pilot.pause()
+            app.screen.query_one("#wse-save", Button).focus(); await pilot.pause()
+            await pilot.press("enter"); await pilot.pause(0.05); await pilot.pause()
+            assert app._edit_pane is None
+
+            row = app.conn.execute(
+                "SELECT name, type, position FROM workflow_state WHERE id=?",
+                (st.id,)).fetchone()
+            assert row["name"] == "In Progress"
+            assert row["type"] == "started"
+            assert row["position"] == 5
+
+            # Delete the state with confirmation ('d' -> #yes).
+            await pilot.press("d"); await pilot.pause()
+            app.screen.query_one("#yes", Button).focus(); await pilot.pause()
+            await pilot.press("enter"); await pilot.pause(0.05); await pilot.pause()
+            assert st.id not in [s.id for s in wf_mod.list_workflow_states(app.conn, wf.id)]
+
+            assert getattr(app, "_exception", None) is None
+            await pilot.press("q")
+    _run(main())

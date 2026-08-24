@@ -935,6 +935,71 @@ class EditProjectPane(Vertical):
         self.on_cancelled()
 
 
+class EditWorkflowPane(Vertical):
+    """Edit an existing workflow's fields in the right detail pane.
+
+    Mounted into the ``#detail`` container when 'u' is pressed while the parent
+    pane is browsing workflows, replacing the read-only detail view. Fields:
+    name, default state. Saves via ``workflows.update_workflow`` and surfaces
+    backend errors inline.
+
+    Args:
+        conn: sqlite3.Connection.
+        workflow_id: The workflow being edited.
+        on_saved: Called with the workflow id after a successful save.
+        on_cancelled: Called (with no args) when editing is cancelled.
+    """
+
+    def __init__(self, conn: sqlite3.Connection, workflow_id: int, *,
+                 on_saved, on_cancelled) -> None:
+        super().__init__()
+        self.conn = conn
+        self.workflow_id = workflow_id
+        self.on_saved = on_saved
+        self.on_cancelled = on_cancelled
+        self.workflow = workflows.get_workflow(conn, workflow_id)
+
+    def compose(self) -> ComposeResult:
+        w = self.workflow
+        state_opts = [("(none)", _NONE_INT)]
+        for s in workflows.list_workflow_states(self.conn, w.id):
+            state_opts.append((f"{s.name} ({s.type})", s.id))
+        yield Static(f"Edit workflow #{w.id}", classes="detail-title")
+        yield Label("Name:")
+        yield Input(value=w.name, id="wfe-name")
+        yield Label("Default state:")
+        yield Select(state_opts,
+                     value=w.default_state_id or _NONE_INT, id="wfe-default")
+        yield Horizontal(Button("Save", id="wfe-save", variant="primary"),
+                         Button("Cancel", id="wfe-cancel"))
+        yield Label("", id="wfe-err", classes="err")
+
+    def on_mount(self) -> None:
+        self.query_one("#wfe-name", Input).focus()
+
+    def _save(self) -> None:
+        name = self.query_one("#wfe-name", Input).value.strip()
+        if not name:
+            self.query_one("#wfe-err", Label).update("Name is required.")
+            return
+        default = _sel(self.query_one("#wfe-default", Select).value)
+        try:
+            workflows.update_workflow(self.conn, self.workflow_id, name=name,
+                                      default_state_id=default)
+        except errors.PlannerError as e:
+            self.query_one("#wfe-err", Label).update(f"error: {e}")
+            return
+        self.on_saved(self.workflow_id)
+
+    @on(Button.Pressed, "#wfe-save")
+    def _ok(self) -> None:
+        self._save()
+
+    @on(Button.Pressed, "#wfe-cancel")
+    def _cancel(self) -> None:
+        self.on_cancelled()
+
+
 class EditGroupPane(Vertical):
     """Edit an existing group's fields in the right detail pane.
 
@@ -999,6 +1064,80 @@ class EditGroupPane(Vertical):
         self._save()
 
     @on(Button.Pressed, "#ge-cancel")
+    def _cancel(self) -> None:
+        self.on_cancelled()
+
+
+class EditWorkflowStatePane(Vertical):
+    """Edit an existing workflow state's fields in the right detail pane.
+
+    Mounted into the ``#detail`` container when 'u' is pressed while the parent
+    pane is browsing a workflow's states, replacing the read-only detail view.
+    Fields: name, type, position. Saves via ``workflows.update_workflow_state``
+    and surfaces backend errors inline.
+
+    Args:
+        conn: sqlite3.Connection.
+        state_id: The workflow state being edited.
+        on_saved: Called with the state id after a successful save.
+        on_cancelled: Called (with no args) when editing is cancelled.
+    """
+
+    def __init__(self, conn: sqlite3.Connection, state_id: int, *,
+                 on_saved, on_cancelled) -> None:
+        super().__init__()
+        self.conn = conn
+        self.state_id = state_id
+        self.on_saved = on_saved
+        self.on_cancelled = on_cancelled
+        self.state = workflows.get_workflow_state(conn, state_id)
+
+    def compose(self) -> ComposeResult:
+        st = self.state
+        type_opts = [(t, t) for t in workflows.STATE_TYPES]
+        yield Static(f"Edit state #{st.id}", classes="detail-title")
+        yield Label("Name:")
+        yield Input(value=st.name, id="wse-name")
+        yield Label("Type:")
+        yield Select(type_opts, value=st.type, id="wse-type")
+        yield Label("Position:")
+        yield Input(value=str(st.position), id="wse-position")
+        yield Horizontal(Button("Save", id="wse-save", variant="primary"),
+                         Button("Cancel", id="wse-cancel"))
+        yield Label("", id="wse-err", classes="err")
+
+    def on_mount(self) -> None:
+        self.query_one("#wse-name", Input).focus()
+
+    def _save(self) -> None:
+        name = self.query_one("#wse-name", Input).value.strip()
+        if not name:
+            self.query_one("#wse-err", Label).update("Name is required.")
+            return
+        stype = self.query_one("#wse-type", Select).value
+        if stype not in workflows.STATE_TYPES:
+            self.query_one("#wse-err", Label).update("Invalid state type.")
+            return
+        pos_str = self.query_one("#wse-position", Input).value.strip()
+        fields: dict[str, Any] = {"name": name, "type": stype}
+        if pos_str:
+            try:
+                fields["position"] = float(pos_str)
+            except ValueError:
+                self.query_one("#wse-err", Label).update("Position must be a number.")
+                return
+        try:
+            workflows.update_workflow_state(self.conn, self.state_id, **fields)
+        except errors.PlannerError as e:
+            self.query_one("#wse-err", Label).update(f"error: {e}")
+            return
+        self.on_saved(self.state_id)
+
+    @on(Button.Pressed, "#wse-save")
+    def _ok(self) -> None:
+        self._save()
+
+    @on(Button.Pressed, "#wse-cancel")
     def _cancel(self) -> None:
         self.on_cancelled()
 
@@ -4839,11 +4978,17 @@ class PlannerApp(App):
         """Edit the selected entity in-place in the right detail pane.
 
         'u' edits the kind currently being browsed: a story, epic, iteration,
-        milestone, project, or group each opens its inline form in the detail
-        pane; other parent kinds bell and no-op.
+        milestone, project, group, workflow, or workflow state each opens its
+        inline form in the detail pane; other parent kinds bell and no-op.
         """
         if self.parent_entity == "epic":
             self._open_epic_edit()
+            return
+        if self.parent_entity == "workflow":
+            self._open_workflow_edit()
+            return
+        if self.parent_entity == "workflow_state":
+            self._open_workflow_state_edit()
             return
         if self.parent_entity not in ("story", "iteration", "milestone",
                                       "project", "group"):
@@ -4900,6 +5045,42 @@ class PlannerApp(App):
         self._edit_pane = pane
         self.query_one("#detail", VerticalScroll).mount(pane)
 
+    def _open_workflow_edit(self) -> None:
+        """Mount the workflow edit form into the right detail pane in-place."""
+        assert self.conn is not None
+        wid = self.query_one("#stories", EntityListPane).current_id
+        if wid is None:
+            self.bell()
+            return
+        if self._edit_pane is not None:
+            self.bell()  # already editing
+            return
+        # Hide the read-only view and mount the edit form in its place.
+        self.query_one("#detail-view").display = False
+        pane = EditWorkflowPane(self.conn, wid,
+                                on_saved=self._edit_saved,
+                                on_cancelled=self._edit_cancelled)
+        self._edit_pane = pane
+        self.query_one("#detail", VerticalScroll).mount(pane)
+
+    def _open_workflow_state_edit(self) -> None:
+        """Mount the workflow-state edit form into the right detail pane in-place."""
+        assert self.conn is not None
+        sid = self.query_one("#stories", EntityListPane).current_id
+        if sid is None:
+            self.bell()
+            return
+        if self._edit_pane is not None:
+            self.bell()  # already editing
+            return
+        # Hide the read-only view and mount the edit form in its place.
+        self.query_one("#detail-view").display = False
+        pane = EditWorkflowStatePane(self.conn, sid,
+                                     on_saved=self._edit_saved,
+                                     on_cancelled=self._edit_cancelled)
+        self._edit_pane = pane
+        self.query_one("#detail", VerticalScroll).mount(pane)
+
     def _edit_saved(self, entity_id: int) -> None:
         self._close_edit()
         if self.parent_entity == "epic":
@@ -4907,14 +5088,15 @@ class PlannerApp(App):
             self.refresh_parent()
             return
         self.refresh_stories()
-        # Keep the cursor on the edited row (for stories only; other kinds
-        # restore their cursor inside refresh_parent).
-        if self.parent_entity == "story":
-            table = self.query_one("#stories", DataTable)
-            try:
-                table.move_cursor(row=table.get_row_index(str(entity_id)))
-            except Exception:
-                pass
+        # Keep the cursor on the edited row. Mounting the edit pane briefly
+        # steals focus and resets the parent list's cursor to the top, so
+        # restore it explicitly after the refresh (the filter-based story list
+        # and the non-epic parent kinds all need this nudge).
+        table = self.query_one("#stories", DataTable)
+        try:
+            table.move_cursor(row=table.get_row_index(str(entity_id)))
+        except Exception:
+            pass
         self.show_current_detail()
 
     def _edit_cancelled(self) -> None:
@@ -5279,6 +5461,12 @@ class PlannerApp(App):
         if self.parent_entity == "group":
             self._delete_selected_group()
             return
+        if self.parent_entity == "workflow":
+            self._delete_selected_workflow()
+            return
+        if self.parent_entity == "workflow_state":
+            self._delete_selected_workflow_state()
+            return
         if self.parent_entity != "story":
             self.bell()
             return
@@ -5398,6 +5586,53 @@ class PlannerApp(App):
         assert self.conn is not None
         try:
             groups.delete_group(self.conn, gid)
+        except errors.PlannerError as e:
+            self.notify(f"error: {e}")
+            return
+        self._close_edit()
+        self.refresh_stories()
+
+    def _delete_selected_workflow(self) -> None:
+        """Confirm and delete the highlighted workflow (story 78)."""
+        assert self.conn is not None
+        wid = self._current_story_id()
+        if wid is None:
+            self.bell()
+            return
+        wf = workflows.get_workflow(self.conn, wid)
+        self.push_screen(
+            ConfirmScreen(f"Delete workflow '#{wf.id} {wf.name}' and its states?"),
+            lambda ok: self._do_delete_workflow(wid, ok))
+
+    def _do_delete_workflow(self, wid: int, ok: bool | None) -> None:
+        if not ok:
+            return
+        assert self.conn is not None
+        try:
+            workflows.delete_workflow(self.conn, wid)
+        except errors.PlannerError as e:
+            self.notify(f"error: {e}")
+            return
+        self._close_edit()
+        self.refresh_stories()
+
+    def _delete_selected_workflow_state(self) -> None:
+        """Confirm and delete the highlighted workflow state (story 78)."""
+        assert self.conn is not None
+        sid = self._current_story_id()
+        if sid is None:
+            self.bell()
+            return
+        st = workflows.get_workflow_state(self.conn, sid)
+        self.push_screen(ConfirmScreen(f"Delete state '#{st.id} {st.name}'?"),
+                         lambda ok: self._do_delete_workflow_state(sid, ok))
+
+    def _do_delete_workflow_state(self, sid: int, ok: bool | None) -> None:
+        if not ok:
+            return
+        assert self.conn is not None
+        try:
+            workflows.delete_workflow_state(self.conn, sid)
         except errors.PlannerError as e:
             self.notify(f"error: {e}")
             return
