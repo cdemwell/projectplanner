@@ -52,6 +52,7 @@ from backend import (
     tasks,
     workflows,
 )
+from backend.models import StoryComment
 
 # Sentinels for "no selection" inside Select widgets (kept as int/str so all
 # option values share a type and we dodge the blank-selection API).
@@ -81,6 +82,7 @@ _PALETTE_COMMANDS: list[tuple[str, str]] = [
     ("Update story", "edit_story"),
     ("Move state", "move_state"),
     ("Add comment", "add_comment"),
+    ("Comment action", "comment_action"),
     ("Add task", "add_task"),
     ("Task action", "task_action"),
     ("Manage owners", "manage_owners"),
@@ -650,6 +652,106 @@ class TaskActionScreen(ModalScreen[bool]):
             tasks.delete_task(self.conn, tid)
         except errors.PlannerError as e:
             self.query_one("#ta-err", Label).update(f"error: {e}")
+            return
+        self.dismiss(True)
+
+    @on(Button.Pressed, "#cancel")
+    def _cancel(self) -> None:
+        self.dismiss(None)
+
+
+class CommentActionScreen(ModalScreen[bool]):
+    """Edit or delete a comment on a story.
+
+    The comment is chosen from a Select of the story's comments. "Save Text"
+    updates the comment text from the TextArea via the backend ``comments``
+    module; "Delete" removes the comment after a confirmation via
+    :class:`ConfirmScreen`. Backend errors are shown in the ``#ca-err`` label.
+
+    Dismisses with:
+        bool: True if a change was made, None on cancel.
+    """
+
+    def __init__(self, conn: sqlite3.Connection, story_id: int) -> None:
+        super().__init__()
+        self.conn = conn
+        self.story_id = story_id
+
+    def compose(self) -> ComposeResult:
+        opts = [(f"#{cm.id} {cm.text}", cm.id)
+                for cm in comments.list_comments(self.conn, self.story_id)]
+        if not opts:
+            opts = [("(no comments)", _NONE_INT)]
+        yield VerticalScroll(
+            Static("Comment actions", classes="modal-title"),
+            Label("Comment:"), Select(opts, value=opts[0][1], id="ca-comment"),
+            Label("New text:"), TextArea(id="ca-text"),
+            Horizontal(Button("Save Text", id="save", variant="primary"),
+                       Button("Delete", id="delete", variant="error"),
+                       Button("Cancel", id="cancel")),
+            Label("", id="ca-err", classes="err"),
+            classes="modal-box",
+        )
+
+    def on_mount(self) -> None:
+        self.query_one("#ca-comment", Select).focus()
+        self._prefill()
+
+    def _comment_id(self) -> int | None:
+        return _sel(self.query_one("#ca-comment", Select).value)
+
+    def _comment(self) -> StoryComment | None:
+        cid = self._comment_id()
+        if cid is None:
+            return None
+        try:
+            return comments.get_comment(self.conn, cid)
+        except errors.NotFound:
+            return None
+
+    def _prefill(self) -> None:
+        """Preload the editor with the selected comment's text."""
+        cm = self._comment()
+        if cm is not None:
+            self.query_one("#ca-text", TextArea).text = cm.text
+
+    @on(Select.Changed, "#ca-comment")
+    def _on_pick(self) -> None:
+        self._prefill()
+
+    @on(Button.Pressed, "#save")
+    def _save(self) -> None:
+        cm = self._comment()
+        if cm is None:
+            self.query_one("#ca-err", Label).update("No comment to edit.")
+            return
+        text = self.query_one("#ca-text", TextArea).text.strip()
+        if not text:
+            self.query_one("#ca-err", Label).update("Comment text is required.")
+            return
+        try:
+            comments.update_comment(self.conn, cm.id, text=text)
+        except errors.PlannerError as e:
+            self.query_one("#ca-err", Label).update(f"error: {e}")
+            return
+        self.dismiss(True)
+
+    @on(Button.Pressed, "#delete")
+    def _delete(self) -> None:
+        cm = self._comment()
+        if cm is None:
+            self.query_one("#ca-err", Label).update("No comment to delete.")
+            return
+        self.app.push_screen(ConfirmScreen(f"Delete comment '#{cm.id}'?"),
+                             lambda ok: self._do_delete(cm.id, ok))
+
+    def _do_delete(self, cid: int, ok: bool | None) -> None:
+        if not ok:
+            return
+        try:
+            comments.delete_comment(self.conn, cid)
+        except errors.PlannerError as e:
+            self.query_one("#ca-err", Label).update(f"error: {e}")
             return
         self.dismiss(True)
 
@@ -2813,6 +2915,7 @@ class PlannerApp(App):
         Binding("u", "edit_story", "Update"),
         Binding("m", "move_state", "Move"),
         Binding("c", "add_comment", "Comment"),
+        Binding("C", "comment_action", "Comment⇄"),
         Binding("t", "add_task", "Task"),
         Binding("x", "task_action", "Task⇄"),
         Binding("o", "manage_owners", "Owners"),
@@ -3297,6 +3400,15 @@ class PlannerApp(App):
             return
         self.push_screen(TextScreen("Add comment"),
                          lambda text: self._do_comment(sid, text))
+
+    def action_comment_action(self) -> None:
+        """Open modal to edit or delete a comment on the selected story."""
+        sid = self._current_story_id()
+        if sid is None or self.conn is None:
+            self.bell()
+            return
+        self.push_screen(CommentActionScreen(self.conn, sid),
+                         lambda changed: self.show_current_detail() if changed else None)
 
     def action_add_task(self) -> None:
         """Open modal to add a task to the selected story."""

@@ -12,7 +12,7 @@ import pytest
 
 textual = pytest.importorskip("textual")  # noqa: F841
 
-from textual.widgets import Button  # noqa: E402
+from textual.widgets import Button, TextArea  # noqa: E402
 
 from backend import comments as comments_mod
 from backend import projects  # noqa: E402
@@ -228,6 +228,55 @@ def test_tui_task_action_delete(db_path):
             with pytest.raises(errors.NotFound):
                 tasks_mod.get_task(app.conn, t1.id)
             assert tasks_mod.get_task(app.conn, t2.id) is not None
+
+            assert getattr(app, "_exception", None) is None
+            await pilot.press("q")
+    _run(main())
+
+
+def test_tui_comment_action_edit_and_delete(db_path):
+    """The 'C' comment-action modal edits and deletes a comment with confirmation."""
+    from backend import comments as comments_mod
+    from backend import db, errors
+    from backend import stories as stories_mod
+
+    c = db.connect(db_path)
+    s = stories_mod.create_story(c, "c")
+    c1 = comments_mod.create_comment(c, s.id, "original text")
+    c2 = comments_mod.create_comment(c, s.id, "keep me")
+    c.close()
+
+    async def main():
+        app = PlannerApp(db_path)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            app.query_one("#stories").move_cursor(row=0); await pilot.pause()
+
+            # edit the first comment (editor is prefilled with its current text)
+            await pilot.press("C"); await pilot.pause()
+            assert app.screen.query_one("#ca-text", TextArea).text == "original text"
+            app.screen.query_one("#ca-text", TextArea).text = "updated!"
+            app.screen.query_one("#save", Button).focus(); await pilot.pause()
+            await pilot.press("enter"); await pilot.pause(0.05); await pilot.pause()
+            assert comments_mod.get_comment(app.conn, c1.id).text == "updated!"
+
+            # cancel the confirmation -> comment is kept
+            await pilot.press("C"); await pilot.pause()
+            app.screen.query_one("#delete", Button).focus(); await pilot.pause()
+            await pilot.press("enter"); await pilot.pause(0.05); await pilot.pause()
+            app.screen.query_one("#cancel", Button).focus(); await pilot.pause()
+            await pilot.press("enter"); await pilot.pause(0.05); await pilot.pause()
+            assert comments_mod.get_comment(app.conn, c1.id) is not None
+
+            # confirm the deletion -> comment is gone, sibling survives
+            await pilot.press("C"); await pilot.pause()
+            app.screen.query_one("#delete", Button).focus(); await pilot.pause()
+            await pilot.press("enter"); await pilot.pause(0.05); await pilot.pause()
+            app.screen.query_one("#yes", Button).focus(); await pilot.pause()
+            await pilot.press("enter"); await pilot.pause(0.05); await pilot.pause()
+            with pytest.raises(errors.NotFound):
+                comments_mod.get_comment(app.conn, c1.id)
+            assert comments_mod.get_comment(app.conn, c2.id) is not None
 
             assert getattr(app, "_exception", None) is None
             await pilot.press("q")
