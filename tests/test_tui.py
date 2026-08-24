@@ -810,6 +810,84 @@ def test_tui_label_management(db_path):
     _run(main())
 
 
+def test_tui_member_management(db_path):
+    """The 'R' member manager creates, edits, and deletes members.
+
+    Exercises every flow: create, edit (name + mention_name), and delete with
+    confirmation. All operations call the backend members module. See
+    Story 47.
+    """
+    from textual.widgets import Button, Input
+
+    from backend import db
+    from backend import members as members_mod
+    from tui.app import MemberManagerScreen
+
+    c = db.connect(db_path)
+    c.close()
+
+    async def main():
+        app = PlannerApp(db_path)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+
+            async def click(btn_id: str):
+                app.screen.query_one(btn_id, Button).focus()
+                await pilot.pause()
+                await pilot.press("enter")
+                await pilot.pause(0.05)
+                await pilot.pause()
+
+            async def confirm_yes():
+                app.screen.query_one("#yes", Button).focus()
+                await pilot.pause()
+                await pilot.press("enter")
+                await pilot.pause(0.05)
+                await pilot.pause()
+
+            # open the member manager with 'R'
+            await pilot.press("R"); await pilot.pause()
+            assert isinstance(app.screen, MemberManagerScreen)
+            # the db seeds one local member, so the roster starts at one
+            assert app.screen.query_one("#mm-members").option_count == 1
+
+            # create a member
+            await click("#mm-new")
+            app.screen.query_one("#mf-name", Input).value = "Ada Lovelace"
+            app.screen.query_one("#mf-mention", Input).value = "@ada"
+            await click("#ok")
+            ms = members_mod.list_members(app.conn)
+            assert len(ms) == 2
+            mid = max(m.id for m in ms)
+            ada = members_mod.get_member(app.conn, mid)
+            assert ada.name == "Ada Lovelace"
+            assert ada.mention_name == "@ada"
+
+            # edit: rename + change mention_name (the new member is at idx 1;
+            # idx 0 is the seeded local member)
+            from textual.widgets import OptionList
+            app.screen.query_one("#mm-members", OptionList).highlighted = 1
+            await click("#mm-edit")
+            app.screen.query_one("#mf-name", Input).value = "Grace Hopper"
+            app.screen.query_one("#mf-mention", Input).value = "@grace"
+            await click("#ok")
+            m = members_mod.get_member(app.conn, mid)
+            assert m.name == "Grace Hopper"
+            assert m.mention_name == "@grace"
+
+            # delete with confirmation
+            app.screen.query_one("#mm-members", OptionList).highlighted = 1
+            await click("#mm-delete")
+            await confirm_yes()
+            assert len(members_mod.list_members(app.conn)) == 1
+
+            # Done closes the screen; refresh ran without error
+            await click("#mm-done")
+            assert getattr(app, "_exception", None) is None
+            await pilot.press("q")
+    _run(main())
+
+
 def test_tui_refresh_keeps_cursor_position(db_path):
     """refresh_stories must not yank the cursor back to the top row."""
     from backend import db

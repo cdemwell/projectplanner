@@ -94,6 +94,7 @@ _PALETTE_COMMANDS: list[tuple[str, str]] = [
     ("Manage milestones", "manage_milestones"),
     ("Manage projects", "manage_projects"),
     ("Manage label catalog", "manage_label_catalog"),
+    ("Manage member roster", "manage_member_catalog"),
     ("Toggle complete", "toggle_complete"),
     ("Delete story", "delete_story"),
     ("Refresh", "refresh"),
@@ -2340,6 +2341,198 @@ class LabelManagerScreen(ModalScreen[bool]):
         self.dismiss(self._dirty)
 
 
+class MemberFormScreen(ModalScreen[dict]):
+    """Collect name/mention_name for a member.
+
+    Used both for creating a new member (``member=None``) and for editing an
+    existing one (pre-populated from the given
+    :class:`~backend.models.Member`). Dismisses with a dict of field values,
+    or None on cancel.
+    """
+
+    def __init__(self, conn: sqlite3.Connection, member=None) -> None:
+        super().__init__()
+        self.conn = conn
+        self.member = member  # Member | None
+
+    def compose(self) -> ComposeResult:
+        member = self.member
+        title = f"Edit member #{member.id}" if member else "New member"
+        yield VerticalScroll(
+            Static(title, classes="modal-title"),
+            Label("Name:"),
+            Input(value=member.name if member else "", id="mf-name"),
+            Label("Mention name:"),
+            Input(value=member.mention_name if member else "",
+                  id="mf-mention", placeholder="(derived from name if blank)"),
+            Horizontal(Button("Save", id="ok", variant="primary"),
+                       Button("Cancel", id="cancel")),
+            Label("", id="mf-err", classes="err"),
+            classes="modal-box",
+        )
+
+    def on_mount(self) -> None:
+        self.query_one("#mf-name", Input).focus()
+
+    def _submit(self) -> None:
+        name = self.query_one("#mf-name", Input).value.strip()
+        if not name:
+            self.query_one("#mf-err", Label).update("Name is required.")
+            return
+        self.dismiss({
+            "name": name,
+            "mention_name": self.query_one("#mf-mention", Input).value.strip(),
+        })
+
+    @on(Button.Pressed, "#ok")
+    def _ok(self) -> None:
+        self._submit()
+
+    @on(Button.Pressed, "#cancel")
+    def _cancel(self) -> None:
+        self.dismiss(None)
+
+
+class MemberManagerScreen(ModalScreen[bool]):
+    """Manage members: create, rename, and delete.
+
+    An OptionList lists every member; New/Edit/Delete/Done buttons drive the
+    flow. Create and edit open :class:`MemberFormScreen`; delete confirms via
+    :class:`ConfirmScreen`. Every operation goes through the backend ``members``
+    module; backend errors surface in a status label.
+
+    Dismisses with:
+        bool: True if any change was made (caller refreshes), else None.
+    """
+
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        super().__init__()
+        self.conn = conn
+        self._dirty = False
+        self._member_ids: list[int] = []
+
+    def compose(self) -> ComposeResult:
+        yield VerticalScroll(
+            Static("Manage Members", classes="modal-title"),
+            OptionList(id="mm-members"),
+            Horizontal(
+                Button("New", id="mm-new", variant="primary"),
+                Button("Edit", id="mm-edit"),
+                Button("Delete", id="mm-delete", variant="error"),
+                Button("Done", id="mm-done"),
+            ),
+            Label("", id="mm-status", classes="err"),
+            classes="modal-box",
+        )
+
+    def _status(self, msg: str) -> None:
+        self.query_one("#mm-status", Label).update(msg)
+
+    def _selected_id(self) -> int | None:
+        idx = self.query_one("#mm-members", OptionList).highlighted
+        if idx is None or not (0 <= idx < len(self._member_ids)):
+            return None
+        return self._member_ids[idx]
+
+    def on_mount(self) -> None:
+        self._refresh()
+
+    def _refresh(self) -> None:
+        opts = self.query_one("#mm-members", OptionList)
+        prev = opts.get_option_at_index(opts.highlighted).id if opts.option_count else None
+        ms = members.list_members(self.conn)
+        self._member_ids = [m.id for m in ms]
+        opts.clear_options()
+        for m in ms:
+            opts.add_option(Option(f"#{m.id} {m.name} (@{m.mention_name})",
+                                   id=str(m.id)))
+        if self._member_ids:
+            idx = 0
+            if prev:
+                for i, mid in enumerate(self._member_ids):
+                    if str(mid) == prev:
+                        idx = i
+                        break
+            opts.highlighted = idx
+
+    def _new(self) -> None:
+        self.app.push_screen(MemberFormScreen(self.conn), self._do_create)
+
+    def _do_create(self, fields: dict | None) -> None:
+        if fields is None:
+            return
+        try:
+            members.create_member(self.conn, fields["name"],
+                                  mention_name=fields["mention_name"] or None)
+        except errors.PlannerError as e:
+            self._status(f"error: {e}")
+            return
+        self._dirty = True
+        self._refresh()
+        self._status(f"Created member '{fields['name']}'.")
+
+    def _edit(self) -> None:
+        mid = self._selected_id()
+        if mid is None:
+            self._status("Select a member to edit.")
+            return
+        self.app.push_screen(MemberFormScreen(self.conn,
+                                              member=members.get_member(self.conn, mid)),
+                             lambda fields: self._do_update(mid, fields))
+
+    def _do_update(self, mid: int, fields: dict | None) -> None:
+        if fields is None:
+            return
+        try:
+            members.update_member(self.conn, mid,
+                                  name=fields["name"],
+                                  mention_name=fields["mention_name"])
+        except errors.PlannerError as e:
+            self._status(f"error: {e}")
+            return
+        self._dirty = True
+        self._refresh()
+        self._status(f"Updated member '{fields['name']}'.")
+
+    def _delete(self) -> None:
+        mid = self._selected_id()
+        if mid is None:
+            self._status("Select a member to delete.")
+            return
+        member = members.get_member(self.conn, mid)
+        self.app.push_screen(
+            ConfirmScreen(f"Delete member '#{member.id} {member.name}'?"),
+            lambda ok: self._do_delete(mid, ok))
+
+    def _do_delete(self, mid: int, ok: bool | None) -> None:
+        if not ok:
+            return
+        try:
+            members.delete_member(self.conn, mid)
+        except errors.PlannerError as e:
+            self._status(f"error: {e}")
+            return
+        self._dirty = True
+        self._refresh()
+        self._status("Deleted member.")
+
+    @on(Button.Pressed, "#mm-new")
+    def _b_new(self) -> None:
+        self._new()
+
+    @on(Button.Pressed, "#mm-edit")
+    def _b_edit(self) -> None:
+        self._edit()
+
+    @on(Button.Pressed, "#mm-delete")
+    def _b_delete(self) -> None:
+        self._delete()
+
+    @on(Button.Pressed, "#mm-done")
+    def _b_done(self) -> None:
+        self.dismiss(self._dirty)
+
+
 # --------------------------------------------------------------------------- #
 # Main app
 # --------------------------------------------------------------------------- #
@@ -2395,6 +2588,7 @@ class PlannerApp(App):
         Binding("M", "manage_milestones", "Milestones"),
         Binding("P", "manage_projects", "Projects"),
         Binding("L", "manage_label_catalog", "Labels"),
+        Binding("R", "manage_member_catalog", "Members"),
         Binding("r", "refresh", "Refresh"),
         Binding("a", "toggle_auto_refresh", "Auto↻"),
         Binding("J", "move_down", "Down"),
@@ -3019,6 +3213,16 @@ class PlannerApp(App):
                          self._after_label_manage)
 
     def _after_label_manage(self, changed: bool | None) -> None:
+        if changed:
+            self.refresh_stories()
+
+    def action_manage_member_catalog(self) -> None:
+        """Open the member management screen."""
+        assert self.conn is not None
+        self.push_screen(MemberManagerScreen(self.conn),
+                         self._after_member_manage)
+
+    def _after_member_manage(self, changed: bool | None) -> None:
         if changed:
             self.refresh_stories()
 
