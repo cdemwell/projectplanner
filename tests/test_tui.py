@@ -1644,3 +1644,60 @@ def test_tui_switch_parent_entity_pane(db_path):
             assert getattr(app, "_exception", None) is None
             await pilot.press("q")
     _run(main())
+
+
+def test_tui_story_only_actions_guarded_outside_story_mode(db_path):
+    """Story-only actions must no-op (bell) when the parent entity is not
+    'story', instead of acting on another entity's highlighted id (which could
+    crash with NotFound or silently edit the wrong story)."""
+    from backend import db
+    from backend import epics as epics_mod
+    from tui.app import EntityListPane
+
+    c = db.connect(db_path)
+    p = projects.create_project(c, "backend")
+    e = epics_mod.create_epic(c, "Auth epic", project_id=p.id)
+    s = stories_mod.create_story(c, "Fix login bug", project_id=p.id, epic_id=e.id)
+    c.close()
+
+    async def main():
+        app = PlannerApp(db_path)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+
+            # Switch the parent pane to epics (key 'E'). The highlighted row is
+            # now an epic id, not a story id.
+            await pilot.press("E"); await pilot.pause()
+            assert app.parent_entity == "epic"
+            stories_pane = app.query_one("#stories", EntityListPane)
+            assert stories_pane.current_id == e.id
+
+            # Pressing 'u' (action_edit_story) must NOT edit a story: it should
+            # bell and no-op, leaving no edit pane and the story untouched.
+            await pilot.press("u"); await pilot.pause()
+            assert app.parent_entity == "epic"
+            assert app._edit_pane is None
+            assert getattr(app, "_exception", None) is None
+
+            # The same guard applies to the other story-only actions.
+            app.action_move_state()
+            app.action_add_comment()
+            app.action_comment_action()
+            app.action_add_task()
+            app.action_task_action()
+            app.action_manage_owners()
+            app.action_manage_labels()
+            app.action_manage_links()
+            app.action_new_story()
+            await pilot.pause()
+            assert app._create_pane is None
+            assert getattr(app, "_exception", None) is None
+
+            # No story was modified.
+            c = db.connect(db_path)
+            updated = stories_mod.get_story(c, s.id)
+            c.close()
+            assert updated.name == "Fix login bug"
+
+            await pilot.press("q")
+    _run(main())

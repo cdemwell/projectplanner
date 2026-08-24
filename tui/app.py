@@ -4065,6 +4065,9 @@ class PlannerApp(App):
 
     def action_toggle_select(self) -> None:
         """Toggle the current row's selection (Space) in multi-select mode."""
+        if self.parent_entity != "story":
+            self.bell()
+            return
         if not self._multi_select:
             return
         sid = self._current_story_id()
@@ -4163,6 +4166,9 @@ class PlannerApp(App):
 
     def action_new_story(self) -> None:
         """Create a new story in the right detail pane."""
+        if self.parent_entity != "story":
+            self.bell()
+            return
         assert self.conn is not None
         self.query_one("#detail-view").display = False
         pane = CreateStoryPane(self.conn,
@@ -4199,6 +4205,9 @@ class PlannerApp(App):
 
     def action_edit_story(self) -> None:
         """Edit the selected story in-place in the right detail pane."""
+        if self.parent_entity != "story":
+            self.bell()
+            return
         assert self.conn is not None
         sid = self._current_story_id()
         if sid is None:
@@ -4242,6 +4251,9 @@ class PlannerApp(App):
 
     def action_move_state(self) -> None:
         """Open modal to change the workflow state of the selected story/selection."""
+        if self.parent_entity != "story":
+            self.bell()
+            return
         assert self.conn is not None
         ids = self._selected_ids()
         if self._multi_select and ids:
@@ -4257,6 +4269,9 @@ class PlannerApp(App):
 
     def action_add_comment(self) -> None:
         """Open modal to add a comment to the selected story."""
+        if self.parent_entity != "story":
+            self.bell()
+            return
         sid = self._current_story_id()
         if sid is None or self.conn is None:
             self.bell()
@@ -4266,6 +4281,9 @@ class PlannerApp(App):
 
     def action_comment_action(self) -> None:
         """Open modal to edit or delete a comment on the selected story."""
+        if self.parent_entity != "story":
+            self.bell()
+            return
         sid = self._current_story_id()
         if sid is None or self.conn is None:
             self.bell()
@@ -4275,6 +4293,9 @@ class PlannerApp(App):
 
     def action_add_task(self) -> None:
         """Open modal to add a task to the selected story."""
+        if self.parent_entity != "story":
+            self.bell()
+            return
         sid = self._current_story_id()
         if sid is None or self.conn is None:
             self.bell()
@@ -4284,6 +4305,9 @@ class PlannerApp(App):
 
     def action_task_action(self) -> None:
         """Open modal to toggle completion or edit a task on the selected story."""
+        if self.parent_entity != "story":
+            self.bell()
+            return
         sid = self._current_story_id()
         if sid is None or self.conn is None:
             self.bell()
@@ -4293,6 +4317,9 @@ class PlannerApp(App):
 
     def action_manage_owners(self) -> None:
         """Open modal to add/remove owners on the selected story, or assign to all selected."""
+        if self.parent_entity != "story":
+            self.bell()
+            return
         ids = self._selected_ids()
         if self._multi_select and ids:
             assert self.conn is not None
@@ -4316,6 +4343,9 @@ class PlannerApp(App):
     def action_manage_labels(self) -> None:
         """Open modal to add/remove labels on the selected story, or add a label
         to every selected story."""
+        if self.parent_entity != "story":
+            self.bell()
+            return
         ids = self._selected_ids()
         if self._multi_select and ids:
             assert self.conn is not None
@@ -4338,6 +4368,9 @@ class PlannerApp(App):
 
     def action_manage_links(self) -> None:
         """Open modal to add or delete a link on the selected story."""
+        if self.parent_entity != "story":
+            self.bell()
+            return
         sid = self._current_story_id()
         if sid is None or self.conn is None:
             self.bell()
