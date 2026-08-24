@@ -62,7 +62,7 @@ from backend import (
 )
 from backend.models import StoryComment
 from tui.chains import resolve_children, valid_children
-from tui.detail import EntityDetailPane
+from tui.detail import EntityDetailPane, RelatedLink
 
 # Sentinels for "no selection" inside Select widgets (kept as int/str so all
 # option values share a type and we dodge the blank-selection API).
@@ -354,10 +354,39 @@ class EntityListPane(DataTable):
     """
 
     def __init__(self, *, columns: list[Column], id: str | None = None,
+                 on_drill_in: Callable[[], None] | None = None,
+                 on_drill_out: Callable[[], None] | None = None,
                  **kwargs: Any) -> None:
         super().__init__(id=id, cursor_type="row", **kwargs)
         self._columns = list(columns)
         self._row_keys: list[str] = []
+        # Optional drill navigation callbacks (story 72). The parent pane sets
+        # these so Enter/Right drill into the selected row's children and
+        # Left returns to the parent; child panes leave them unset so those keys
+        # keep their normal DataTable behaviour.
+        self._on_drill_in = on_drill_in
+        self._on_drill_out = on_drill_out
+
+    def action_select_cursor(self) -> None:
+        """Enter on a drill pane navigates into the selected row's children."""
+        if self._on_drill_in is not None:
+            self._on_drill_in()
+        else:
+            super().action_select_cursor()
+
+    def action_cursor_right(self) -> None:
+        """Right on a drill pane navigates into the selected row's children."""
+        if self._on_drill_in is not None:
+            self._on_drill_in()
+        else:
+            super().action_cursor_right()
+
+    def action_cursor_left(self) -> None:
+        """Left on a drill pane returns to the parent level."""
+        if self._on_drill_out is not None:
+            self._on_drill_out()
+        else:
+            super().action_cursor_left()
 
     @property
     def columns_schema(self) -> list[Column]:
@@ -3705,7 +3734,13 @@ class PlannerApp(App):
         Binding("e", "toggle_complete", "Complete"),
         Binding("v", "toggle_multiselect", "Multi"),
         Binding("space", "toggle_select", "Toggle", show=False),
-        Binding("escape", "exit_multiselect", "Exit", show=False),
+        # Esc leaves multi-select mode when active, otherwise drills back out.
+        Binding("escape", "back", "Back", show=False),
+        # Drill-in / drill-out navigation (story 72): Enter/Right drill into
+        # the selected parent row's children; Left returns to the parent level.
+        Binding("enter", "drill_in", "Drill in", show=False),
+        Binding("right", "drill_in", "Drill in", show=False),
+        Binding("left", "drill_out", "Drill out", show=False),
         # priority=True so these beat Screen's built-in tab -> focus_next
         # binding; the chain otherwise resolves Screen before App.
         Binding("tab", "focus_next_pane", "Next pane", priority=True, show=False),
@@ -3741,6 +3776,14 @@ class PlannerApp(App):
         # so existing story browsing is unchanged; dedicated keys + palette
         # commands switch it and re-derive the child + detail panes.
         self.parent_entity = "story"
+        # Drill-in/out navigation history (story 72). Each frame is a tuple
+        # ``(parent_kind, parent_id, child_kind)`` meaning "the parent pane
+        # currently shows ``child_kind`` rows belonging to parent ``parent_id``
+        # (of kind ``parent_kind``)". An empty stack means the parent pane is at
+        # a root entity list (the switch-key behavior). Enter/Right pushes a
+        # frame (drill into the selected row's children); Esc/Left pops one
+        # (return to the parent level).
+        self._drill_stack: list[tuple[str, int, str]] = []
 
     # --- lifecycle --------------------------------------------------------- #
     def on_mount(self) -> None:
@@ -3764,7 +3807,11 @@ class PlannerApp(App):
             # Left column: parent entity list (upper) + child entity list
             # (lower), stacked vertically.
             with Vertical(id="left-col"):
-                yield EntityListPane(columns=_story_columns(), id="stories")
+                # The parent pane owns drill-in/out navigation: Enter/Right
+                # drill into the selected row's children, Left returns up.
+                yield EntityListPane(columns=_story_columns(), id="stories",
+                                     on_drill_in=self.action_drill_in,
+                                     on_drill_out=self.action_drill_out)
                 yield EntityListPane(columns=_task_columns(), id="children")
             # Right pane: read-only generic detail view, or an EditStoryPane
             # when editing.
@@ -3821,7 +3868,9 @@ class PlannerApp(App):
         milestone (each id|str|None), mapped to ``stories.list_stories`` params.
         """
         assert self.conn is not None
-        if self.parent_entity != "story":
+        # A drilled-in context (or a non-story root) is rendered by the scoped
+        # parent renderer, not the filter-based story list.
+        if self._drill_stack or self.parent_entity != "story":
             self.refresh_parent()
             return
         f = self.filters
@@ -3867,24 +3916,54 @@ class PlannerApp(App):
             pane = self.query_one("#detail-view", EntityDetailPane)
             pane.show_message("(no stories match the current filter — press 'n' to create one)")
 
-    def refresh_parent(self) -> None:
-        """Render the parent pane for :attr:`parent_entity`, then its panes.
+    def _drill_scope(self) -> tuple[str, int] | None:
+        """The ``(parent_kind, parent_id)`` of the active drill, or ``None``.
 
-        Fetches the current parent entity's rows via the backend ``list_*``
-        function, swaps the upper-left pane to that entity's column schema, and
-        re-derives the child + detail panes. Called on entity switch and by
-        :meth:`refresh_stories` when a non-story parent is active.
+        An empty drill stack means the parent pane is at a root entity list.
+        """
+        if not self._drill_stack:
+            return None
+        return self._drill_stack[-1][0], self._drill_stack[-1][1]
+
+    def _parent_rows(self) -> list[Any]:
+        """Rows for the parent pane in the current navigation context.
+
+        At the root (empty drill stack) lists all of ``self.parent_entity`` via
+        the backend ``list_*`` function; while drilled in, lists the selected
+        parent row's children via the chain model
+        (:func:`~tui.chains.resolve_children`).
         """
         assert self.conn is not None
+        scope = self._drill_scope()
+        if scope is None:
+            return _PARENT_LISTERS[self.parent_entity](self.conn)
+        parent_kind, parent_id = scope
+        return resolve_children(self.conn, parent_kind, parent_id,
+                                self.parent_entity)
+
+    def refresh_parent(self) -> None:
+        """Render the parent pane for the current navigation context.
+
+        Fetches the parent pane's rows (all of :attr:`parent_entity` at the
+        root, or the drilled-in parent's children), swaps the upper-left pane
+        to that entity's column schema, and re-derives the child + detail
+        panes. Called on entity switch, on drill-in/out, and by
+        :meth:`refresh_stories` when a non-story or drilled context is active.
+        """
         entity = self.parent_entity
-        lister = _PARENT_LISTERS[entity]
-        items = lister(self.conn)
+        items = self._parent_rows()
         pane = self.query_one("#stories", EntityListPane)
         pane.set_columns(ENTITY_COLUMNS[entity])
         pane.set_items(items, conn=self.conn)
         # Selections are story-specific; reset them for other parent kinds.
         self._selected = set()
-        if entity == "story":
+        scope = self._drill_scope()
+        if scope is not None:
+            parent_kind, parent_id = scope
+            label = self.name_of(parent_kind, parent_id)
+            self.query_one("#filter-bar", Static).update(
+                f"{label} ▸ {entity}  ({len(items)} rows)")
+        elif entity == "story":
             self.query_one("#filter-bar", Static).update(
                 f"(all stories)  ({len(items)} stories)")
         else:
@@ -3996,10 +4075,14 @@ class PlannerApp(App):
             self.bell()
 
     def _switch_entity(self, entity: str) -> None:
-        """Set the parent pane's entity and re-derive its panes."""
+        """Set the parent pane's entity (root context) and re-derive its panes.
+
+        Switching to a root entity clears any drill-in/out navigation history.
+        """
         if entity not in _PARENT_LISTERS:
             self.bell()
             return
+        self._drill_stack.clear()
         self.parent_entity = entity
         self.refresh_parent()
 
@@ -4038,6 +4121,78 @@ class PlannerApp(App):
     def action_switch_to_member(self) -> None:
         """Show the member list in the upper-left parent pane."""
         self._switch_entity("member")
+
+    # --- drill-in / drill-out navigation (story 72) ----------------------- #
+    def action_drill_in(self) -> None:
+        """Enter/Right: drill into the focused related link or parent row.
+
+        If a :class:`RelatedLink` in the detail pane is focused, jump to that
+        related entity. Otherwise, when the parent pane is focused, drill into
+        the selected row's children (via :func:`~tui.chains.valid_children`),
+        pushing the navigation history. A parent with no children no-ops
+        (bell).
+        """
+        focused = self.focused
+        if isinstance(focused, RelatedLink):
+            self._open_related(focused)
+            return
+        if self._active_pane != 0:
+            return
+        pane = self.query_one("#stories", EntityListPane)
+        parent_id = pane.current_id
+        kinds = valid_children(self.parent_entity)
+        if parent_id is None or not kinds:
+            self.bell()
+            return
+        child_kind = kinds[0]
+        self._drill_stack.append((self.parent_entity, parent_id, child_kind))
+        self.parent_entity = child_kind
+        self.refresh_parent()
+
+    def action_drill_out(self) -> None:
+        """Left: return to the parent level, restoring the previous view.
+
+        Pops the drill navigation history; when none is left this no-ops
+        (bell) rather than leaving the current root view.
+        """
+        if self._active_pane != 0:
+            return
+        if not self._drill_stack:
+            self.bell()
+            return
+        frame = self._drill_stack.pop()
+        self.parent_entity = frame[0]
+        self.refresh_parent()
+
+    def action_back(self) -> None:
+        """Esc: leave multi-select mode, else drill back out to the parent."""
+        if self._multi_select:
+            self.action_exit_multiselect()
+            return
+        if self._active_pane == 0 and self._drill_stack:
+            self.action_drill_out()
+
+    def _open_related(self, link: RelatedLink) -> None:
+        """Jump to a related entity from a focused detail-pane link.
+
+        Switches the parent pane to ``link.entity`` (clearing the drill
+        history) and, when that entity's row is present, highlights it and
+        shows its detail.
+        """
+        if link.entity not in _PARENT_LISTERS:
+            self.bell()
+            return
+        self._drill_stack.clear()
+        self.parent_entity = link.entity
+        self.refresh_parent()
+        pane = self.query_one("#stories", EntityListPane)
+        try:
+            row = pane.row_keys.index(str(link.target_id))
+        except ValueError:
+            # The target isn't in the current root list; stay on the switched
+            # kind without highlighting a specific row.
+            return
+        pane.move_cursor(row=row)
 
     def _selected_ids(self) -> list[int]:
         """IDs of the current bulk selection, or [] outside multi-select mode."""

@@ -1701,3 +1701,72 @@ def test_tui_story_only_actions_guarded_outside_story_mode(db_path):
 
             await pilot.press("q")
     _run(main())
+
+
+def test_tui_drill_in_out_and_related_link_navigation(db_path):
+    """Story 72: Enter/Right drills into the selected parent row's children,
+    Left/Esc returns to the parent level, and a focused RelatedLink in the
+    detail pane jumps to that related entity."""
+    from backend import db
+    from backend import epics as epics_mod
+    from tui.app import EntityListPane
+    from tui.detail import EntityDetailPane
+
+    c = db.connect(db_path)
+    p = projects.create_project(c, "backend")
+    e = epics_mod.create_epic(c, "Auth epic", project_id=p.id)
+    stories_mod.create_story(c, "Fix login bug", project_id=p.id, epic_id=e.id)
+    c.close()
+
+    async def main():
+        app = PlannerApp(db_path)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+
+            # Root context: switch the parent pane to epics.
+            await pilot.press("E"); await pilot.pause()
+            parent = app.query_one("#stories", EntityListPane)
+            assert app.parent_entity == "epic"
+            assert app._drill_stack == []
+            assert parent.current_id == e.id
+
+            # Drill in (Enter) from the epic into its stories.
+            await pilot.press("enter"); await pilot.pause()
+            assert app.parent_entity == "story"
+            assert app._drill_stack == [("epic", e.id, "story")]
+            assert parent.row_keys == [str(s.id)
+                                       for s in epics_mod.list_epic_stories(app.conn, e.id)]
+
+            # Drill in again on the story -> its tasks (none yet, so empty).
+            await pilot.press("right"); await pilot.pause()
+            assert app.parent_entity == "task"
+            assert app._drill_stack == [("epic", e.id, "story"),
+                                        ("story", stories_mod.list_stories(app.conn)[0].id, "task")]
+            assert parent.row_keys == []
+
+            # Drill back out (Left) twice, restoring the story then epic view.
+            await pilot.press("left"); await pilot.pause()
+            assert app.parent_entity == "story"
+            assert parent.row_keys == [str(stories_mod.list_stories(app.conn)[0].id)]
+            await pilot.press("left"); await pilot.pause()
+            assert app.parent_entity == "epic"
+            assert app._drill_stack == []
+            assert parent.row_keys == [str(e.id)]
+
+            # A related link in a story detail jumps to its parent epic.
+            await pilot.press("s"); await pilot.pause()  # back to story root
+            assert app.parent_entity == "story"
+            detail = app.query_one("#detail-view", EntityDetailPane)
+            epic_link = next(lk for lk in detail.related_links()
+                             if lk.entity == "epic")
+            epic_link.focus(); await pilot.pause()
+            await pilot.press("enter"); await pilot.pause()
+            assert app.parent_entity == "epic"
+            assert app._drill_stack == []
+            assert parent.current_id == e.id
+            assert "Auth epic" in _pane_text(
+                app.query_one("#detail-view", EntityDetailPane))
+
+            assert getattr(app, "_exception", None) is None
+            await pilot.press("q")
+    _run(main())
