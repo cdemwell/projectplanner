@@ -9,9 +9,9 @@ dependencies = [
     "textual>=0.80",
 ]
 
-[project.optional-dependencies]
-# Backend + CLI tests need pytest; TUI tests also need textual (already above).
-# ruff is the linter/formatter used in CI and locally.
+[dependency-groups]
+# Dev/test tooling, installed by a plain `uv sync` (textual is a runtime dep).
+# Tests need pytest (+ hypothesis); ruff is the linter used in CI and locally.
 dev = [
     "pytest>=8",
     "ruff>=0.6",

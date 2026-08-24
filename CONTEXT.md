@@ -62,8 +62,7 @@ unless the user explicitly asks.
 - `README.md` — user-facing docs.
 - `.gitignore` — ignores `planner.db`, Python caches, `.venv/`.
 - `.python-version` — `3.12` (use Python 3.12; stdlib `sqlite3` ships with FTS5).
-- `.venv/` — local venv with Textual installed (gitignored). Recreate with
-  `python3.12 -m venv .venv && .venv/bin/pip install textual`.
+- `.venv/` — local uv-managed venv (gitignored). Recreate with `uv sync`.
 - `Shortcut Rest API, V3.html` — reference doc (model only).
 
 ## 4. Scope — build vs defer
@@ -265,13 +264,13 @@ Naming: `list_*`, `get_*`, `create_*`, `update_*`, `delete_*`, plus `search_*`. 
 
 - **Stdlib only for the backend + CLI:** `sqlite3`, `argparse`, `dataclasses`, `datetime`.
 - TUI: `textual>=0.80` (declared in `pyproject.toml` `dependencies`).
-- Tests: `pytest>=8`; lint: `ruff>=0.6` (both in
-  `[project.optional-dependencies] dev`). Run tests with
-  `.venv/bin/python -m pytest -q` (93 tests; fresh temp DB per test; TUI tests
-  use Textual's headless `App.run_test()` pilot and are skipped if `textual`
-  isn't installed). Lint with `.venv/bin/ruff check backend cli tui main.py tests`
-  (config in `[tool.ruff]`; E501/E701/E702 ignored to permit long DDL lines and
-  compact one-liners).
+- Tests: `pytest>=8`, `hypothesis`; lint: `ruff>=0.6`; config: `pyyaml>=6`
+  (all in `[dependency-groups] dev`, installed by a plain `uv sync`). Run
+  tests with `uv run python -m pytest -q` (130 tests; fresh temp DB per test;
+  TUI tests use Textual's headless `App.run_test()` pilot and are skipped if
+  `textual` isn't installed). Lint with
+  `uv run ruff check backend cli tui main.py tests` (config in `[tool.ruff]`;
+  E501/E701/E702 ignored to permit long DDL lines and compact one-liners).
 - CI: `.github/workflows/ci.yml` runs ruff + pytest on Python 3.12 for every
   push/PR.
 

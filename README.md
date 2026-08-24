@@ -98,12 +98,13 @@ depending on a hosted service, a network, or an account.
 
 - **Python 3.12+** (stdlib `sqlite3` ships with FTS5, used for search).
 - **Backend + CLI:** stdlib only — no install step beyond having Python 3.12.
-- **TUI (optional):** requires `textual`. Recommended setup with a project
-  virtualenv (kept out of git):
+- **TUI / dev / tests (optional):** requires [uv](https://docs.astral.sh/uv/)
+  (which uses `.python-version`). One command creates a gitignored `.venv` and
+  installs everything — runtime (`textual`) and dev (`pytest`, `ruff`, …) —
+  from the locked `uv.lock`:
 
   ```bash
-  python3.12 -m venv .venv
-  .venv/bin/pip install textual
+  uv sync
   ```
 
 - **Database:** `planner.db` is created in the repo root on first run and seeded
@@ -527,16 +528,15 @@ database per test (via `tmp_path`), so tests are isolated and need no manual
 setup.
 
 ```bash
-.venv/bin/pip install pytest          # one-time (or: pip install -e '.[dev]')
-.venv/bin/python -m pytest -q
+uv sync
+uv run python -m pytest -q
 ```
 
 Linting uses [ruff](https://docs.astral.sh/ruff/) (config in `pyproject.toml`);
 CI (`.github/workflows/ci.yml`) runs both on every push/PR:
 
 ```bash
-.venv/bin/pip install ruff            # one-time
-.venv/bin/ruff check backend cli tui main.py tests
+uv run ruff check backend cli tui main.py tests
 ```
 
 Coverage:
