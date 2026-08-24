@@ -650,6 +650,59 @@ def test_tui_epic_management(db_path):
     _run(main())
 
 
+def test_tui_epic_inline_edit_and_delete(db_path):
+    """Story 75: the detail pane edits an epic inline and deletes it with
+    confirmation, reusing the backend epics module."""
+    from textual.widgets import Button, Input, Select
+
+    from backend import db
+    from backend import epics as epics_mod
+
+    c = db.connect(db_path)
+    e1 = epics_mod.create_epic(c, "Auth epic")
+    e2 = epics_mod.create_epic(c, "Other epic")
+    c.close()
+
+    async def main():
+        app = PlannerApp(db_path)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            # Switch the parent pane to epics and select the first epic.
+            await pilot.press("E"); await pilot.pause()
+            assert app.parent_entity == "epic"
+            app.query_one("#stories").move_cursor(row=0); await pilot.pause()
+            assert app._current_story_id() == e1.id
+
+            async def save():
+                app.screen.query_one("#ee-save", Button).focus(); await pilot.pause()
+                await pilot.press("enter"); await pilot.pause(0.05); await pilot.pause()
+
+            async def confirm_yes():
+                app.screen.query_one("#yes", Button).focus(); await pilot.pause()
+                await pilot.press("enter"); await pilot.pause(0.05); await pilot.pause()
+
+            # Inline edit: rename + change state, then save.
+            await pilot.press("u"); await pilot.pause()
+            app.screen.query_one("#ee-name", Input).value = "Renamed epic"
+            app.screen.query_one("#ee-state", Select).value = "done"
+            await save()
+            e = epics_mod.get_epic(app.conn, e1.id)
+            assert e.name == "Renamed epic"
+            assert e.state == "done"
+            assert e.completed_at is not None  # done state stamps completed_at
+
+            # Delete with confirmation; the sibling survives.
+            await pilot.press("D"); await pilot.pause()
+            await confirm_yes()
+            ids = [x.id for x in epics_mod.list_epics(app.conn)]
+            assert e1.id not in ids
+            assert e2.id in ids
+
+            assert getattr(app, "_exception", None) is None
+            await pilot.press("q")
+    _run(main())
+
+
 def test_tui_iteration_management(db_path):
     """The 'I' iteration manager creates, edits, and deletes iterations.
 
@@ -1652,7 +1705,7 @@ def test_tui_story_only_actions_guarded_outside_story_mode(db_path):
     crash with NotFound or silently edit the wrong story)."""
     from backend import db
     from backend import epics as epics_mod
-    from tui.app import EntityListPane
+    from tui.app import EditEpicPane, EntityListPane
 
     c = db.connect(db_path)
     p = projects.create_project(c, "backend")
@@ -1672,10 +1725,13 @@ def test_tui_story_only_actions_guarded_outside_story_mode(db_path):
             stories_pane = app.query_one("#stories", EntityListPane)
             assert stories_pane.current_id == e.id
 
-            # Pressing 'u' (action_edit_story) must NOT edit a story: it should
-            # bell and no-op, leaving no edit pane and the story untouched.
+            # Pressing 'u' (action_edit_story) must NOT edit a story: it opens
+            # the epic edit form instead (Story 75). Cancel it so it doesn't
+            # interfere with the guards below, leaving the story untouched.
             await pilot.press("u"); await pilot.pause()
             assert app.parent_entity == "epic"
+            assert isinstance(app._edit_pane, EditEpicPane)
+            app._edit_cancelled(); await pilot.pause()
             assert app._edit_pane is None
             assert getattr(app, "_exception", None) is None
 
