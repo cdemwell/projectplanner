@@ -2410,3 +2410,52 @@ def test_tui_inline_edit_member(db_path):
             assert getattr(app, "_exception", None) is None
             await pilot.press("q")
     _run(main())
+
+
+def test_tui_search_scoped_to_browsed_epic_filters_parent(db_path):
+    """Story 81: searching while browsing a non-story entity (epics) filters
+    the parent pane inline instead of opening the generic results screen."""
+    from textual.widgets import Select
+
+    from backend import db
+    from backend import epics as epics_mod
+    from tui.app import SearchInputScreen, SearchResultsScreen, _sel
+
+    c = db.connect(db_path)
+    epics_mod.create_epic(c, "Auth login epic")
+    epics_mod.create_epic(c, "Billing epic")
+    c.close()
+
+    async def main():
+        app = PlannerApp(db_path)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            # Browse epics in the parent pane.
+            await pilot.press("E"); await pilot.pause()
+            assert app.parent_entity == "epic"
+            assert app.query_one("#stories").row_count == 2
+
+            # The search entity selector defaults to the browsed kind (epic).
+            await pilot.press("slash"); await pilot.pause()
+            assert isinstance(app.screen, SearchInputScreen)
+            entity_sel = app.screen.query_one("#s-entity", Select)
+            assert _sel(entity_sel.value) == "epic"
+            await pilot.press(*"login"); await pilot.pause()
+            await _ok(pilot, app)
+
+            # Search applied inline: no results screen, parent pane filtered.
+            assert not isinstance(app.screen, SearchResultsScreen)
+            assert app._search_ids is not None
+            assert app._search_query == "login"
+            assert app.query_one("#stories").row_count == 1
+            assert app.query_one("#filter-bar").render() == "browsing epic  search: 'login'  (1 rows)"
+
+            # An empty search clears the filter and restores the full list.
+            await pilot.press("slash"); await pilot.pause()
+            await pilot.press("enter"); await pilot.pause(0.05); await pilot.pause()
+            assert app._search_ids is None
+            assert app.query_one("#stories").row_count == 2
+
+            assert getattr(app, "_exception", None) is None
+            await pilot.press("q")
+    _run(main())
