@@ -90,6 +90,7 @@ _PALETTE_COMMANDS: list[tuple[str, str]] = [
     ("Search", "search"),
     ("Manage workflows", "manage_workflows"),
     ("Manage epics", "manage_epics"),
+    ("Manage iterations", "manage_iterations"),
     ("Toggle complete", "toggle_complete"),
     ("Delete story", "delete_story"),
     ("Refresh", "refresh"),
@@ -1504,6 +1505,218 @@ class EpicManagerScreen(ModalScreen[bool]):
         self.dismiss(self._dirty)
 
 
+class IterationFormScreen(ModalScreen[dict]):
+    """Collect name/description/status/start/end for an iteration.
+
+    Used both for creating a new iteration (``iteration=None``) and for editing
+    an existing one (pre-populated from the given
+    :class:`~backend.models.Iteration`). All operations call the backend
+    ``iterations`` module. Dismisses with a dict of field values, or None on
+    cancel.
+    """
+
+    def __init__(self, conn: sqlite3.Connection, iteration=None) -> None:
+        super().__init__()
+        self.conn = conn
+        self.iteration = iteration  # Iteration | None
+
+    def compose(self) -> ComposeResult:
+        it = self.iteration
+        status_opts = [(s, s) for s in iterations.STATUSES]
+        title = f"Edit iteration #{it.id}" if it else "New iteration"
+        yield VerticalScroll(
+            Static(title, classes="modal-title"),
+            Label("Name:"),
+            Input(value=it.name if it else "", id="if-name"),
+            Label("Description:"),
+            TextArea(id="if-desc"),
+            Label("Status:"),
+            Select(status_opts, value=(it.status if it else "planned"), id="if-status"),
+            Label("Start date (YYYY-MM-DD):"),
+            Input(value=(it.start_date or "") if it else "", placeholder="YYYY-MM-DD", id="if-start"),
+            Label("End date (YYYY-MM-DD):"),
+            Input(value=(it.end_date or "") if it else "", placeholder="YYYY-MM-DD", id="if-end"),
+            Horizontal(Button("Save", id="ok", variant="primary"),
+                       Button("Cancel", id="cancel")),
+            Label("", id="if-err", classes="err"),
+            classes="modal-box",
+        )
+
+    def on_mount(self) -> None:
+        if self.iteration and self.iteration.description:
+            self.query_one("#if-desc", TextArea).text = self.iteration.description
+        self.query_one("#if-name", Input).focus()
+
+    def _submit(self) -> None:
+        name = self.query_one("#if-name", Input).value.strip()
+        if not name:
+            self.query_one("#if-err", Label).update("Name is required.")
+            return
+        status = self.query_one("#if-status", Select).value
+        if status not in iterations.STATUSES:
+            self.query_one("#if-err", Label).update("Invalid status.")
+            return
+        start = self.query_one("#if-start", Input).value.strip() or None
+        end = self.query_one("#if-end", Input).value.strip() or None
+        self.dismiss({
+            "name": name,
+            "description": self.query_one("#if-desc", TextArea).text,
+            "status": status,
+            "start_date": start,
+            "end_date": end,
+        })
+
+    @on(Button.Pressed, "#ok")
+    def _ok(self) -> None:
+        self._submit()
+
+    @on(Button.Pressed, "#cancel")
+    def _cancel(self) -> None:
+        self.dismiss(None)
+
+
+class IterationManagerScreen(ModalScreen[bool]):
+    """Manage iterations: create, edit, and delete.
+
+    An OptionList lists every iteration; New/Edit/Delete/Done buttons drive the
+    flow. Create and edit open :class:`IterationFormScreen`; delete confirms via
+    :class:`ConfirmScreen`. Every operation goes through the backend
+    ``iterations`` module; backend errors surface in a status label.
+
+    Dismisses with:
+        bool: True if any change was made (caller refreshes), else None.
+    """
+
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        super().__init__()
+        self.conn = conn
+        self._dirty = False
+        self._iteration_ids: list[int] = []
+
+    def compose(self) -> ComposeResult:
+        yield VerticalScroll(
+            Static("Manage Iterations", classes="modal-title"),
+            OptionList(id="im-iterations"),
+            Horizontal(
+                Button("New", id="im-new", variant="primary"),
+                Button("Edit", id="im-edit"),
+                Button("Delete", id="im-delete", variant="error"),
+                Button("Done", id="im-done"),
+            ),
+            Label("", id="im-status", classes="err"),
+            classes="modal-box",
+        )
+
+    def _status(self, msg: str) -> None:
+        self.query_one("#im-status", Label).update(msg)
+
+    def _selected_id(self) -> int | None:
+        idx = self.query_one("#im-iterations", OptionList).highlighted
+        if idx is None or not (0 <= idx < len(self._iteration_ids)):
+            return None
+        return self._iteration_ids[idx]
+
+    def on_mount(self) -> None:
+        self._refresh()
+
+    def _refresh(self) -> None:
+        opts = self.query_one("#im-iterations", OptionList)
+        prev = opts.get_option_at_index(opts.highlighted).id if opts.option_count else None
+        its = iterations.list_iterations(self.conn)
+        self._iteration_ids = [it.id for it in its]
+        opts.clear_options()
+        for it in its:
+            opts.add_option(Option(f"#{it.id} {it.name} ({it.status})", id=str(it.id)))
+        if self._iteration_ids:
+            idx = 0
+            if prev:
+                for i, iid in enumerate(self._iteration_ids):
+                    if str(iid) == prev:
+                        idx = i
+                        break
+            opts.highlighted = idx
+
+    def _new(self) -> None:
+        self.app.push_screen(IterationFormScreen(self.conn), self._do_create)
+
+    def _do_create(self, fields: dict | None) -> None:
+        if fields is None:
+            return
+        try:
+            iterations.create_iteration(self.conn, fields["name"],
+                                        description=fields["description"],
+                                        status=fields["status"],
+                                        start_date=fields["start_date"],
+                                        end_date=fields["end_date"])
+        except errors.PlannerError as e:
+            self._status(f"error: {e}")
+            return
+        self._dirty = True
+        self._refresh()
+        self._status(f"Created iteration '{fields['name']}'.")
+
+    def _edit(self) -> None:
+        iid = self._selected_id()
+        if iid is None:
+            self._status("Select an iteration to edit.")
+            return
+        self.app.push_screen(IterationFormScreen(self.conn, iteration=iterations.get_iteration(self.conn, iid)),
+                             lambda fields: self._do_update(iid, fields))
+
+    def _do_update(self, iid: int, fields: dict | None) -> None:
+        if fields is None:
+            return
+        try:
+            iterations.update_iteration(self.conn, iid, name=fields["name"],
+                                        description=fields["description"],
+                                        status=fields["status"],
+                                        start_date=fields["start_date"],
+                                        end_date=fields["end_date"])
+        except errors.PlannerError as e:
+            self._status(f"error: {e}")
+            return
+        self._dirty = True
+        self._refresh()
+        self._status(f"Updated iteration '{fields['name']}'.")
+
+    def _delete(self) -> None:
+        iid = self._selected_id()
+        if iid is None:
+            self._status("Select an iteration to delete.")
+            return
+        it = iterations.get_iteration(self.conn, iid)
+        self.app.push_screen(ConfirmScreen(f"Delete iteration '#{it.id} {it.name}'?"),
+                             lambda ok: self._do_delete(iid, ok))
+
+    def _do_delete(self, iid: int, ok: bool | None) -> None:
+        if not ok:
+            return
+        try:
+            iterations.delete_iteration(self.conn, iid)
+        except errors.PlannerError as e:
+            self._status(f"error: {e}")
+            return
+        self._dirty = True
+        self._refresh()
+        self._status("Deleted iteration.")
+
+    @on(Button.Pressed, "#im-new")
+    def _b_new(self) -> None:
+        self._new()
+
+    @on(Button.Pressed, "#im-edit")
+    def _b_edit(self) -> None:
+        self._edit()
+
+    @on(Button.Pressed, "#im-delete")
+    def _b_delete(self) -> None:
+        self._delete()
+
+    @on(Button.Pressed, "#im-done")
+    def _b_done(self) -> None:
+        self.dismiss(self._dirty)
+
+
 # --------------------------------------------------------------------------- #
 # Main app
 # --------------------------------------------------------------------------- #
@@ -1555,6 +1768,7 @@ class PlannerApp(App):
         Binding("slash", "search", "Search"),  # '/'
         Binding("w", "manage_workflows", "Workflows"),
         Binding("E", "manage_epics", "Epics"),
+        Binding("I", "manage_iterations", "Iterations"),
         Binding("r", "refresh", "Refresh"),
         Binding("a", "toggle_auto_refresh", "Auto↻"),
         Binding("J", "move_down", "Down"),
@@ -2139,6 +2353,16 @@ class PlannerApp(App):
         self.push_screen(EpicManagerScreen(self.conn), self._after_epic_manage)
 
     def _after_epic_manage(self, changed: bool | None) -> None:
+        if changed:
+            self.refresh_stories()
+
+    def action_manage_iterations(self) -> None:
+        """Open the iteration management screen."""
+        assert self.conn is not None
+        self.push_screen(IterationManagerScreen(self.conn),
+                         self._after_iteration_manage)
+
+    def _after_iteration_manage(self, changed: bool | None) -> None:
         if changed:
             self.refresh_stories()
 

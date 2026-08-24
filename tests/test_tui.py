@@ -500,6 +500,84 @@ def test_tui_epic_management(db_path):
     _run(main())
 
 
+def test_tui_iteration_management(db_path):
+    """The 'I' iteration manager creates, edits, and deletes iterations.
+
+    Exercises every flow: create, edit (name/status/start/end dates), and
+    delete with confirmation. All operations call the backend iterations
+    module. See Story 43.
+    """
+    from textual.widgets import Button, Input, Select
+
+    from backend import db
+    from backend import iterations as iter_mod
+    from tui.app import IterationManagerScreen
+
+    c = db.connect(db_path)
+    c.close()
+
+    async def main():
+        app = PlannerApp(db_path)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+
+            async def click(btn_id: str):
+                app.screen.query_one(btn_id, Button).focus()
+                await pilot.pause()
+                await pilot.press("enter")
+                await pilot.pause(0.05)
+                await pilot.pause()
+
+            async def confirm_yes():
+                app.screen.query_one("#yes", Button).focus()
+                await pilot.pause()
+                await pilot.press("enter")
+                await pilot.pause(0.05)
+                await pilot.pause()
+
+            # open the iteration manager with 'I'
+            await pilot.press("I"); await pilot.pause()
+            assert isinstance(app.screen, IterationManagerScreen)
+            assert app.screen.query_one("#im-iterations").option_count == 0
+
+            # create an iteration
+            await click("#im-new")
+            app.screen.query_one("#if-name", Input).value = "Sprint 1"
+            app.screen.query_one("#if-start", Input).value = "2026-09-01"
+            app.screen.query_one("#if-end", Input).value = "2026-09-14"
+            await click("#ok")
+            its = iter_mod.list_iterations(app.conn)
+            assert len(its) == 1
+            iid = its[0].id
+            assert its[0].status == "planned"
+            assert its[0].start_date == "2026-09-01"
+            assert its[0].end_date == "2026-09-14"
+
+            # edit: rename + status + dates
+            await click("#im-edit")
+            app.screen.query_one("#if-name", Input).value = "Sprint 2"
+            app.screen.query_one("#if-status", Select).value = "active"
+            app.screen.query_one("#if-start", Input).value = "2026-09-15"
+            app.screen.query_one("#if-end", Input).value = ""
+            await click("#ok")
+            it = iter_mod.get_iteration(app.conn, iid)
+            assert it.name == "Sprint 2"
+            assert it.status == "active"
+            assert it.start_date == "2026-09-15"
+            assert it.end_date is None
+
+            # delete with confirmation
+            await click("#im-delete")
+            await confirm_yes()
+            assert iter_mod.list_iterations(app.conn) == []
+
+            # Done closes the screen; refresh ran without error
+            await click("#im-done")
+            assert getattr(app, "_exception", None) is None
+            await pilot.press("q")
+    _run(main())
+
+
 def test_tui_refresh_keeps_cursor_position(db_path):
     """refresh_stories must not yank the cursor back to the top row."""
     from backend import db
