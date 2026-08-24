@@ -17,3 +17,7 @@ venv/
 
 # Testing
 .pytest_cache/
+
+# Git worktrees used by agent development
+.claude/worktrees/
+.git-worktrees/

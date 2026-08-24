@@ -1397,6 +1397,46 @@ def test_tui_entity_list_pane_stories(seeded_db):
     _run(main())
 
 
+def _pane_text(pane):
+    """Flatten the EntityDetailPane's rendered Static text for assertions."""
+    from textual.widgets import Static
+    return "\n".join(str(w.content) for w in pane.query(Static))
+
+
+def test_detail_pane_renders_story_with_related_links(db_path):
+    """The generic detail pane renders a story's details and carries related
+    entity links with their target ids."""
+    from backend import db
+    from backend import epics as epics_mod
+    from backend import milestones as ms_mod
+    from tui.detail import EntityDetailPane
+
+    c = db.connect(db_path)
+    p = projects.create_project(c, "backend")
+    ms = ms_mod.create_milestone(c, "M1")
+    e = epics_mod.create_epic(c, "Epic A", milestone_id=ms.id, project_id=p.id)
+    stories_mod.create_story(c, "Fix login bug", project_id=p.id, epic_id=e.id,
+                             story_type="bug")
+    c.close()
+
+    async def main():
+        app = PlannerApp(db_path)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            app.query_one("#stories").move_cursor(row=0)
+            await pilot.pause(0.05)
+            await pilot.pause()
+            pane = app.query_one("#detail-view", EntityDetailPane)
+            assert "Fix login bug" in _pane_text(pane)
+            kinds = {lk.entity: lk.target_id for lk in pane.related_links()}
+            assert kinds.get("epic") == e.id
+            assert kinds.get("project") == p.id
+            assert kinds.get("milestone") is None  # not a story parent
+            assert getattr(app, "_exception", None) is None
+            await pilot.press("q")
+    _run(main())
+
+
 def test_tui_entity_list_pane_epics(db_path):
     """Story 67: an EntityListPane renders any entity type — here epics with a
     different column schema — and still keys rows by DB id and preserves the
@@ -1446,4 +1486,35 @@ def test_tui_entity_list_pane_epics(db_path):
             assert pane.current_id == items[1].id
             assert getattr(host, "_exception", None) is None
         conn.close()
+    _run(main())
+
+
+def test_detail_pane_renders_epic_with_related_links(db_path):
+    """The generic detail pane renders a non-story entity (epic) and its
+    related milestone/project links, independent of the story selection."""
+    from backend import db
+    from backend import epics as epics_mod
+    from backend import milestones as ms_mod
+    from tui.detail import EntityDetailPane
+
+    c = db.connect(db_path)
+    p = projects.create_project(c, "backend")
+    ms = ms_mod.create_milestone(c, "M1")
+    e = epics_mod.create_epic(c, "Epic A", milestone_id=ms.id, project_id=p.id)
+    c.close()
+
+    async def main():
+        app = PlannerApp(db_path)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            pane = app.query_one("#detail-view", EntityDetailPane)
+            pane.show(app.conn, "epic", e.id)
+            await pilot.pause(0.05)
+            await pilot.pause()
+            assert "Epic A" in _pane_text(pane)
+            kinds = {lk.entity: lk.target_id for lk in pane.related_links()}
+            assert kinds.get("milestone") == ms.id
+            assert kinds.get("project") == p.id
+            assert getattr(app, "_exception", None) is None
+            await pilot.press("q")
     _run(main())
