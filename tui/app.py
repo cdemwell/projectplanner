@@ -29,7 +29,6 @@ from textual.widgets import (
     Button,
     Checkbox,
     DataTable,
-    Footer,
     Header,
     Input,
     Label,
@@ -126,6 +125,7 @@ _PALETTE_COMMANDS: list[tuple[str, str]] = [
     ("Move down", "move_down"),
     ("Move up", "move_up"),
     ("Toggle auto-refresh", "toggle_auto_refresh"),
+    ("Show help (?)", "open_help"),
     ("Quit", "quit"),
 ]
 
@@ -4292,6 +4292,114 @@ class ConfigManagerScreen(ModalScreen[bool]):
 
 
 # --------------------------------------------------------------------------- #
+# Help overlay + context footer (story 82)
+# --------------------------------------------------------------------------- #
+
+# Global navigation keys shown in every help context and the footer.
+_HELP_NAV: list[tuple[str, str]] = [
+    ("tab / shift+tab", "cycle focus: parent list → child list → detail"),
+    ("enter / right", "drill into the selected parent row's children"),
+    ("left / esc", "drill back out to the parent level"),
+    ("z", "zoom: collapse the three panes to a two-pane master-detail"),
+    ("s E I M P G W L R", "switch the parent pane's entity type (story/epic/…)"),
+    ("ctrl+p", "open the command palette"),
+    ("? / q / esc", "close this help overlay"),
+]
+
+# Actions relevant to each pane, shown in the help overlay for that context.
+_HELP_CONTEXT: dict[str, list[tuple[str, str]]] = {
+    "parent": [
+        ("n", "new story"),
+        ("u", "edit the selected story"),
+        ("d", "delete the selected story"),
+        ("/", "search / filter stories"),
+        ("v", "toggle multi-select"),
+        ("space", "toggle a selection in multi-select mode"),
+    ],
+    "child": [
+        ("u", "edit the selected child / task"),
+        ("d", "delete the selected child / task"),
+        ("t", "add a task"),
+        ("x", "task actions"),
+    ],
+    "detail": [
+        ("u", "edit the selected entity"),
+        ("d", "delete the selected entity"),
+        ("e", "toggle complete"),
+        ("c", "add a comment"),
+        ("o", "manage owners"),
+        ("l", "manage labels"),
+        ("h", "manage links"),
+        ("m", "move state"),
+    ],
+}
+
+# Compact per-pane key chips for the bottom footer bar.
+_FOOTER_ACTIONS: dict[str, list[tuple[str, str]]] = {
+    "parent": [("s/E/I/M/P/G/W/L/R", "entity"), ("enter", "drill in"),
+               ("left", "drill out"), ("n", "new"), ("u", "edit"),
+               ("d", "delete"), ("/", "search"), ("v", "multi")],
+    "child": [("u", "edit"), ("d", "delete"), ("t", "task"), ("x", "task⇄")],
+    "detail": [("u", "edit"), ("d", "delete"), ("e", "complete"), ("m", "move")],
+}
+
+
+class ContextFooter(Static):
+    """Bottom bar showing the actions relevant to the currently-active pane.
+
+    Replaces Textual's static :class:`Footer` (which lists every app binding
+    regardless of context) with a compact, pane-aware status line so the new
+    multi-pane navigation keys are discoverable in place. Refreshed whenever
+    focus moves to a different pane or the zoom state changes.
+    """
+
+    DEFAULT_CSS = """
+    ContextFooter {
+        height: 1; background: $panel; color: $text-muted; padding: 0 1;
+    }
+    """
+
+    def set_context(self, app: PlannerApp) -> None:
+        """Re-render the footer for ``app``'s active pane."""
+        self.update(app.footer_text())
+
+
+class HelpScreen(ModalScreen[None]):
+    """Overlay listing the keybindings for the current context.
+
+    Opened with '?'. Shows the navigation keys that are always relevant plus
+    the actions of the currently-focused pane, so the multi-pane drill-in/out,
+    zoom and entity-switch keys are discoverable. Dismisses with Esc, 'q' or
+    '?'; Ctrl+P jumps straight to the command palette.
+    """
+
+    BINDINGS = [
+        Binding("escape", "close_help", "Close"),
+        Binding("q", "close_help", "Close"),
+        Binding("question_mark", "close_help", "Close"),
+        Binding("ctrl+p", "open_palette", "Palette", priority=True),
+    ]
+
+    def __init__(self, app: PlannerApp) -> None:
+        super().__init__()
+        self._papp = app
+
+    def compose(self) -> ComposeResult:
+        yield VerticalScroll(
+            Static("Key Bindings", classes="modal-title"),
+            Static(self._papp.help_content(), id="help-content"),
+            classes="help-box",
+        )
+
+    def action_close_help(self) -> None:
+        self.dismiss(None)
+
+    def action_open_palette(self) -> None:
+        self.dismiss(None)
+        self._papp.action_open_palette()
+
+
+# --------------------------------------------------------------------------- #
 # Main app
 # --------------------------------------------------------------------------- #
 
@@ -4331,6 +4439,10 @@ class PlannerApp(App):
     }
     .config-box {
         width: 72; height: auto; max-height: 80%;
+        background: $panel; border: solid $primary; padding: 1 2;
+    }
+    .help-box {
+        width: 88; height: auto; max-height: 90%;
         background: $panel; border: solid $primary; padding: 1 2;
     }
     #cfg-output { height: auto; max-height: 20; margin-top: 1; }
@@ -4394,6 +4506,9 @@ class PlannerApp(App):
         # Zoom (story 73): collapse the three-pane browser to a two-pane
         # master-detail; pressing 'z' again restores the three panes.
         Binding("z", "zoom", "Zoom", show=False),
+        # Help overlay (story 82): '?' opens a context-sensitive keybinding
+        # listing; shown as a chip in the context footer.
+        Binding("question_mark", "open_help", "Help", show=False),
     ]
 
     def __init__(self, db_path: str | None = None,
@@ -4473,7 +4588,7 @@ class PlannerApp(App):
             # when editing.
             with VerticalScroll(id="detail"):
                 yield EntityDetailPane(id="detail-view")
-        yield Footer()
+        yield ContextFooter(id="ctx-footer")
 
     # --- three-pane focus -------------------------------------------------- #
     def _cycle_ids(self) -> list[str]:
@@ -4515,6 +4630,7 @@ class PlannerApp(App):
         except Exception:
             # Focus is best-effort (e.g. a modal is open); the marker still moves.
             pass
+        self._refresh_footer()
 
     def _parent_focused(self) -> bool:
         """True when the parent (#stories) list pane has focus.
@@ -4532,6 +4648,58 @@ class PlannerApp(App):
     def action_focus_prev_pane(self) -> None:
         """Cycle focus to the previous pane (detail -> child -> parent)."""
         self._activate_pane(self._active_pane - 1)
+
+    def action_open_help(self) -> None:
+        """Open the context-sensitive keybinding help overlay ('?')."""
+        self.push_screen(HelpScreen(self))
+
+    def _refresh_footer(self) -> None:
+        """Update the context footer to reflect the active pane (best-effort)."""
+        try:
+            self.query_one(ContextFooter).set_context(self)
+        except Exception:
+            pass
+
+    def _active_pane_id(self) -> str:
+        """Id of the currently-active pane ('stories', 'children' or 'detail')."""
+        return self._cycle_ids()[self._active_pane]
+
+    def _pane_context(self) -> str:
+        """Return the current pane context key ('parent', 'child' or 'detail')."""
+        pid = self._active_pane_id()
+        if pid == "stories":
+            return "parent"
+        if pid == "children":
+            return "child"
+        return "detail"
+
+    @staticmethod
+    def _help_rows(rows: list[tuple[str, str]]) -> list[str]:
+        """Format ``(key, description)`` pairs into aligned help lines."""
+        return [f"  {key:<22} {desc}" for key, desc in rows]
+
+    def footer_text(self) -> str:
+        """Render the compact, pane-aware footer line for the active pane."""
+        ctx = self._pane_context()
+        pairs = [("tab", "pane"), ("?", "help"),
+                 ("ctrl+p", "palette"), ("q", "quit")]
+        pairs += _FOOTER_ACTIONS.get(ctx, [])
+        pairs.append(("z", "zoom"))
+        return "   ".join(f"[b]{key}[/b]: {label}" for key, label in pairs)
+
+    def help_content(self) -> str:
+        """Rich-markup text for the help overlay, scoped to the active pane."""
+        ctx = self._pane_context()
+        ctx_title = {"parent": "Parent list",
+                     "child": "Child list",
+                     "detail": "Detail pane"}[ctx]
+        lines = ["[b]Navigation[/b]"]
+        lines += self._help_rows(_HELP_NAV)
+        lines += ["", f"[b]{ctx_title} actions[/b]"]
+        lines += self._help_rows(_HELP_CONTEXT[ctx])
+        lines += ["", "[b]Global[/b]"]
+        lines += self._help_rows([("q", "quit")])
+        return "\n".join(lines)
 
     # --- zoom: three-pane <-> two-pane master-detail (story 73) ------------ #
     def action_zoom(self) -> None:
