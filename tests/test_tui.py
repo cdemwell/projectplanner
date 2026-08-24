@@ -422,6 +422,84 @@ def test_tui_manage_workflows_and_states(db_path):
     _run(main())
 
 
+def test_tui_epic_management(db_path):
+    """The 'E' epic manager creates, edits, and deletes epics via the backend.
+
+    Exercises every flow: create, edit (name/state/project/milestone), and
+    delete with confirmation. All operations call the backend epics module.
+    See Story 42.
+    """
+    from textual.widgets import Button, Input, Select
+
+    from backend import db
+    from backend import epics as epics_mod
+    from backend import milestones as ms_mod
+    from backend import projects as proj_mod
+    from tui.app import EpicManagerScreen
+
+    c = db.connect(db_path)
+    p = proj_mod.create_project(c, "backend")
+    ms = ms_mod.create_milestone(c, "M1")
+    c.close()
+
+    async def main():
+        app = PlannerApp(db_path)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+
+            async def click(btn_id: str):
+                app.screen.query_one(btn_id, Button).focus()
+                await pilot.pause()
+                await pilot.press("enter")
+                await pilot.pause(0.05)
+                await pilot.pause()
+
+            async def confirm_yes():
+                app.screen.query_one("#yes", Button).focus()
+                await pilot.pause()
+                await pilot.press("enter")
+                await pilot.pause(0.05)
+                await pilot.pause()
+
+            # open the epic manager with 'E'
+            await pilot.press("E"); await pilot.pause()
+            assert isinstance(app.screen, EpicManagerScreen)
+            assert app.screen.query_one("#em-epics").option_count == 0
+
+            # create an epic
+            await click("#em-new")
+            app.screen.query_one("#ef-name", Input).value = "Auth"
+            await click("#ok")
+            epics = epics_mod.list_epics(app.conn)
+            assert len(epics) == 1
+            eid = epics[0].id
+            assert epics[0].state == "planned"
+
+            # edit: rename + state + project + milestone
+            await click("#em-edit")
+            app.screen.query_one("#ef-name", Input).value = "MFA"
+            app.screen.query_one("#ef-state", Select).value = "in_progress"
+            app.screen.query_one("#ef-proj", Select).value = p.id
+            app.screen.query_one("#ef-ms", Select).value = ms.id
+            await click("#ok")
+            e = epics_mod.get_epic(app.conn, eid)
+            assert e.name == "MFA"
+            assert e.state == "in_progress"
+            assert e.project_id == p.id
+            assert e.milestone_id == ms.id
+
+            # delete with confirmation
+            await click("#em-delete")
+            await confirm_yes()
+            assert epics_mod.list_epics(app.conn) == []
+
+            # Done closes the screen; refresh ran without error
+            await click("#em-done")
+            assert getattr(app, "_exception", None) is None
+            await pilot.press("q")
+    _run(main())
+
+
 def test_tui_refresh_keeps_cursor_position(db_path):
     """refresh_stories must not yank the cursor back to the top row."""
     from backend import db

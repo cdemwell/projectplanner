@@ -89,6 +89,7 @@ _PALETTE_COMMANDS: list[tuple[str, str]] = [
     ("Browse", "browse"),
     ("Search", "search"),
     ("Manage workflows", "manage_workflows"),
+    ("Manage epics", "manage_epics"),
     ("Toggle complete", "toggle_complete"),
     ("Delete story", "delete_story"),
     ("Refresh", "refresh"),
@@ -1286,6 +1287,223 @@ class WorkflowManagerScreen(ModalScreen[bool]):
         self.dismiss(self._dirty)
 
 
+class EpicFormScreen(ModalScreen[dict]):
+    """Collect name/description/state/project/milestone for an epic.
+
+    Used both for creating a new epic (``epic=None``) and for editing an
+    existing one (pre-populated from the given :class:`~backend.models.Epic`).
+    All operations call the backend ``epics`` module. Dismisses with a dict of
+    field values, or None on cancel.
+    """
+
+    def __init__(self, conn: sqlite3.Connection, epic=None) -> None:
+        super().__init__()
+        self.conn = conn
+        self.epic = epic  # Epic | None
+
+    def compose(self) -> ComposeResult:
+        e = self.epic
+        proj_opts = [("(no project)", _NONE_INT)]
+        for p in projects.list_projects(self.conn, include_archived=True):
+            proj_opts.append((p.name, p.id))
+        ms_opts = [("(no milestone)", _NONE_INT)]
+        for ms in milestones.list_milestones(self.conn):
+            ms_opts.append((ms.name, ms.id))
+        state_opts = [(s, s) for s in epics.STATES]
+        title = f"Edit epic #{e.id}" if e else "New epic"
+        yield VerticalScroll(
+            Static(title, classes="modal-title"),
+            Label("Name:"),
+            Input(value=e.name if e else "", id="ef-name"),
+            Label("Description:"),
+            TextArea(id="ef-desc"),
+            Label("State:"),
+            Select(state_opts, value=(e.state if e else "planned"), id="ef-state"),
+            Label("Project:"),
+            Select(proj_opts,
+                   value=(e.project_id or _NONE_INT) if e else _NONE_INT, id="ef-proj"),
+            Label("Milestone:"),
+            Select(ms_opts,
+                   value=(e.milestone_id or _NONE_INT) if e else _NONE_INT, id="ef-ms"),
+            Horizontal(Button("Save", id="ok", variant="primary"),
+                       Button("Cancel", id="cancel")),
+            Label("", id="ef-err", classes="err"),
+            classes="modal-box",
+        )
+
+    def on_mount(self) -> None:
+        if self.epic and self.epic.description:
+            self.query_one("#ef-desc", TextArea).text = self.epic.description
+        self.query_one("#ef-name", Input).focus()
+
+    def _submit(self) -> None:
+        name = self.query_one("#ef-name", Input).value.strip()
+        if not name:
+            self.query_one("#ef-err", Label).update("Name is required.")
+            return
+        state = self.query_one("#ef-state", Select).value
+        if state not in epics.STATES:
+            self.query_one("#ef-err", Label).update("Invalid state.")
+            return
+        self.dismiss({
+            "name": name,
+            "description": self.query_one("#ef-desc", TextArea).text,
+            "state": state,
+            "project_id": _sel(self.query_one("#ef-proj", Select).value),
+            "milestone_id": _sel(self.query_one("#ef-ms", Select).value),
+        })
+
+    @on(Button.Pressed, "#ok")
+    def _ok(self) -> None:
+        self._submit()
+
+    @on(Button.Pressed, "#cancel")
+    def _cancel(self) -> None:
+        self.dismiss(None)
+
+
+class EpicManagerScreen(ModalScreen[bool]):
+    """Manage epics: create, edit, and delete.
+
+    An OptionList lists every epic; New/Edit/Delete/Done buttons drive the
+    flow. Create and edit open :class:`EpicFormScreen`; delete confirms via
+    :class:`ConfirmScreen`. Every operation goes through the backend ``epics``
+    module; backend errors surface in a status label.
+
+    Dismisses with:
+        bool: True if any change was made (caller refreshes), else None.
+    """
+
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        super().__init__()
+        self.conn = conn
+        self._dirty = False
+        self._epic_ids: list[int] = []
+
+    def compose(self) -> ComposeResult:
+        yield VerticalScroll(
+            Static("Manage Epics", classes="modal-title"),
+            OptionList(id="em-epics"),
+            Horizontal(
+                Button("New", id="em-new", variant="primary"),
+                Button("Edit", id="em-edit"),
+                Button("Delete", id="em-delete", variant="error"),
+                Button("Done", id="em-done"),
+            ),
+            Label("", id="em-status", classes="err"),
+            classes="modal-box",
+        )
+
+    def _status(self, msg: str) -> None:
+        self.query_one("#em-status", Label).update(msg)
+
+    def _selected_id(self) -> int | None:
+        idx = self.query_one("#em-epics", OptionList).highlighted
+        if idx is None or not (0 <= idx < len(self._epic_ids)):
+            return None
+        return self._epic_ids[idx]
+
+    def on_mount(self) -> None:
+        self._refresh()
+
+    def _refresh(self) -> None:
+        opts = self.query_one("#em-epics", OptionList)
+        prev = opts.get_option_at_index(opts.highlighted).id if opts.option_count else None
+        es = epics.list_epics(self.conn)
+        self._epic_ids = [e.id for e in es]
+        opts.clear_options()
+        for e in es:
+            opts.add_option(Option(f"#{e.id} {e.name} ({e.state})", id=str(e.id)))
+        if self._epic_ids:
+            idx = 0
+            if prev:
+                for i, eid in enumerate(self._epic_ids):
+                    if str(eid) == prev:
+                        idx = i
+                        break
+            opts.highlighted = idx
+
+    def _new(self) -> None:
+        self.app.push_screen(EpicFormScreen(self.conn), self._do_create)
+
+    def _do_create(self, fields: dict | None) -> None:
+        if fields is None:
+            return
+        try:
+            epics.create_epic(self.conn, fields["name"],
+                              description=fields["description"],
+                              state=fields["state"],
+                              milestone_id=fields["milestone_id"],
+                              project_id=fields["project_id"])
+        except errors.PlannerError as e:
+            self._status(f"error: {e}")
+            return
+        self._dirty = True
+        self._refresh()
+        self._status(f"Created epic '{fields['name']}'.")
+
+    def _edit(self) -> None:
+        eid = self._selected_id()
+        if eid is None:
+            self._status("Select an epic to edit.")
+            return
+        self.app.push_screen(EpicFormScreen(self.conn, epic=epics.get_epic(self.conn, eid)),
+                             lambda fields: self._do_update(eid, fields))
+
+    def _do_update(self, eid: int, fields: dict | None) -> None:
+        if fields is None:
+            return
+        try:
+            epics.update_epic(self.conn, eid, name=fields["name"],
+                              description=fields["description"],
+                              state=fields["state"],
+                              milestone_id=fields["milestone_id"],
+                              project_id=fields["project_id"])
+        except errors.PlannerError as e:
+            self._status(f"error: {e}")
+            return
+        self._dirty = True
+        self._refresh()
+        self._status(f"Updated epic '{fields['name']}'.")
+
+    def _delete(self) -> None:
+        eid = self._selected_id()
+        if eid is None:
+            self._status("Select an epic to delete.")
+            return
+        e = epics.get_epic(self.conn, eid)
+        self.app.push_screen(ConfirmScreen(f"Delete epic '#{e.id} {e.name}'?"),
+                             lambda ok: self._do_delete(eid, ok))
+
+    def _do_delete(self, eid: int, ok: bool | None) -> None:
+        if not ok:
+            return
+        try:
+            epics.delete_epic(self.conn, eid)
+        except errors.PlannerError as e:
+            self._status(f"error: {e}")
+            return
+        self._dirty = True
+        self._refresh()
+        self._status("Deleted epic.")
+
+    @on(Button.Pressed, "#em-new")
+    def _b_new(self) -> None:
+        self._new()
+
+    @on(Button.Pressed, "#em-edit")
+    def _b_edit(self) -> None:
+        self._edit()
+
+    @on(Button.Pressed, "#em-delete")
+    def _b_delete(self) -> None:
+        self._delete()
+
+    @on(Button.Pressed, "#em-done")
+    def _b_done(self) -> None:
+        self.dismiss(self._dirty)
+
+
 # --------------------------------------------------------------------------- #
 # Main app
 # --------------------------------------------------------------------------- #
@@ -1336,6 +1554,7 @@ class PlannerApp(App):
         Binding("b", "browse", "Browse"),
         Binding("slash", "search", "Search"),  # '/'
         Binding("w", "manage_workflows", "Workflows"),
+        Binding("E", "manage_epics", "Epics"),
         Binding("r", "refresh", "Refresh"),
         Binding("a", "toggle_auto_refresh", "Auto↻"),
         Binding("J", "move_down", "Down"),
@@ -1911,6 +2130,15 @@ class PlannerApp(App):
                          self._after_workflow_manage)
 
     def _after_workflow_manage(self, changed: bool | None) -> None:
+        if changed:
+            self.refresh_stories()
+
+    def action_manage_epics(self) -> None:
+        """Open the epic management screen."""
+        assert self.conn is not None
+        self.push_screen(EpicManagerScreen(self.conn), self._after_epic_manage)
+
+    def _after_epic_manage(self, changed: bool | None) -> None:
         if changed:
             self.refresh_stories()
 
