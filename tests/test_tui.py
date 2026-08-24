@@ -1970,3 +1970,97 @@ def test_tui_zoom_children_master_detail(db_path):
             assert getattr(app, "_exception", None) is None
             await pilot.press("q")
     _run(main())
+
+
+def test_tui_inline_edit_and_delete_iteration(db_path):
+    """Story 76: an iteration is editable inline in the detail pane ('u'), its
+    name/status changes persist, and 'd' deletes it after confirmation."""
+    from textual.widgets import Input
+
+    from backend import db
+    from backend import iterations as iter_mod
+
+    c = db.connect(db_path)
+    it = iter_mod.create_iteration(c, "Sprint 1", status="planned",
+                                   start_date="2026-01-01", end_date="2026-01-14")
+    c.close()
+
+    async def main():
+        app = PlannerApp(db_path)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+
+            # Switch the parent pane to iterations.
+            await pilot.press("I"); await pilot.pause()
+            assert app.parent_entity == "iteration"
+            assert app.query_one("#stories").current_id == it.id
+
+            # Open the inline iteration edit form.
+            await pilot.press("u"); await pilot.pause()
+            assert app._edit_pane is not None
+
+            # Rename it and change the status.
+            app.screen.query_one("#ie-name", Input).value = "Sprint 2"
+            app.screen.query_one("#ie-status", Select).value = "active"
+            await pilot.pause()
+            app.screen.query_one("#ie-save", Button).focus(); await pilot.pause()
+            await pilot.press("enter"); await pilot.pause(0.05); await pilot.pause()
+            assert app._edit_pane is None
+
+            # The changes persist through the backend.
+            row = app.conn.execute(
+                "SELECT name, status FROM iteration WHERE id=?", (it.id,)).fetchone()
+            assert row["name"] == "Sprint 2"
+            assert row["status"] == "active"
+
+            # Delete with confirmation ('d' -> #yes).
+            await pilot.press("d"); await pilot.pause()
+            app.screen.query_one("#yes", Button).focus(); await pilot.pause()
+            await pilot.press("enter"); await pilot.pause(0.05); await pilot.pause()
+            assert app.conn.execute(
+                "SELECT COUNT(*) FROM iteration WHERE id=?", (it.id,)).fetchone()[0] == 0
+
+            assert getattr(app, "_exception", None) is None
+            await pilot.press("q")
+    _run(main())
+
+
+def test_tui_inline_edit_milestone(db_path):
+    """Story 76: a milestone's inline form renders and an edit persists."""
+    from textual.widgets import Input
+
+    from backend import db
+    from backend import milestones as ms_mod
+
+    c = db.connect(db_path)
+    ms = ms_mod.create_milestone(c, "Alpha", state="planned")
+    c.close()
+
+    async def main():
+        app = PlannerApp(db_path)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+
+            # Switch the parent pane to milestones and open the inline edit.
+            await pilot.press("M"); await pilot.pause()
+            assert app.parent_entity == "milestone"
+            assert app.query_one("#stories").current_id == ms.id
+            await pilot.press("u"); await pilot.pause()
+            assert app._edit_pane is not None
+
+            # Rename it and flip the state.
+            app.screen.query_one("#me-name", Input).value = "Beta"
+            app.screen.query_one("#me-state", Select).value = "in_progress"
+            await pilot.pause()
+            app.screen.query_one("#me-save", Button).focus(); await pilot.pause()
+            await pilot.press("enter"); await pilot.pause(0.05); await pilot.pause()
+            assert app._edit_pane is None
+
+            row = app.conn.execute(
+                "SELECT name, state FROM milestone WHERE id=?", (ms.id,)).fetchone()
+            assert row["name"] == "Beta"
+            assert row["state"] == "in_progress"
+
+            assert getattr(app, "_exception", None) is None
+            await pilot.press("q")
+    _run(main())
