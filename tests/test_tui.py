@@ -519,8 +519,9 @@ def test_tui_manage_workflows_and_states(db_path):
                 await pilot.pause(0.05)
                 await pilot.pause()
 
-            # open the workflow manager with 'w'
-            await pilot.press("w"); await pilot.pause()
+            # open the workflow manager (via its palette action; the 'w' key
+            # now switches the parent pane to workflows instead)
+            app.action_manage_workflows(); await pilot.pause()
             assert isinstance(app.screen, WorkflowManagerScreen)
             assert app.screen.query_one("#wm-workflows").option_count == 1
 
@@ -609,8 +610,9 @@ def test_tui_epic_management(db_path):
                 await pilot.pause(0.05)
                 await pilot.pause()
 
-            # open the epic manager with 'E'
-            await pilot.press("E"); await pilot.pause()
+            # open the epic manager (via its palette action; 'E' now switches
+            # the parent pane to epics instead)
+            app.action_manage_epics(); await pilot.pause()
             assert isinstance(app.screen, EpicManagerScreen)
             assert app.screen.query_one("#em-epics").option_count == 0
 
@@ -683,8 +685,9 @@ def test_tui_iteration_management(db_path):
                 await pilot.pause(0.05)
                 await pilot.pause()
 
-            # open the iteration manager with 'I'
-            await pilot.press("I"); await pilot.pause()
+            # open the iteration manager (via its palette action; 'I' now
+            # switches the parent pane to iterations instead)
+            app.action_manage_iterations(); await pilot.pause()
             assert isinstance(app.screen, IterationManagerScreen)
             assert app.screen.query_one("#im-iterations").option_count == 0
 
@@ -761,8 +764,9 @@ def test_tui_milestone_management(db_path):
                 await pilot.pause(0.05)
                 await pilot.pause()
 
-            # open the milestone manager with 'M'
-            await pilot.press("M"); await pilot.pause()
+            # open the milestone manager (via its palette action; 'M' now
+            # switches the parent pane to milestones instead)
+            app.action_manage_milestones(); await pilot.pause()
             assert isinstance(app.screen, MilestoneManagerScreen)
             assert app.screen.query_one("#mm-milestones").option_count == 0
 
@@ -833,8 +837,9 @@ def test_tui_project_management(db_path):
                 await pilot.pause(0.05)
                 await pilot.pause()
 
-            # open the project manager with 'P'
-            await pilot.press("P"); await pilot.pause()
+            # open the project manager (via its palette action; 'P' now
+            # switches the parent pane to projects instead)
+            app.action_manage_projects(); await pilot.pause()
             assert isinstance(app.screen, ProjectManagerScreen)
             assert app.screen.query_one("#pm-projects").option_count == 0
 
@@ -921,8 +926,9 @@ def test_tui_label_management(db_path):
                 await pilot.pause(0.05)
                 await pilot.pause()
 
-            # open the label manager with 'L'
-            await pilot.press("L"); await pilot.pause()
+            # open the label manager (via its palette action; 'L' now switches
+            # the parent pane to labels instead)
+            app.action_manage_label_catalog(); await pilot.pause()
             assert isinstance(app.screen, LabelManagerScreen)
             assert app.screen.query_one("#lm-labels").option_count == 0
 
@@ -993,8 +999,9 @@ def test_tui_member_management(db_path):
                 await pilot.pause(0.05)
                 await pilot.pause()
 
-            # open the member manager with 'R'
-            await pilot.press("R"); await pilot.pause()
+            # open the member manager (via its palette action; 'R' now switches
+            # the parent pane to members instead)
+            app.action_manage_member_catalog(); await pilot.pause()
             assert isinstance(app.screen, MemberManagerScreen)
             # the db seeds one local member, so the roster starts at one
             assert app.screen.query_one("#mm-members").option_count == 1
@@ -1071,8 +1078,9 @@ def test_tui_group_management(db_path):
                 await pilot.pause(0.1)
                 await pilot.pause()
 
-            # open the group manager with 'G'; no groups are seeded, so it's empty
-            await pilot.press("G"); await pilot.pause()
+            # open the group manager (via its palette action; 'G' now switches
+            # the parent pane to groups instead)
+            app.action_manage_group_catalog(); await pilot.pause()
             assert isinstance(app.screen, GroupManagerScreen)
             assert app.screen.query_one("#gm-groups").option_count == 0
 
@@ -1576,6 +1584,63 @@ def test_three_pane_layout_and_tab_focus_cycle(db_path):
             # Existing story browsing still works: the detail renders.
             app.query_one("#stories").move_cursor(row=0); await pilot.pause()
             assert "Fix login bug" in _pane_text(app.query_one("#detail-view"))
+            assert getattr(app, "_exception", None) is None
+            await pilot.press("q")
+    _run(main())
+
+
+def test_tui_switch_parent_entity_pane(db_path):
+    """Story 71: a dedicated key (and matching palette action) switches the
+    upper-left parent pane to another entity — re-schemaing its columns and
+    re-deriving the child pane from the chain model — and switching back to
+    stories restores the story list."""
+    from backend import db
+    from backend import epics as epics_mod
+    from tui.app import EntityListPane
+
+    c = db.connect(db_path)
+    p = projects.create_project(c, "backend")
+    e = epics_mod.create_epic(c, "Auth epic", project_id=p.id)
+    stories_mod.create_story(c, "Fix login bug", project_id=p.id, epic_id=e.id)
+    c.close()
+
+    async def main():
+        app = PlannerApp(db_path)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+
+            # Default parent is the story list with the story column schema.
+            stories_pane = app.query_one("#stories", EntityListPane)
+            assert app.parent_entity == "story"
+            assert [c.label for c in stories_pane.columns_schema] == \
+                ["ID", "Name", "Type", "State", "Project", "Owners", "✓"]
+            assert stories_pane.row_count == 1
+
+            # Dedicated key 'E' switches the parent pane to epics.
+            await pilot.press("E"); await pilot.pause()
+            assert app.parent_entity == "epic"
+            assert [c.label for c in stories_pane.columns_schema] == \
+                ["ID", "Name", "State", "Project", "Milestone"]
+            assert stories_pane.row_count == 1
+            assert stories_pane.current_id == e.id
+            # The child pane re-derives to epics' children (the selected
+            # epic's stories) via the chain model.
+            assert app.query_one("#children").row_keys == \
+                [str(s.id) for s in epics_mod.list_epic_stories(app.conn, e.id)]
+
+            # A palette command (dispatched to the action method) switches to
+            # projects; switching back to stories restores the story list.
+            app.action_switch_to_project()
+            await pilot.pause()
+            assert app.parent_entity == "project"
+            assert [c.label for c in stories_pane.columns_schema] == \
+                ["ID", "Name", "Abbreviation", "Archived"]
+
+            await pilot.press("s"); await pilot.pause()
+            assert app.parent_entity == "story"
+            assert [c.label for c in stories_pane.columns_schema] == \
+                ["ID", "Name", "Type", "State", "Project", "Owners", "✓"]
+            assert stories_pane.row_count == 1
             assert getattr(app, "_exception", None) is None
             await pilot.press("q")
     _run(main())

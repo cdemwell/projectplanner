@@ -61,6 +61,7 @@ from backend import (
     workflows,
 )
 from backend.models import StoryComment
+from tui.chains import resolve_children, valid_children
 from tui.detail import EntityDetailPane
 
 # Sentinels for "no selection" inside Select widgets (kept as int/str so all
@@ -87,6 +88,15 @@ def _sel(value: Any) -> Any:
 # Command palette entries: (display label, action method name).
 # These mirror the app's actions so the palette can dispatch to them directly.
 _PALETTE_COMMANDS: list[tuple[str, str]] = [
+    ("Switch to stories", "switch_to_story"),
+    ("Switch to epics", "switch_to_epic"),
+    ("Switch to iterations", "switch_to_iteration"),
+    ("Switch to milestones", "switch_to_milestone"),
+    ("Switch to projects", "switch_to_project"),
+    ("Switch to groups", "switch_to_group"),
+    ("Switch to workflows", "switch_to_workflow"),
+    ("Switch to labels", "switch_to_label"),
+    ("Switch to members", "switch_to_member"),
     ("New story", "new_story"),
     ("Update story", "edit_story"),
     ("Move state", "move_state"),
@@ -315,6 +325,21 @@ ENTITY_COLUMNS: dict[str, list[Column]] = {
     "workflow_state": _workflow_state_columns(),
 }
 
+# Backend ``list_*`` function per switchable parent entity. The parent pane
+# (``#stories``) shows rows fetched with these when the user switches entity.
+# ``story`` is the default so existing story browsing is unchanged.
+_PARENT_LISTERS: dict[str, Callable[[sqlite3.Connection], list[Any]]] = {
+    "story": stories.list_stories,
+    "epic": epics.list_epics,
+    "iteration": iterations.list_iterations,
+    "milestone": milestones.list_milestones,
+    "project": projects.list_projects,
+    "group": groups.list_groups,
+    "workflow": workflows.list_workflows,
+    "label": labels.list_labels,
+    "member": members.list_members,
+}
+
 
 class EntityListPane(DataTable):
     """A reusable DataTable that renders any entity type.
@@ -338,6 +363,15 @@ class EntityListPane(DataTable):
     def columns_schema(self) -> list[Column]:
         """The column schema this pane was built with."""
         return self._columns
+
+    def set_columns(self, columns: list[Column]) -> None:
+        """Replace this pane's column schema (used when switching entity kind).
+
+        Drops any existing columns so a later :meth:`set_items` re-adds them
+        from the new schema.
+        """
+        self._columns = list(columns)
+        self.clear(columns=True)
 
     @property
     def row_keys(self) -> list[str]:
@@ -3652,14 +3686,15 @@ class PlannerApp(App):
         Binding("f", "filter", "Filter"),
         Binding("b", "browse", "Browse"),
         Binding("slash", "search", "Search"),  # '/'
-        Binding("w", "manage_workflows", "Workflows"),
-        Binding("E", "manage_epics", "Epics"),
-        Binding("I", "manage_iterations", "Iterations"),
-        Binding("M", "manage_milestones", "Milestones"),
-        Binding("P", "manage_projects", "Projects"),
-        Binding("L", "manage_label_catalog", "Labels"),
-        Binding("R", "manage_member_catalog", "Members"),
-        Binding("G", "manage_group_catalog", "Groups"),
+        Binding("s", "switch_to_story", "Stories"),
+        Binding("E", "switch_to_epic", "Epics"),
+        Binding("I", "switch_to_iteration", "Iterations"),
+        Binding("M", "switch_to_milestone", "Milestones"),
+        Binding("P", "switch_to_project", "Projects"),
+        Binding("G", "switch_to_group", "Groups"),
+        Binding("W", "switch_to_workflow", "Workflows"),
+        Binding("L", "switch_to_label", "Labels"),
+        Binding("R", "switch_to_member", "Members"),
         Binding("S", "manage_plan", "Plan"),
         Binding("B", "manage_config", "Config"),
         Binding("r", "refresh", "Refresh"),
@@ -3702,6 +3737,10 @@ class PlannerApp(App):
         # detail pane. Tab / Shift+Tab cycle focus through these ids in order.
         self._pane_ids = ["stories", "children", "detail"]
         self._active_pane = 0
+        # The entity kind the upper-left (parent) pane lists. Defaults to story
+        # so existing story browsing is unchanged; dedicated keys + palette
+        # commands switch it and re-derive the child + detail panes.
+        self.parent_entity = "story"
 
     # --- lifecycle --------------------------------------------------------- #
     def on_mount(self) -> None:
@@ -3772,12 +3811,19 @@ class PlannerApp(App):
 
     # --- story list -------------------------------------------------------- #
     def refresh_stories(self) -> None:
-        """Query stories based on active filters and populate the story pane.
+        """Refresh the upper-left (parent) pane for the current entity.
 
+        When :attr:`parent_entity` is not "story" (the user switched to another
+        kind) this delegates to :meth:`refresh_parent` so the pane keeps showing
+        that entity's rows instead of being reset to the story list. Otherwise
+        it queries stories based on active filters and populates the story pane.
         ``self.filters`` is a dict with keys project/state_type/q/epic/iteration/
         milestone (each id|str|None), mapped to ``stories.list_stories`` params.
         """
         assert self.conn is not None
+        if self.parent_entity != "story":
+            self.refresh_parent()
+            return
         f = self.filters
         items = stories.list_stories(
             self.conn, project_id=f["project"], state_type=f["state_type"],
@@ -3821,20 +3867,61 @@ class PlannerApp(App):
             pane = self.query_one("#detail-view", EntityDetailPane)
             pane.show_message("(no stories match the current filter — press 'n' to create one)")
 
-    def refresh_children(self) -> None:
-        """Populate the child pane with the selected story's tasks.
+    def refresh_parent(self) -> None:
+        """Render the parent pane for :attr:`parent_entity`, then its panes.
 
-        This is the minimal parent->child chain: the child pane shows the tasks
-        of the story currently under the parent-pane cursor. Full chain logic
-        (arbitrary parent/child kinds) arrives in story 70.
+        Fetches the current parent entity's rows via the backend ``list_*``
+        function, swaps the upper-left pane to that entity's column schema, and
+        re-derives the child + detail panes. Called on entity switch and by
+        :meth:`refresh_stories` when a non-story parent is active.
         """
         assert self.conn is not None
+        entity = self.parent_entity
+        lister = _PARENT_LISTERS[entity]
+        items = lister(self.conn)
+        pane = self.query_one("#stories", EntityListPane)
+        pane.set_columns(ENTITY_COLUMNS[entity])
+        pane.set_items(items, conn=self.conn)
+        # Selections are story-specific; reset them for other parent kinds.
+        self._selected = set()
+        if entity == "story":
+            self.query_one("#filter-bar", Static).update(
+                f"(all stories)  ({len(items)} stories)")
+        else:
+            self.query_one("#filter-bar", Static).update(
+                f"browsing {entity}  ({len(items)} rows)")
+        self.refresh_children()
+        if items:
+            self.show_current_detail()
+        else:
+            self.query_one("#detail-view", EntityDetailPane).show_message(
+                f"(no {entity} rows)")
+
+    def refresh_children(self) -> None:
+        """Populate the child pane with the selected parent row's children.
+
+        Uses the chain model (:func:`~tui.chains.valid_children` /
+        :func:`~tui.chains.resolve_children`) to decide what the lower-left pane
+        shows for the current parent entity. The first valid child kind (in the
+        chain model's order) is shown; nothing is rendered until a parent row is
+        selected.
+        """
+        assert self.conn is not None
+        parent = self.parent_entity
+        parent_id = self.query_one("#stories", EntityListPane).current_id
         child = self.query_one("#children", EntityListPane)
-        sid = self._current_story_id()
-        if sid is None:
+        kinds = valid_children(parent)
+        if not kinds:
+            child.set_columns([])
             child.set_items([], conn=self.conn)
             return
-        child.set_items(tasks.list_tasks(self.conn, sid), conn=self.conn)
+        child_entity = kinds[0]
+        child.set_columns(ENTITY_COLUMNS[child_entity])
+        if parent_id is None:
+            child.set_items([], conn=self.conn)
+            return
+        rows = resolve_children(self.conn, parent, parent_id, child_entity)
+        child.set_items(rows, conn=self.conn)
 
     def name_of(self, table: str, id: int) -> str:
         """Look up a name for a given ID in the specified table.
@@ -3870,16 +3957,18 @@ class PlannerApp(App):
         return self._current_story_id()
 
     def show_current_detail(self) -> None:
-        """Render the highlighted story's full details into the detail pane."""
-        sid = self._detail_story_id()
-        if sid is None:
+        """Render the highlighted parent row's details into the detail pane."""
+        entity = self.parent_entity
+        eid = (self._detail_story_id() if entity == "story"
+               else self.query_one("#stories", EntityListPane).current_id)
+        if eid is None:
             return
         assert self.conn is not None
         pane = self.query_one("#detail-view", EntityDetailPane)
         try:
-            pane.show(self.conn, "story", sid)
-        except errors.NotFound:
-            return
+            pane.show(self.conn, entity, eid)
+        except (errors.NotFound, KeyError):
+            pane.show_message(f"(no detail for {entity} #{eid})")
 
     @on(DataTable.RowHighlighted)
     def _on_highlight(self, event: DataTable.RowHighlighted) -> None:
@@ -3905,6 +3994,50 @@ class PlannerApp(App):
             method()
         else:
             self.bell()
+
+    def _switch_entity(self, entity: str) -> None:
+        """Set the parent pane's entity and re-derive its panes."""
+        if entity not in _PARENT_LISTERS:
+            self.bell()
+            return
+        self.parent_entity = entity
+        self.refresh_parent()
+
+    def action_switch_to_story(self) -> None:
+        """Show the story list in the upper-left parent pane."""
+        self._switch_entity("story")
+
+    def action_switch_to_epic(self) -> None:
+        """Show the epic list in the upper-left parent pane."""
+        self._switch_entity("epic")
+
+    def action_switch_to_iteration(self) -> None:
+        """Show the iteration list in the upper-left parent pane."""
+        self._switch_entity("iteration")
+
+    def action_switch_to_milestone(self) -> None:
+        """Show the milestone list in the upper-left parent pane."""
+        self._switch_entity("milestone")
+
+    def action_switch_to_project(self) -> None:
+        """Show the project list in the upper-left parent pane."""
+        self._switch_entity("project")
+
+    def action_switch_to_group(self) -> None:
+        """Show the group list in the upper-left parent pane."""
+        self._switch_entity("group")
+
+    def action_switch_to_workflow(self) -> None:
+        """Show the workflow list in the upper-left parent pane."""
+        self._switch_entity("workflow")
+
+    def action_switch_to_label(self) -> None:
+        """Show the label list in the upper-left parent pane."""
+        self._switch_entity("label")
+
+    def action_switch_to_member(self) -> None:
+        """Show the member list in the upper-left parent pane."""
+        self._switch_entity("member")
 
     def _selected_ids(self) -> list[int]:
         """IDs of the current bulk selection, or [] outside multi-select mode."""
@@ -3984,6 +4117,9 @@ class PlannerApp(App):
 
     def action_move_down(self) -> None:
         """Move the selected story down the list (swap with the next story)."""
+        if self.parent_entity != "story":
+            self.bell()
+            return
         sid = self._current_story_id()
         if sid is None or self.conn is None:
             self.bell()
@@ -4004,6 +4140,9 @@ class PlannerApp(App):
 
     def action_move_up(self) -> None:
         """Move the selected story up the list (swap with the previous story)."""
+        if self.parent_entity != "story":
+            self.bell()
+            return
         sid = self._current_story_id()
         if sid is None or self.conn is None:
             self.bell()
@@ -4381,6 +4520,9 @@ class PlannerApp(App):
 
     def action_delete_story(self) -> None:
         """Open confirmation modal to delete the selected story or selection."""
+        if self.parent_entity != "story":
+            self.bell()
+            return
         ids = self._selected_ids()
         if self._multi_select and ids:
             n = len(ids)
@@ -4414,6 +4556,9 @@ class PlannerApp(App):
     def action_toggle_complete(self) -> None:
         """Toggle the selected story between 'done' and 'unstarted' states.
         """
+        if self.parent_entity != "story":
+            self.bell()
+            return
         sid = self._current_story_id()
         if sid is None or self.conn is None:
             self.bell()
