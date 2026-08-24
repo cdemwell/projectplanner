@@ -713,6 +713,154 @@ class EditStoryPane(Vertical):
         self.on_cancelled()
 
 
+class EditIterationPane(Vertical):
+    """Edit an existing iteration's fields in the right detail pane.
+
+    Mounted into the ``#detail`` container when 'u' is pressed while the parent
+    pane is browsing iterations, replacing the read-only detail view. Fields:
+    name, description, status, start_date, end_date. Saves via
+    ``iterations.update_iteration`` and surfaces backend errors inline.
+
+    Args:
+        conn: sqlite3.Connection.
+        iteration_id: The iteration being edited.
+        on_saved: Called with the iteration id after a successful save.
+        on_cancelled: Called (with no args) when editing is cancelled.
+    """
+
+    def __init__(self, conn: sqlite3.Connection, iteration_id: int, *,
+                 on_saved, on_cancelled) -> None:
+        super().__init__()
+        self.conn = conn
+        self.iteration_id = iteration_id
+        self.on_saved = on_saved
+        self.on_cancelled = on_cancelled
+        self.iteration = iterations.get_iteration(conn, iteration_id)
+
+    def compose(self) -> ComposeResult:
+        it = self.iteration
+        status_opts = [(s, s) for s in iterations.STATUSES]
+        yield Static(f"Edit iteration #{it.id}", classes="detail-title")
+        yield Label("Name:")
+        yield Input(value=it.name, id="ie-name")
+        yield Label("Description:")
+        yield TextArea(id="ie-desc")
+        yield Label("Status:")
+        yield Select(status_opts, value=it.status, id="ie-status")
+        yield Label("Start date (YYYY-MM-DD):")
+        yield Input(value=it.start_date or "", placeholder="YYYY-MM-DD", id="ie-start")
+        yield Label("End date (YYYY-MM-DD):")
+        yield Input(value=it.end_date or "", placeholder="YYYY-MM-DD", id="ie-end")
+        yield Horizontal(Button("Save", id="ie-save", variant="primary"),
+                         Button("Cancel", id="ie-cancel"))
+        yield Label("", id="ie-err", classes="err")
+
+    def on_mount(self) -> None:
+        if self.iteration.description:
+            self.query_one("#ie-desc", TextArea).text = self.iteration.description
+        self.query_one("#ie-name", Input).focus()
+
+    def _save(self) -> None:
+        name = self.query_one("#ie-name", Input).value.strip()
+        if not name:
+            self.query_one("#ie-err", Label).update("Name is required.")
+            return
+        status = self.query_one("#ie-status", Select).value
+        if status not in iterations.STATUSES:
+            self.query_one("#ie-err", Label).update("Invalid status.")
+            return
+        start = self.query_one("#ie-start", Input).value.strip() or None
+        end = self.query_one("#ie-end", Input).value.strip() or None
+        try:
+            iterations.update_iteration(
+                self.conn, self.iteration_id, name=name,
+                description=self.query_one("#ie-desc", TextArea).text,
+                status=status, start_date=start, end_date=end)
+        except errors.PlannerError as e:
+            self.query_one("#ie-err", Label).update(f"error: {e}")
+            return
+        self.on_saved(self.iteration_id)
+
+    @on(Button.Pressed, "#ie-save")
+    def _ok(self) -> None:
+        self._save()
+
+    @on(Button.Pressed, "#ie-cancel")
+    def _cancel(self) -> None:
+        self.on_cancelled()
+
+
+class EditMilestonePane(Vertical):
+    """Edit an existing milestone's fields in the right detail pane.
+
+    Mounted into the ``#detail`` container when 'u' is pressed while the parent
+    pane is browsing milestones, replacing the read-only detail view. Fields:
+    name, description, state. Saves via ``milestones.update_milestone`` and
+    surfaces backend errors inline.
+
+    Args:
+        conn: sqlite3.Connection.
+        milestone_id: The milestone being edited.
+        on_saved: Called with the milestone id after a successful save.
+        on_cancelled: Called (with no args) when editing is cancelled.
+    """
+
+    def __init__(self, conn: sqlite3.Connection, milestone_id: int, *,
+                 on_saved, on_cancelled) -> None:
+        super().__init__()
+        self.conn = conn
+        self.milestone_id = milestone_id
+        self.on_saved = on_saved
+        self.on_cancelled = on_cancelled
+        self.milestone = milestones.get_milestone(conn, milestone_id)
+
+    def compose(self) -> ComposeResult:
+        ms = self.milestone
+        state_opts = [(s, s) for s in milestones.STATES]
+        yield Static(f"Edit milestone #{ms.id}", classes="detail-title")
+        yield Label("Name:")
+        yield Input(value=ms.name, id="me-name")
+        yield Label("Description:")
+        yield TextArea(id="me-desc")
+        yield Label("State:")
+        yield Select(state_opts, value=ms.state, id="me-state")
+        yield Horizontal(Button("Save", id="me-save", variant="primary"),
+                         Button("Cancel", id="me-cancel"))
+        yield Label("", id="me-err", classes="err")
+
+    def on_mount(self) -> None:
+        if self.milestone.description:
+            self.query_one("#me-desc", TextArea).text = self.milestone.description
+        self.query_one("#me-name", Input).focus()
+
+    def _save(self) -> None:
+        name = self.query_one("#me-name", Input).value.strip()
+        if not name:
+            self.query_one("#me-err", Label).update("Name is required.")
+            return
+        state = self.query_one("#me-state", Select).value
+        if state not in milestones.STATES:
+            self.query_one("#me-err", Label).update("Invalid state.")
+            return
+        try:
+            milestones.update_milestone(
+                self.conn, self.milestone_id, name=name,
+                description=self.query_one("#me-desc", TextArea).text,
+                state=state)
+        except errors.PlannerError as e:
+            self.query_one("#me-err", Label).update(f"error: {e}")
+            return
+        self.on_saved(self.milestone_id)
+
+    @on(Button.Pressed, "#me-save")
+    def _ok(self) -> None:
+        self._save()
+
+    @on(Button.Pressed, "#me-cancel")
+    def _cancel(self) -> None:
+        self.on_cancelled()
+
+
 class CreateStoryPane(Vertical):
     """Collects name, description, type, project, owner, state, and labels for a new story.
 
@@ -3768,7 +3916,7 @@ class PlannerApp(App):
         # Set of story ids from a story-entity search (via backend search.search).
         # None = no active search result filter; empty set = show no stories.
         self._search_ids: set[int] | None = None
-        self._edit_pane: EditStoryPane | None = None
+        self._edit_pane: Any | None = None
         self._create_pane: CreateStoryPane | None = None
         # Off until the 'a' hotkey (or an explicit --auto-refresh N>0).
         self._auto_refresh_enabled = bool(auto_refresh)
@@ -4463,13 +4611,18 @@ class PlannerApp(App):
         self.query_one("#detail-view").display = True
 
     def action_edit_story(self) -> None:
-        """Edit the selected story in-place in the right detail pane."""
-        if self.parent_entity != "story":
+        """Edit the selected entity in-place in the right detail pane.
+
+        'u' edits the kind currently being browsed: a story, iteration, or
+        milestone each opens its inline form in the detail pane (story 74, 76);
+        other parent kinds bell and no-op.
+        """
+        if self.parent_entity not in ("story", "iteration", "milestone"):
             self.bell()
             return
         assert self.conn is not None
-        sid = self._current_story_id()
-        if sid is None:
+        eid = self._current_story_id()
+        if eid is None:
             self.bell()
             return
         if self._edit_pane is not None:
@@ -4477,21 +4630,32 @@ class PlannerApp(App):
             return
         # Hide the read-only view and mount the edit form in its place.
         self.query_one("#detail-view").display = False
-        pane = EditStoryPane(self.conn, sid,
-                             on_saved=self._edit_saved,
-                             on_cancelled=self._edit_cancelled)
+        if self.parent_entity == "story":
+            pane = EditStoryPane(self.conn, eid,
+                                 on_saved=self._edit_saved,
+                                 on_cancelled=self._edit_cancelled)
+        elif self.parent_entity == "iteration":
+            pane = EditIterationPane(self.conn, eid,
+                                     on_saved=self._edit_saved,
+                                     on_cancelled=self._edit_cancelled)
+        else:  # milestone
+            pane = EditMilestonePane(self.conn, eid,
+                                     on_saved=self._edit_saved,
+                                     on_cancelled=self._edit_cancelled)
         self._edit_pane = pane
         self.query_one("#detail", VerticalScroll).mount(pane)
 
-    def _edit_saved(self, sid: int) -> None:
+    def _edit_saved(self, entity_id: int) -> None:
         self._close_edit()
         self.refresh_stories()
-        # Keep the cursor on the edited story.
-        table = self.query_one("#stories", DataTable)
-        try:
-            table.move_cursor(row=table.get_row_index(str(sid)))
-        except Exception:
-            pass
+        # Keep the cursor on the edited row (for stories only; other kinds
+        # restore their cursor inside refresh_parent).
+        if self.parent_entity == "story":
+            table = self.query_one("#stories", DataTable)
+            try:
+                table.move_cursor(row=table.get_row_index(str(entity_id)))
+            except Exception:
+                pass
         self.show_current_detail()
 
     def _edit_cancelled(self) -> None:
@@ -4811,7 +4975,17 @@ class PlannerApp(App):
             self.push_screen(SearchResultsScreen(self.conn, q, entity))
 
     def action_delete_story(self) -> None:
-        """Open confirmation modal to delete the selected story or selection."""
+        """Open confirmation modal to delete the selected entity.
+
+        Deletes the selected story (or bulk selection), iteration, or milestone
+        after a :class:`ConfirmScreen` (story 76). Other parent kinds bell.
+        """
+        if self.parent_entity == "iteration":
+            self._delete_selected_iteration()
+            return
+        if self.parent_entity == "milestone":
+            self._delete_selected_milestone()
+            return
         if self.parent_entity != "story":
             self.bell()
             return
@@ -4843,6 +5017,52 @@ class PlannerApp(App):
         for sid in list(self._selected):
             stories.delete_story(self.conn, sid)
         self._selected.clear()
+        self.refresh_stories()
+
+    def _delete_selected_iteration(self) -> None:
+        """Confirm and delete the highlighted iteration (story 76)."""
+        assert self.conn is not None
+        iid = self._current_story_id()
+        if iid is None:
+            self.bell()
+            return
+        it = iterations.get_iteration(self.conn, iid)
+        self.push_screen(ConfirmScreen(f"Delete iteration '#{it.id} {it.name}'?"),
+                         lambda ok: self._do_delete_iteration(iid, ok))
+
+    def _do_delete_iteration(self, iid: int, ok: bool | None) -> None:
+        if not ok:
+            return
+        assert self.conn is not None
+        try:
+            iterations.delete_iteration(self.conn, iid)
+        except errors.PlannerError as e:
+            self.notify(f"error: {e}")
+            return
+        self._close_edit()
+        self.refresh_stories()
+
+    def _delete_selected_milestone(self) -> None:
+        """Confirm and delete the highlighted milestone (story 76)."""
+        assert self.conn is not None
+        mid = self._current_story_id()
+        if mid is None:
+            self.bell()
+            return
+        ms = milestones.get_milestone(self.conn, mid)
+        self.push_screen(ConfirmScreen(f"Delete milestone '#{ms.id} {ms.name}'?"),
+                         lambda ok: self._do_delete_milestone(mid, ok))
+
+    def _do_delete_milestone(self, mid: int, ok: bool | None) -> None:
+        if not ok:
+            return
+        assert self.conn is not None
+        try:
+            milestones.delete_milestone(self.conn, mid)
+        except errors.PlannerError as e:
+            self.notify(f"error: {e}")
+            return
+        self._close_edit()
         self.refresh_stories()
 
     def action_toggle_complete(self) -> None:
