@@ -193,6 +193,47 @@ def test_tui_task_action_toggle_and_edit(db_path):
     _run(main())
 
 
+def test_tui_task_action_delete(db_path):
+    """The 'x' task-action modal deletes a task after confirmation."""
+    from backend import db, errors
+    from backend import stories as stories_mod
+    from backend import tasks as tasks_mod
+
+    c = db.connect(db_path)
+    s = stories_mod.create_story(c, "x")
+    t1 = tasks_mod.create_task(c, s.id, "write tests")
+    t2 = tasks_mod.create_task(c, s.id, "keep me")
+    c.close()
+
+    async def main():
+        app = PlannerApp(db_path)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            app.query_one("#stories").move_cursor(row=0); await pilot.pause()
+
+            # cancel the confirmation -> task is kept
+            await pilot.press("x"); await pilot.pause()
+            app.screen.query_one("#delete", Button).focus(); await pilot.pause()
+            await pilot.press("enter"); await pilot.pause(0.05); await pilot.pause()
+            app.screen.query_one("#cancel", Button).focus(); await pilot.pause()
+            await pilot.press("enter"); await pilot.pause(0.05); await pilot.pause()
+            assert tasks_mod.get_task(app.conn, t1.id) is not None
+
+            # confirm the deletion -> task is gone, sibling survives
+            await pilot.press("x"); await pilot.pause()
+            app.screen.query_one("#delete", Button).focus(); await pilot.pause()
+            await pilot.press("enter"); await pilot.pause(0.05); await pilot.pause()
+            app.screen.query_one("#yes", Button).focus(); await pilot.pause()
+            await pilot.press("enter"); await pilot.pause(0.05); await pilot.pause()
+            with pytest.raises(errors.NotFound):
+                tasks_mod.get_task(app.conn, t1.id)
+            assert tasks_mod.get_task(app.conn, t2.id) is not None
+
+            assert getattr(app, "_exception", None) is None
+            await pilot.press("q")
+    _run(main())
+
+
 def test_tui_manage_owners_and_labels(db_path):
     """'o' and 'l' modals toggle owners and labels on the selected story."""
     from backend import db

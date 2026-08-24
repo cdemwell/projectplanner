@@ -571,11 +571,13 @@ class ConfirmScreen(ModalScreen[bool]):
 
 
 class TaskActionScreen(ModalScreen[bool]):
-    """Toggle completion or edit the description of a task on a story.
+    """Toggle completion, edit, or delete a task on a story.
 
     The task is chosen from a Select of the story's tasks. "Toggle" flips
     ``complete`` (stamping/clearing ``completed_at``); "Save Desc" updates the
-    description from the TextArea.
+    description from the TextArea; "Delete" removes the task after a
+    confirmation via :class:`ConfirmScreen`. Backend errors are shown in the
+    ``#ta-err`` label.
 
     Dismisses with:
         bool: True if a change was made, None on cancel.
@@ -596,7 +598,8 @@ class TaskActionScreen(ModalScreen[bool]):
             Label("Task:"), Select(opts, value=opts[0][1], id="ta-task"),
             Label("New description:"), TextArea(id="ta-desc"),
             Horizontal(Button("Toggle", id="toggle", variant="primary"),
-                       Button("Save Desc", id="save"), Button("Cancel", id="cancel")),
+                       Button("Save Desc", id="save"), Button("Delete", id="delete", variant="error"),
+                       Button("Cancel", id="cancel")),
             Label("", id="ta-err", classes="err"),
             classes="modal-box",
         )
@@ -628,6 +631,26 @@ class TaskActionScreen(ModalScreen[bool]):
             self.query_one("#ta-err", Label).update("Description is required.")
             return
         tasks.update_task(self.conn, tid, description=desc)
+        self.dismiss(True)
+
+    @on(Button.Pressed, "#delete")
+    def _delete(self) -> None:
+        tid = self._task_id()
+        if tid is None:
+            self.query_one("#ta-err", Label).update("No task to delete.")
+            return
+        t = tasks.get_task(self.conn, tid)
+        self.app.push_screen(ConfirmScreen(f"Delete task '#{t.id} {t.description}'?"),
+                         lambda ok: self._do_delete(tid, ok))
+
+    def _do_delete(self, tid: int, ok: bool | None) -> None:
+        if not ok:
+            return
+        try:
+            tasks.delete_task(self.conn, tid)
+        except errors.PlannerError as e:
+            self.query_one("#ta-err", Label).update(f"error: {e}")
+            return
         self.dismiss(True)
 
     @on(Button.Pressed, "#cancel")
