@@ -1518,3 +1518,64 @@ def test_detail_pane_renders_epic_with_related_links(db_path):
             assert getattr(app, "_exception", None) is None
             await pilot.press("q")
     _run(main())
+
+
+def test_three_pane_layout_and_tab_focus_cycle(db_path):
+    """Story 69: the Miller-columns layout has three panes (parent list, child
+    list, detail) and Tab/Shift+Tab cycle focus through them in order, with the
+    focused pane visually distinguished via the 'pane-focused' class."""
+    from backend import db
+    from backend import tasks as tasks_mod
+
+    c = db.connect(db_path)
+    p = projects.create_project(c, "backend")
+    st = stories_mod.create_story(c, "Fix login bug", project_id=p.id)
+    tk = tasks_mod.create_task(c, st.id, "write a test")
+    c.close()
+
+    async def main():
+        app = PlannerApp(db_path)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+
+            # All three panes exist.
+            assert app.query_one("#stories").row_count == 1
+            assert app.query_one("#children").row_count == 1
+            app.query_one("#detail")
+
+            # The child pane shows the selected story's task (minimal chain).
+            assert app.query_one("#children").row_keys == [str(tk.id)]
+
+            # Initial focus is on the parent pane, which is visually marked.
+            assert app.focused.id == "stories"
+            assert app.query_one("#stories").has_class("pane-focused")
+            assert not app.query_one("#children").has_class("pane-focused")
+            assert not app.query_one("#detail").has_class("pane-focused")
+
+            # Tab cycles parent -> child -> detail -> parent.
+            await pilot.press("tab"); await pilot.pause()
+            assert app.focused.id == "children"
+            assert app.query_one("#children").has_class("pane-focused")
+            assert not app.query_one("#stories").has_class("pane-focused")
+
+            await pilot.press("tab"); await pilot.pause()
+            assert app.focused.id == "detail"
+            assert app.query_one("#detail").has_class("pane-focused")
+            assert not app.query_one("#children").has_class("pane-focused")
+
+            await pilot.press("tab"); await pilot.pause()
+            assert app.focused.id == "stories"
+            assert app.query_one("#stories").has_class("pane-focused")
+
+            # Shift+Tab reverses the cycle (parent -> detail -> child).
+            await pilot.press("shift+tab"); await pilot.pause()
+            assert app.focused.id == "detail"
+            await pilot.press("shift+tab"); await pilot.pause()
+            assert app.focused.id == "children"
+
+            # Existing story browsing still works: the detail renders.
+            app.query_one("#stories").move_cursor(row=0); await pilot.pause()
+            assert "Fix login bug" in _pane_text(app.query_one("#detail-view"))
+            assert getattr(app, "_exception", None) is None
+            await pilot.press("q")
+    _run(main())

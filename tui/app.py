@@ -290,10 +290,20 @@ def _workflow_state_columns() -> list[Column]:
     ]
 
 
+def _task_columns() -> list[Column]:
+    """Column schema for a task list (the children of a story row)."""
+    return [
+        Column("✓", lambda it, c: "✓" if it.complete else " "),
+        Column("ID", "id"),
+        Column("Task", "description"),
+    ]
+
+
 # Per-entity column schemas keyed by entity name. Every pane is an instance of
 # :class:`EntityListPane` configured with one of these.
 ENTITY_COLUMNS: dict[str, list[Column]] = {
     "story": _story_columns(),
+    "task": _task_columns(),
     "epic": _epic_columns(),
     "iteration": _iteration_columns(),
     "milestone": _milestone_columns(),
@@ -3592,8 +3602,14 @@ class PlannerApp(App):
 
     CSS = """
     #filter-bar { background: $panel; height: 1; padding: 0 1; color: $text-muted; }
-    #stories { width: 1fr; border: solid $primary; }
-    #detail { width: 1fr; border: solid $accent; }
+    #left-col { height: 1fr; width: 1fr; }
+    #stories { height: 1fr; border: solid $surface; }
+    #children { height: 1fr; border: solid $surface; }
+    #detail { width: 1fr; border: solid $surface; }
+    #stories.pane-focused, #children.pane-focused, #detail.pane-focused {
+        border: double $primary;
+        background: $surface;
+    }
     .modal-box {
         width: 64; height: auto; max-height: 80%;
         background: $panel; border: solid $primary; padding: 1 2;
@@ -3655,6 +3671,10 @@ class PlannerApp(App):
         Binding("v", "toggle_multiselect", "Multi"),
         Binding("space", "toggle_select", "Toggle", show=False),
         Binding("escape", "exit_multiselect", "Exit", show=False),
+        # priority=True so these beat Screen's built-in tab -> focus_next
+        # binding; the chain otherwise resolves Screen before App.
+        Binding("tab", "focus_next_pane", "Next pane", priority=True, show=False),
+        Binding("shift+tab", "focus_prev_pane", "Prev pane", priority=True, show=False),
     ]
 
     def __init__(self, db_path: str | None = None,
@@ -3678,12 +3698,17 @@ class PlannerApp(App):
         # Multi-select (visual) mode: a set of selected story ids, toggled by Space.
         self._multi_select = False
         self._selected: set[int] = set()
+        # Three-pane Miller-columns browser: the parent list, child list, and
+        # detail pane. Tab / Shift+Tab cycle focus through these ids in order.
+        self._pane_ids = ["stories", "children", "detail"]
+        self._active_pane = 0
 
     # --- lifecycle --------------------------------------------------------- #
     def on_mount(self) -> None:
         self.conn = db.connect(self.db_path)
         self.title = "Project Planner"
         self.refresh_stories()
+        self._activate_pane(0)
         if self._auto_refresh_enabled:
             self._auto_refresh_timer = self.set_interval(
                 self._auto_refresh_interval, self.refresh_stories, name="auto-refresh")
@@ -3697,13 +3722,53 @@ class PlannerApp(App):
         yield Header()
         yield Static("(all stories)", id="filter-bar")
         with Horizontal():
-            with Vertical(id="list-pane"):
+            # Left column: parent entity list (upper) + child entity list
+            # (lower), stacked vertically.
+            with Vertical(id="left-col"):
                 yield EntityListPane(columns=_story_columns(), id="stories")
+                yield EntityListPane(columns=_task_columns(), id="children")
             # Right pane: read-only generic detail view, or an EditStoryPane
             # when editing.
             with VerticalScroll(id="detail"):
                 yield EntityDetailPane(id="detail-view")
         yield Footer()
+
+    # --- three-pane focus -------------------------------------------------- #
+    def _activate_pane(self, index: int) -> None:
+        """Focus the pane at ``index`` in :attr:`_pane_ids` and mark it active.
+
+        The active pane is visually distinguished via the ``pane-focused``
+        class (a doubled border), so Tab/Shift+Tab cycling is obvious.
+        """
+        self._active_pane = index % len(self._pane_ids)
+        pane_selector = f"#{self._pane_ids[self._active_pane]}"
+        # Clear the highlight from every pane, then apply it to the target.
+        for other in self._pane_ids:
+            try:
+                self.query_one(f"#{other}").remove_class("pane-focused")
+            except Exception:
+                pass
+        pane = self.query_one(pane_selector)
+        pane.add_class("pane-focused")
+        # The detail container (a VerticalScroll) is not focusable by default;
+        # make it a valid Tab target so focus actually moves there.
+        try:
+            pane.can_focus = True
+        except Exception:
+            pass
+        try:
+            pane.focus(scroll_visible=False)
+        except Exception:
+            # Focus is best-effort (e.g. a modal is open); the marker still moves.
+            pass
+
+    def action_focus_next_pane(self) -> None:
+        """Cycle focus to the next pane (parent -> child -> detail)."""
+        self._activate_pane(self._active_pane + 1)
+
+    def action_focus_prev_pane(self) -> None:
+        """Cycle focus to the previous pane (detail -> child -> parent)."""
+        self._activate_pane(self._active_pane - 1)
 
     # --- story list -------------------------------------------------------- #
     def refresh_stories(self) -> None:
@@ -3747,12 +3812,29 @@ class PlannerApp(App):
         if self._multi_select:
             parts.append(f"  [MULTI] {len(self._selected)} selected")
         self.query_one("#filter-bar", Static).update("  ".join(parts))
-        # The pane restored the cursor; now render the highlighted story's detail.
+        # The pane restored the cursor; now render the highlighted story's
+        # children (in the child pane) and its detail (in the detail pane).
+        self.refresh_children()
         if items:
             self.show_current_detail()
         else:
             pane = self.query_one("#detail-view", EntityDetailPane)
             pane.show_message("(no stories match the current filter — press 'n' to create one)")
+
+    def refresh_children(self) -> None:
+        """Populate the child pane with the selected story's tasks.
+
+        This is the minimal parent->child chain: the child pane shows the tasks
+        of the story currently under the parent-pane cursor. Full chain logic
+        (arbitrary parent/child kinds) arrives in story 70.
+        """
+        assert self.conn is not None
+        child = self.query_one("#children", EntityListPane)
+        sid = self._current_story_id()
+        if sid is None:
+            child.set_items([], conn=self.conn)
+            return
+        child.set_items(tasks.list_tasks(self.conn, sid), conn=self.conn)
 
     def name_of(self, table: str, id: int) -> str:
         """Look up a name for a given ID in the specified table.
@@ -3803,9 +3885,10 @@ class PlannerApp(App):
     def _on_highlight(self, event: DataTable.RowHighlighted) -> None:
         if event.data_table.id == "stories":
             # Moving the selection while editing abandons the edit and shows
-            # the newly selected story's detail instead.
+            # the newly selected story's children and detail instead.
             if self._edit_pane is not None:
                 self._close_edit()
+            self.refresh_children()
             self.show_current_detail()
 
     # --- actions ----------------------------------------------------------- #
