@@ -93,6 +93,7 @@ _PALETTE_COMMANDS: list[tuple[str, str]] = [
     ("Manage iterations", "manage_iterations"),
     ("Manage milestones", "manage_milestones"),
     ("Manage projects", "manage_projects"),
+    ("Manage label catalog", "manage_label_catalog"),
     ("Toggle complete", "toggle_complete"),
     ("Delete story", "delete_story"),
     ("Refresh", "refresh"),
@@ -2144,6 +2145,201 @@ class ProjectManagerScreen(ModalScreen[bool]):
         self.dismiss(self._dirty)
 
 
+class LabelFormScreen(ModalScreen[dict]):
+    """Collect name/color/description for a label.
+
+    Used both for creating a new label (``label=None``) and for editing an
+    existing one (pre-populated from the given :class:`~backend.models.Label`).
+    All operations call the backend ``labels`` module. Dismisses with a dict
+    of field values, or None on cancel.
+    """
+
+    def __init__(self, conn: sqlite3.Connection, label=None) -> None:
+        super().__init__()
+        self.conn = conn
+        self.label = label  # Label | None
+
+    def compose(self) -> ComposeResult:
+        label = self.label
+        title = f"Edit label #{label.id}" if label else "New label"
+        yield VerticalScroll(
+            Static(title, classes="modal-title"),
+            Label("Name:"),
+            Input(value=label.name if label else "", id="lf-name"),
+            Label("Color:"),
+            Input(value=label.color if label else "", id="lf-color"),
+            Label("Description:"),
+            TextArea(id="lf-desc"),
+            Horizontal(Button("Save", id="ok", variant="primary"),
+                       Button("Cancel", id="cancel")),
+            Label("", id="lf-err", classes="err"),
+            classes="modal-box",
+        )
+
+    def on_mount(self) -> None:
+        if self.label and self.label.description:
+            self.query_one("#lf-desc", TextArea).text = self.label.description
+        self.query_one("#lf-name", Input).focus()
+
+    def _submit(self) -> None:
+        name = self.query_one("#lf-name", Input).value.strip()
+        if not name:
+            self.query_one("#lf-err", Label).update("Name is required.")
+            return
+        self.dismiss({
+            "name": name,
+            "color": self.query_one("#lf-color", Input).value.strip(),
+            "description": self.query_one("#lf-desc", TextArea).text,
+        })
+
+    @on(Button.Pressed, "#ok")
+    def _ok(self) -> None:
+        self._submit()
+
+    @on(Button.Pressed, "#cancel")
+    def _cancel(self) -> None:
+        self.dismiss(None)
+
+
+class LabelManagerScreen(ModalScreen[bool]):
+    """Manage labels: create, rename/change-color, and delete.
+
+    An OptionList lists every label; New/Edit/Done buttons drive the flow.
+    Create and edit open :class:`LabelFormScreen`; delete confirms via
+    :class:`ConfirmScreen`. Every operation goes through the backend ``labels``
+    module; backend errors surface in a status label.
+
+    Dismisses with:
+        bool: True if any change was made (caller refreshes), else None.
+    """
+
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        super().__init__()
+        self.conn = conn
+        self._dirty = False
+        self._label_ids: list[int] = []
+
+    def compose(self) -> ComposeResult:
+        yield VerticalScroll(
+            Static("Manage Labels", classes="modal-title"),
+            OptionList(id="lm-labels"),
+            Horizontal(
+                Button("New", id="lm-new", variant="primary"),
+                Button("Edit", id="lm-edit"),
+                Button("Delete", id="lm-delete", variant="error"),
+                Button("Done", id="lm-done"),
+            ),
+            Label("", id="lm-status", classes="err"),
+            classes="modal-box",
+        )
+
+    def _status(self, msg: str) -> None:
+        self.query_one("#lm-status", Label).update(msg)
+
+    def _selected_id(self) -> int | None:
+        idx = self.query_one("#lm-labels", OptionList).highlighted
+        if idx is None or not (0 <= idx < len(self._label_ids)):
+            return None
+        return self._label_ids[idx]
+
+    def on_mount(self) -> None:
+        self._refresh()
+
+    def _refresh(self) -> None:
+        opts = self.query_one("#lm-labels", OptionList)
+        prev = opts.get_option_at_index(opts.highlighted).id if opts.option_count else None
+        ls = labels.list_labels(self.conn)
+        self._label_ids = [label.id for label in ls]
+        opts.clear_options()
+        for label in ls:
+            opts.add_option(Option(f"#{label.id} {label.name}", id=str(label.id)))
+        if self._label_ids:
+            idx = 0
+            if prev:
+                for i, lid in enumerate(self._label_ids):
+                    if str(lid) == prev:
+                        idx = i
+                        break
+            opts.highlighted = idx
+
+    def _new(self) -> None:
+        self.app.push_screen(LabelFormScreen(self.conn), self._do_create)
+
+    def _do_create(self, fields: dict | None) -> None:
+        if fields is None:
+            return
+        try:
+            labels.create_label(self.conn, fields["name"],
+                                color=fields["color"],
+                                description=fields["description"])
+        except errors.PlannerError as e:
+            self._status(f"error: {e}")
+            return
+        self._dirty = True
+        self._refresh()
+        self._status(f"Created label '{fields['name']}'.")
+
+    def _edit(self) -> None:
+        lid = self._selected_id()
+        if lid is None:
+            self._status("Select a label to edit.")
+            return
+        self.app.push_screen(LabelFormScreen(self.conn,
+                                             label=labels.get_label(self.conn, lid)),
+                             lambda fields: self._do_update(lid, fields))
+
+    def _do_update(self, lid: int, fields: dict | None) -> None:
+        if fields is None:
+            return
+        try:
+            labels.update_label(self.conn, lid, name=fields["name"],
+                                color=fields["color"],
+                                description=fields["description"])
+        except errors.PlannerError as e:
+            self._status(f"error: {e}")
+            return
+        self._dirty = True
+        self._refresh()
+        self._status(f"Updated label '{fields['name']}'.")
+
+    def _delete(self) -> None:
+        lid = self._selected_id()
+        if lid is None:
+            self._status("Select a label to delete.")
+            return
+        label = labels.get_label(self.conn, lid)
+        self.app.push_screen(ConfirmScreen(f"Delete label '#{label.id} {label.name}'?"),
+                             lambda ok: self._do_delete(lid, ok))
+
+    def _do_delete(self, lid: int, ok: bool | None) -> None:
+        if not ok:
+            return
+        try:
+            labels.delete_label(self.conn, lid)
+        except errors.PlannerError as e:
+            self._status(f"error: {e}")
+            return
+        self._dirty = True
+        self._refresh()
+        self._status("Deleted label.")
+
+    @on(Button.Pressed, "#lm-new")
+    def _b_new(self) -> None:
+        self._new()
+
+    @on(Button.Pressed, "#lm-edit")
+    def _b_edit(self) -> None:
+        self._edit()
+
+    @on(Button.Pressed, "#lm-delete")
+    def _b_delete(self) -> None:
+        self._delete()
+
+    @on(Button.Pressed, "#lm-done")
+    def _b_done(self) -> None:
+        self.dismiss(self._dirty)
+
+
 # --------------------------------------------------------------------------- #
 # Main app
 # --------------------------------------------------------------------------- #
@@ -2198,6 +2394,7 @@ class PlannerApp(App):
         Binding("I", "manage_iterations", "Iterations"),
         Binding("M", "manage_milestones", "Milestones"),
         Binding("P", "manage_projects", "Projects"),
+        Binding("L", "manage_label_catalog", "Labels"),
         Binding("r", "refresh", "Refresh"),
         Binding("a", "toggle_auto_refresh", "Auto↻"),
         Binding("J", "move_down", "Down"),
@@ -2812,6 +3009,16 @@ class PlannerApp(App):
                          self._after_project_manage)
 
     def _after_project_manage(self, changed: bool | None) -> None:
+        if changed:
+            self.refresh_stories()
+
+    def action_manage_label_catalog(self) -> None:
+        """Open the label management screen."""
+        assert self.conn is not None
+        self.push_screen(LabelManagerScreen(self.conn),
+                         self._after_label_manage)
+
+    def _after_label_manage(self, changed: bool | None) -> None:
         if changed:
             self.refresh_stories()
 

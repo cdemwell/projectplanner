@@ -738,6 +738,78 @@ def test_tui_project_management(db_path):
     _run(main())
 
 
+def test_tui_label_management(db_path):
+    """The 'L' label manager creates, edits (rename/color), and deletes labels.
+
+    Exercises every flow: create, edit (rename + change color), and delete
+    with confirmation. All operations call the backend labels module. See
+    Story 46.
+    """
+    from textual.widgets import Button, Input
+
+    from backend import db
+    from backend import labels as lbl_mod
+    from tui.app import LabelManagerScreen
+
+    c = db.connect(db_path)
+    c.close()
+
+    async def main():
+        app = PlannerApp(db_path)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+
+            async def click(btn_id: str):
+                app.screen.query_one(btn_id, Button).focus()
+                await pilot.pause()
+                await pilot.press("enter")
+                await pilot.pause(0.05)
+                await pilot.pause()
+
+            async def confirm_yes():
+                app.screen.query_one("#yes", Button).focus()
+                await pilot.pause()
+                await pilot.press("enter")
+                await pilot.pause(0.05)
+                await pilot.pause()
+
+            # open the label manager with 'L'
+            await pilot.press("L"); await pilot.pause()
+            assert isinstance(app.screen, LabelManagerScreen)
+            assert app.screen.query_one("#lm-labels").option_count == 0
+
+            # create a label
+            await click("#lm-new")
+            app.screen.query_one("#lf-name", Input).value = "bug"
+            app.screen.query_one("#lf-color", Input).value = "#ff0000"
+            await click("#ok")
+            ls = lbl_mod.list_labels(app.conn)
+            assert len(ls) == 1
+            lid = ls[0].id
+            assert ls[0].name == "bug"
+            assert ls[0].color == "#ff0000"
+
+            # edit: rename + change color (description untouched)
+            await click("#lm-edit")
+            app.screen.query_one("#lf-name", Input).value = "critical"
+            app.screen.query_one("#lf-color", Input).value = "#0000ff"
+            await click("#ok")
+            lbl = lbl_mod.get_label(app.conn, lid)
+            assert lbl.name == "critical"
+            assert lbl.color == "#0000ff"
+
+            # delete with confirmation
+            await click("#lm-delete")
+            await confirm_yes()
+            assert lbl_mod.list_labels(app.conn) == []
+
+            # Done closes the screen; refresh ran without error
+            await click("#lm-done")
+            assert getattr(app, "_exception", None) is None
+            await pilot.press("q")
+    _run(main())
+
+
 def test_tui_refresh_keeps_cursor_position(db_path):
     """refresh_stories must not yank the cursor back to the top row."""
     from backend import db
