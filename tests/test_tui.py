@@ -196,6 +196,75 @@ def test_tui_search_entity_selector(seeded_db):
     _run(main())
 
 
+def test_tui_search_while_drilled_in_does_not_leak_filter(db_path):
+    """Story 81: a search issued while drilled into an epic must NOT set a
+    _search_ids filter that leaks onto the epic list on drill-out.
+
+    At the root the parent pane browses epics (parent_entity == 'epic').
+    Drilling into an epic makes parent_entity == 'story'. Searching then would
+    previously take the inline filter path and set _search_ids to story ids;
+    refresh_parent only applies those at the root, so on drill-out the story
+    ids were wrongly applied to the epic list. The fix gates the inline path
+    on the root context, so a drilled-in search falls back to the generic
+    results screen and never touches _search_ids.
+    """
+    from textual.widgets import Button
+
+    from backend import db
+    from backend import epics as epics_mod
+    from tui.app import SearchInputScreen, SearchResultsScreen
+
+    c = db.connect(db_path)
+    p = projects.create_project(c, "backend")
+    e1 = epics_mod.create_epic(c, "Auth login epic", project_id=p.id)
+    epics_mod.create_epic(c, "Billing epic", project_id=p.id)
+    stories_mod.create_story(c, "Fix login bug", project_id=p.id, epic_id=e1.id)
+    c.close()
+
+    async def main():
+        app = PlannerApp(db_path)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            # Browse epics at the root.
+            await pilot.press("E"); await pilot.pause()
+            assert app.parent_entity == "epic"
+            assert app.query_one("#stories").row_count == 2
+
+            # Drill into the first epic (Auth login epic) -> parent becomes
+            # story (a searchable kind), so this is the leak path.
+            await pilot.press("enter"); await pilot.pause()
+            assert app.parent_entity == "story"
+            assert app._drill_scope() == ("epic", e1.id)
+
+            # Search while drilled in. Because we are not at the root, this
+            # must fall back to the generic results screen and leave
+            # _search_ids untouched.
+            await pilot.press("slash"); await pilot.pause()
+            assert isinstance(app.screen, SearchInputScreen)
+            await pilot.press(*"login"); await pilot.pause()
+            await _ok(pilot, app)
+            assert isinstance(app.screen, SearchResultsScreen)
+            assert app._search_ids is None
+            assert app._search_query is None
+
+            # Dismiss the results screen, then drill back out to epics.
+            app.screen.query_one("#cancel", Button).focus()
+            await pilot.pause()
+            await pilot.press("enter"); await pilot.pause(0.05); await pilot.pause()
+            await pilot.press("left"); await pilot.pause()
+            assert app.parent_entity == "epic"
+            assert app._drill_stack == []
+            # The leaked story-ids filter must NOT be applied: all epics show.
+            assert app._search_ids is None
+            assert app.query_one("#stories").row_count == 2
+            # No spurious 'search:' caption leaks onto the epic list either.
+            assert app.query_one("#filter-bar").render() == "browsing epic  (2 rows)"
+
+            assert getattr(app, "_exception", None) is None
+            await pilot.press("q")
+    _run(main())
+
+
 def test_tui_search_results_error(seeded_db):
     """A malformed FTS query surfaces the backend error in the results screen."""
     from tui.app import SearchResultsScreen
@@ -2454,6 +2523,55 @@ def test_tui_inline_edit_member(db_path):
                 (m.id,)).fetchone()
             assert row["name"] == "Ada Byron"
             assert row["mention_name"] == "ada_b"
+
+            assert getattr(app, "_exception", None) is None
+            await pilot.press("q")
+    _run(main())
+
+
+def test_tui_search_scoped_to_browsed_epic_filters_parent(db_path):
+    """Story 81: searching while browsing a non-story entity (epics) filters
+    the parent pane inline instead of opening the generic results screen."""
+    from textual.widgets import Select
+
+    from backend import db
+    from backend import epics as epics_mod
+    from tui.app import SearchInputScreen, SearchResultsScreen, _sel
+
+    c = db.connect(db_path)
+    epics_mod.create_epic(c, "Auth login epic")
+    epics_mod.create_epic(c, "Billing epic")
+    c.close()
+
+    async def main():
+        app = PlannerApp(db_path)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            # Browse epics in the parent pane.
+            await pilot.press("E"); await pilot.pause()
+            assert app.parent_entity == "epic"
+            assert app.query_one("#stories").row_count == 2
+
+            # The search entity selector defaults to the browsed kind (epic).
+            await pilot.press("slash"); await pilot.pause()
+            assert isinstance(app.screen, SearchInputScreen)
+            entity_sel = app.screen.query_one("#s-entity", Select)
+            assert _sel(entity_sel.value) == "epic"
+            await pilot.press(*"login"); await pilot.pause()
+            await _ok(pilot, app)
+
+            # Search applied inline: no results screen, parent pane filtered.
+            assert not isinstance(app.screen, SearchResultsScreen)
+            assert app._search_ids is not None
+            assert app._search_query == "login"
+            assert app.query_one("#stories").row_count == 1
+            assert app.query_one("#filter-bar").render() == "browsing epic  search: 'login'  (1 rows)"
+
+            # An empty search clears the filter and restores the full list.
+            await pilot.press("slash"); await pilot.pause()
+            await pilot.press("enter"); await pilot.pause(0.05); await pilot.pause()
+            assert app._search_ids is None
+            assert app.query_one("#stories").row_count == 2
 
             assert getattr(app, "_exception", None) is None
             await pilot.press("q")

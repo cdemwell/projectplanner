@@ -356,6 +356,13 @@ _BULK_DELETERS: dict[str, Callable[[sqlite3.Connection, int], None]] = {
     "member": members.delete_member,
 }
 
+# Parent-pane entity kinds that the backend ``search.search`` can query (i.e.
+# kinds that are both switchable and FTS5-searchable). Search is scoped to
+# these so it can filter the parent list (story 81); group/workflow/member
+# have no FTS index and fall back to the generic results screen.
+_SEARCHABLE_PARENTS: frozenset[str] = frozenset(
+    key for _, key in _SEARCH_ENTITIES if key in _PARENT_LISTERS)
+
 
 class EntityListPane(DataTable):
     """A reusable DataTable that renders any entity type.
@@ -1532,7 +1539,8 @@ class TextScreen(ModalScreen[str]):
 class SearchInputScreen(ModalScreen[tuple]):
     """Collects a search query and an entity scope.
 
-    The entity is chosen from a keyboard-first :class:`Select` (default
+    The entity is chosen from a keyboard-first :class:`Select` (defaulting to
+    the parent pane's current entity when that kind is searchable, otherwise
     "story"); the query is typed into an :class:`Input`. The chosen entity is
     forwarded to the caller so it can be passed to the backend ``search.search``
     function.
@@ -1541,11 +1549,15 @@ class SearchInputScreen(ModalScreen[tuple]):
         tuple: (query: str, entity: str), or None on cancel.
     """
 
+    def __init__(self, default_entity: str = "story") -> None:
+        super().__init__()
+        self.default_entity = default_entity
+
     def compose(self) -> ComposeResult:
         yield VerticalScroll(
             Static("Search", classes="modal-title"),
             Label("Entity:"),
-            Select(_SEARCH_ENTITIES, value="story", id="s-entity"),
+            Select(_SEARCH_ENTITIES, value=self.default_entity, id="s-entity"),
             Label("Query:"),
             Input(id="q", placeholder="login OR auth"),
             Horizontal(Button("Search", id="ok", variant="primary"), Button("Cancel", id="cancel")),
@@ -4421,9 +4433,12 @@ class PlannerApp(App):
         self.filters = {"project": None, "state_type": [], "q": None,
                         "epic": None, "iteration": None, "milestone": None,
                         "owner": None, "label": None}
-        # Set of story ids from a story-entity search (via backend search.search).
-        # None = no active search result filter; empty set = show no stories.
+        # Set of ids from a root search scoped to the browsed entity (via the
+        # backend ``search.search``). None = no active search result filter;
+        # empty set = show no rows. Applies to the parent pane at the root
+        # context (story 81); ``_search_query`` is kept for the filter bar.
         self._search_ids: set[int] | None = None
+        self._search_query: str | None = None
         self._edit_pane: Vertical | None = None
         self._create_pane: CreateStoryPane | None = None
         # Off until the 'a' hotkey (or an explicit --auto-refresh N>0).
@@ -4657,6 +4672,8 @@ class PlannerApp(App):
         if f["milestone"] is not None:
             parts.append(f"milestone={self.name_of('milestone', f['milestone'])}")
         parts.append(f"q={'-' if f['q'] is None else f['q']!r}")
+        if self._search_ids is not None:
+            parts.append(f"search: {self._search_query!r}")
         parts.append(f"  ({len(items)} stories)")
         if self._multi_select:
             parts.append(f"  [MULTI] {len(self._selected)} selected")
@@ -4706,6 +4723,11 @@ class PlannerApp(App):
         """
         entity = self.parent_entity
         items = self._parent_rows()
+        scope = self._drill_scope()
+        # A root search-scope filter applies only at the root context: it
+        # restricts the parent list to the ids the backend search returned.
+        if scope is None and self._search_ids is not None:
+            items = [it for it in items if it.id in self._search_ids]
         pane = self.query_one("#stories", EntityListPane)
         pane.set_columns(ENTITY_COLUMNS[entity])
         # Keep the multi-select scoped to the currently-focused parent entity
@@ -4713,19 +4735,25 @@ class PlannerApp(App):
         # correct (story 80).
         self._selected &= {it.id for it in items}
         pane.set_items(items, conn=self.conn, selected=self._selected)
-        scope = self._drill_scope()
-        multi = self._multi_caption()
+        # Filter-bar caption.
+        parts: list[str] = []
         if scope is not None:
             parent_kind, parent_id = scope
             label = self.name_of(parent_kind, parent_id)
-            self.query_one("#filter-bar", Static).update(
-                f"{label} ▸ {entity}  ({len(items)} rows){multi}")
+            parts.append(f"{label} ▸ {entity}")
         elif entity == "story":
-            self.query_one("#filter-bar", Static).update(
-                f"(all stories)  ({len(items)} stories){multi}")
+            parts.append("(all stories)")
         else:
-            self.query_one("#filter-bar", Static).update(
-                f"browsing {entity}  ({len(items)} rows){multi}")
+            parts.append(f"browsing {entity}")
+        # The search-scope caption only applies when the search actually
+        # filters this list, i.e. at the root context (drill-scope is None).
+        if scope is None and self._search_ids is not None:
+            parts.append(f"search: {self._search_query!r}")
+        multi = self._multi_caption()
+        if multi:
+            parts.append(multi)
+        parts.append(f"({len(items)} rows)")
+        self.query_one("#filter-bar", Static).update("  ".join(parts))
         self.refresh_children()
         if items:
             self.show_current_detail()
@@ -4846,6 +4874,9 @@ class PlannerApp(App):
             self.bell()
             return
         self._drill_stack.clear()
+        # A root search filter is scoped to the previous kind; never carry it
+        # onto a different entity's parent list.
+        self._clear_search()
         self.parent_entity = entity
         # A multi-select is scoped to the previous kind; reset it on switch.
         self._multi_select = False
@@ -4949,6 +4980,7 @@ class PlannerApp(App):
             self.bell()
             return
         self._drill_stack.clear()
+        self._clear_search()
         self.parent_entity = link.entity
         self.refresh_parent()
         pane = self.query_one("#stories", EntityListPane)
@@ -5484,8 +5516,18 @@ class PlannerApp(App):
         self.show_current_detail()
 
     def action_filter(self) -> None:
-        """Open modal to adjust project and state filters."""
+        """Open modal to adjust project and state filters.
+
+        The filter bar (project/state/owner/label) applies to the story list;
+        when the parent pane is browsing another kind, filtering isn't
+        available there, so we indicate that gracefully instead of opening a
+        screen whose filters would have no visible effect.
+        """
         assert self.conn is not None
+        if self.parent_entity != "story":
+            self.bell()
+            self.notify(f"filters apply to the story list (browsing {self.parent_entity})")
+            return
         self.push_screen(FilterScreen(self.conn, (self.filters["project"],
                                                  self.filters["state_type"],
                                                  self.filters["owner"],
@@ -5502,9 +5544,24 @@ class PlannerApp(App):
         self.filters["label"] = label
         self.refresh_stories()
 
+    def _clear_search(self) -> None:
+        """Reset any root search-scope filter (story 81).
+
+        Called on entity switch and related-link navigation so a filter scoped
+        to one kind never leaks onto another kind's parent list.
+        """
+        self._search_ids = None
+        self._search_query = None
+
     def action_search(self) -> None:
-        """Open modal to search by keyword, scoped to a chosen entity."""
-        self.push_screen(SearchInputScreen(), self._after_search)
+        """Open modal to search by keyword, scoped to the focused entity.
+
+        The entity selector defaults to the parent pane's current kind when
+        that kind is FTS-searchable (``_SEARCHABLE_PARENTS``), else "story",
+        so searching applies to the entity the user is browsing.
+        """
+        default = self.parent_entity if self.parent_entity in _SEARCHABLE_PARENTS else "story"
+        self.push_screen(SearchInputScreen(default), self._after_search)
 
     def action_manage_workflows(self) -> None:
         """Open the workflow & states management screen."""
@@ -5620,23 +5677,32 @@ class PlannerApp(App):
     def _after_search(self, result: tuple | None) -> None:
         """Apply a search scoped to the chosen entity.
 
-        A "story" search restricts the story list to the ids returned by the
-        backend ``search.search`` (FTS5). Any other entity opens a generic
-        :class:`SearchResultsScreen`. Backend errors (bad query / unknown
-        entity) surface as a toast.
+        When the chosen entity is the parent pane's current kind (a searchable
+        kind, or "story"), the parent list is filtered to the ids returned by
+        the backend ``search.search`` (FTS5) at the root context. This is the
+        story 81 integration: searching filters the entity you're browsing.
+        Otherwise the search opens a generic :class:`SearchResultsScreen`.
+        Backend errors (bad query / unknown entity) surface as a toast.
         """
         if result is None:
             return
         q, entity = result
         q = (q or "").strip()
         assert self.conn is not None
-        if entity == "story":
-            self._search_ids = None
-            self.filters["q"] = None
+        # A search that targets the currently-browsed parent kind filters that
+        # kind's parent list (story keeps its long-standing behavior), but only
+        # at the root context. While drilled in, a search scoped to the
+        # (child) parent kind would set _search_ids that leak onto a different
+        # entity's list on drill-out, so fall back to the generic results
+        # screen instead.
+        if (entity == self.parent_entity and entity in _SEARCHABLE_PARENTS
+                and self._drill_scope() is None):
+            self._clear_search()
             if q:
                 try:
                     self._search_ids = {
-                        r.id for r in search.search(self.conn, q, entity="story")}
+                        r.id for r in search.search(self.conn, q, entity=entity)}
+                    self._search_query = q
                 except (errors.PlannerError, ValueError) as e:
                     self.notify(f"error: {e}")
                     return
