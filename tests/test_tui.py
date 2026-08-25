@@ -2576,3 +2576,58 @@ def test_tui_search_scoped_to_browsed_epic_filters_parent(db_path):
             assert getattr(app, "_exception", None) is None
             await pilot.press("q")
     _run(main())
+
+
+def test_tui_help_overlay_lists_zoom_and_drill(seeded_db):
+    """'?' opens a help overlay documenting the multi-pane navigation keys.
+
+    The overlay lists the zoom and drill-in/out keys, and the context footer
+    reflects the active pane's actions (drill-in/out for the parent pane).
+    """
+    async def main():
+        from textual.widgets import Input, Static
+
+        from tui.app import ContextFooter, HelpScreen
+
+        app = PlannerApp(seeded_db)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+
+            # The context footer (parent pane focused by default) shows the
+            # drill-in/out navigation and the '?' help chip.
+            footer = app.query_one("#ctx-footer", ContextFooter)
+            footer_text = str(footer.render())
+            assert "drill" in footer_text
+            assert "help" in footer_text
+
+            # Press '?' -> the help overlay opens as the active screen.
+            await pilot.press("?")
+            await pilot.pause()
+            assert isinstance(app.screen, HelpScreen)
+
+            content = str(app.screen.query_one("#help-content", Static).render())
+            assert "zoom" in content
+            assert "drill" in content
+            # The parent-list context documents its editing keys too.
+            assert "new story" in content
+
+            # Esc closes the overlay back to the browser.
+            await pilot.press("escape")
+            await pilot.pause()
+            assert not isinstance(app.screen, HelpScreen)
+
+            # The overlay is also reachable from the command palette.
+            await pilot.press("ctrl+p")
+            await pilot.pause()
+            app.screen.query_one("#pal-input", Input).value = "Show help"
+            await pilot.pause()
+            await pilot.press("enter")
+            await pilot.pause()
+            assert isinstance(app.screen, HelpScreen)
+
+            assert getattr(app, "_exception", None) is None
+            # Close the overlay (its 'q' binding closes help, not the app) and quit.
+            await pilot.press("escape")
+            await pilot.pause()
+            await pilot.press("q")
+    _run(main())
