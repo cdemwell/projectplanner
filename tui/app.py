@@ -4727,7 +4727,9 @@ class PlannerApp(App):
             parts.append("(all stories)")
         else:
             parts.append(f"browsing {entity}")
-        if self._search_ids is not None:
+        # The search-scope caption only applies when the search actually
+        # filters this list, i.e. at the root context (drill-scope is None).
+        if scope is None and self._search_ids is not None:
             parts.append(f"search: {self._search_query!r}")
         parts.append(f"({len(items)} rows)")
         self.query_one("#filter-bar", Static).update("  ".join(parts))
@@ -5654,8 +5656,13 @@ class PlannerApp(App):
         q = (q or "").strip()
         assert self.conn is not None
         # A search that targets the currently-browsed parent kind filters that
-        # kind's parent list (story keeps its long-standing behavior).
-        if entity == self.parent_entity and entity in _SEARCHABLE_PARENTS:
+        # kind's parent list (story keeps its long-standing behavior), but only
+        # at the root context. While drilled in, a search scoped to the
+        # (child) parent kind would set _search_ids that leak onto a different
+        # entity's list on drill-out, so fall back to the generic results
+        # screen instead.
+        if (entity == self.parent_entity and entity in _SEARCHABLE_PARENTS
+                and self._drill_scope() is None):
             self._clear_search()
             if q:
                 try:
