@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from datetime import datetime, timedelta
 
@@ -56,7 +57,8 @@ def test_name_resolution_in_create(run_cli):
     run_cli("epic", "create", "--name", "Auth", "--project", "backend")
     rc, out, err = run_cli("--json", "story", "create", "--name", "Fix login",
                            "--project", "backend", "--type", "bug",
-                           "--epic", "Auth", "--labels", "auth", "--owners", "cdemwell")
+                           "--epic", "Auth", "--labels", "auth",
+                           "--owners", os.environ.get("USER", "me"))
     assert rc == 0, err
     s = json.loads(out)
     assert s["name"] == "Fix login"
