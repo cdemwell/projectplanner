@@ -249,8 +249,10 @@ def _check_workflow_default(row: dict[str, Any], where: str,
         # when the row simply does not set it.
         return
     _check_fk("default_state_id", where, default, "workflow_state", id_sets)
-    own_id = row.get("id")
-    if own_id is not None and state_owner.get(default) != own_id:
+    # An id-less workflow row can own no in-snapshot state (states FK-validate
+    # their workflow_id against the id-ful workflow ids), so the comparison
+    # below rejects every cross-workflow default, with or without an id.
+    if state_owner.get(default) != row.get("id"):
         raise _invalid(f"{where}.default_state_id",
                        f"state {default} belongs to a different workflow")
 
@@ -418,9 +420,9 @@ def validate_snapshot(conn: sqlite3.Connection, data: dict[str, Any]) -> None:
         for i, row in enumerate(data[table]):
             where = f"{table}[{i}]"
             for c in cols:
-                kind, notnull, _has_default = decls[c]
+                kind, notnull, has_default = decls[c]
                 if c not in row:
-                    if notnull and not decls[c][2]:
+                    if notnull and not has_default:
                         raise _invalid(f"{where}.{c}",
                                        "missing value for a NOT NULL column")
                     continue
@@ -547,6 +549,9 @@ def load_snapshot(path: str) -> dict[str, Any]:
             data = json.load(f)
     except json.JSONDecodeError as e:
         raise errors.ValidationError(f"invalid JSON in snapshot {path}: {e}") from e
+    except UnicodeDecodeError as e:
+        raise errors.ValidationError(
+            f"invalid JSON in snapshot {path}: not UTF-8 text") from e
     except RecursionError as e:
         raise errors.ValidationError(
             f"invalid snapshot: {path} is nested too deeply to parse") from e

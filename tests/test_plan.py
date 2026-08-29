@@ -385,6 +385,24 @@ def test_import_rejects_cross_workflow_default_state(conn):
         plan.import_plan(conn, data)
 
 
+def test_import_rejects_id_iless_cross_workflow_default_state(conn):
+    """The ownership check must not skip id-less workflow rows."""
+    data = _snapshot_with_content(conn)
+    state_id = data["workflow_state"][0]["id"]
+    data["workflow"].append({"name": "Ghost", "default_state_id": state_id,
+                             "created_at": db.now()})
+    with pytest.raises(errors.ValidationError, match="different workflow"):
+        plan.import_plan(conn, data)
+
+
+def test_import_rejects_non_utf8_snapshot(tmp_path, conn):
+    """A binary file is a clear ValidationError, not a traceback."""
+    bad = tmp_path / "binary.json"
+    bad.write_bytes(b'{"_meta": {"schema_version": 1, "x": "\xff\xfe"}}')
+    with pytest.raises(errors.ValidationError, match="UTF-8"):
+        plan.import_from_file(conn, str(bad))
+
+
 def test_import_preserves_workflow_state_description(tmp_path):
     """schema v4's workflow_state.description must survive the round-trip."""
     src = tmp_path / "src.db"
