@@ -10,11 +10,11 @@ from cli.commands import run
 
 
 def test_backup_creation(tmp_path):
-    # Setup: create a dummy DB
+    # Setup: a genuine planner DB (raw SQLite files without a schema_version
+    # table are refused since story 111).
     db_file = tmp_path / "planner.db"
-    conn = sqlite3.connect(db_file)
-    conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, val TEXT)")
-    conn.commit()
+    conn = db.connect(str(db_file))
+    stories.create_story(conn, "a story to back up")
     conn.close()
 
     # Run backup
@@ -28,19 +28,16 @@ def test_backup_creation(tmp_path):
     backup_file = backups[0]
     assert backup_file.exists()
 
-    # Verify it's a valid SQLite DB
+    # Verify it's a valid planner DB
     conn = sqlite3.connect(backup_file)
-    res = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='test'").fetchone()
+    res = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='story'").fetchone()
     assert res is not None
     conn.close()
 
 def test_backup_pruning(tmp_path):
-    # Setup: create a dummy DB
+    # Setup: a genuine planner DB (see test_backup_creation)
     db_file = tmp_path / "planner.db"
-    conn = sqlite3.connect(db_file)
-    conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, val TEXT)")
-    conn.commit()
-    conn.close()
+    db.connect(str(db_file)).close()
 
     # Create some backups
     for _ in range(2):

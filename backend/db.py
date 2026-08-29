@@ -15,6 +15,8 @@ import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
 
+from . import errors
+
 # Schema version this code understands. Bump when adding a migration in MIGRATIONS.
 CURRENT_SCHEMA_VERSION = 5
 
@@ -38,19 +40,71 @@ def now() -> str:
     return datetime.now(UTC).isoformat()
 
 
+def _read_user_tables(path: Path) -> set[str]:
+    """Read the user-table names in the SQLite file at ``path`` (or empty set).
+
+    The file is opened read-only, so this never creates it or writes anything
+    — a missing file yields an empty set (treated as a fresh database).
+
+    Args:
+        path: Candidate database file path.
+    Returns:
+        set of table names (SQLite internals excluded).
+    Raises:
+        errors.ValidationError: if the file exists but is not a SQLite database.
+    """
+    if not path.exists():
+        return set()
+    uri = Path(path).resolve().as_uri() + "?mode=ro"  # read-only: never create
+    probe = None
+    try:
+        probe = sqlite3.connect(uri, uri=True)
+        rows = probe.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+        ).fetchall()
+    except sqlite3.DatabaseError as e:
+        # Covers both "cannot be opened at all" (a directory) and "opened but
+        # not a database" (arbitrary bytes) — same refusal either way.
+        raise errors.ValidationError(
+            f"refusing to open {path}: not a valid SQLite database ({e})") from e
+    finally:
+        if probe is not None:
+            probe.close()
+    return {r[0] for r in rows}
+
+
 def connect(db_path: str | os.PathLike[str] | None = None) -> sqlite3.Connection:
     """Open (and, if needed, create + migrate + seed) the planner database.
 
     Configures the connection with ``sqlite3.Row``, enables foreign keys,
     and sets a 5-second busy timeout to handle concurrent writers.
 
+    The target is classified before anything is written: a missing/empty file
+    is a fresh planner database (created, migrated, seeded); a file carrying
+    a ``schema_version`` table is one of ours (migrated if needed, never
+    re-seeded); any other existing SQLite file — a foreign database, e.g. one
+    that merely happens to have empty tables — is refused rather than silently
+    given planner tables and a seed row.
+
     Args:
         db_path: Optional path to the database file. Defaults to ``DEFAULT_DB_PATH``.
 
     Returns:
         sqlite3.Connection: A configured SQLite connection.
+
+    Raises:
+        errors.ValidationError: if ``db_path`` exists but is not a planner
+            database (a foreign SQLite file, or a non-SQLite file).
     """
     path = Path(db_path) if db_path is not None else DEFAULT_DB_PATH
+    # Classify before mutating: read-only, so nothing is created by the probe.
+    tables = _read_user_tables(path)
+    if tables and "schema_version" not in tables:
+        raise errors.ValidationError(
+            f"refusing to open {path}: it is not a planner database "
+            f"(no schema_version table; contains tables: {sorted(tables)[:8]})")
+    fresh = not tables
+
     conn = sqlite3.connect(str(path))  # check_same_thread=True is fine: callers
     # own the connection and pass it explicitly.
     conn.row_factory = sqlite3.Row
@@ -58,7 +112,7 @@ def connect(db_path: str | os.PathLike[str] | None = None) -> sqlite3.Connection
     # block for up to 5s instead of raising SQLITE_BUSY immediately.
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA busy_timeout = 5000")
-    _migrate(conn)
+    _migrate(conn, seed=fresh)
     return conn
 
 
@@ -500,7 +554,7 @@ def _schema_version(conn: sqlite3.Connection) -> int:
     return int(row["v"])
 
 
-def _migrate(conn: sqlite3.Connection) -> None:
+def _migrate(conn: sqlite3.Connection, seed: bool) -> None:
     """Apply any pending migrations up to CURRENT_SCHEMA_VERSION.
 
     Iterates through ``_MIGRATIONS`` and applies any that are newer than the
@@ -508,9 +562,14 @@ def _migrate(conn: sqlite3.Connection) -> None:
 
     Args:
         conn: sqlite3.Connection from db.connect().
+        seed: Whether to run first-run seeding. True only for a genuinely
+            fresh database (no tables before migrating) — seeding used to be
+            keyed on an empty ``member`` table, which resurrected a seed
+            member plus a duplicate Default workflow after any plan import
+            that carried no members.
 
     Invariants:
-        Runs first-run seeding if the database is empty.
+        Seeding runs at most once, on a genuinely fresh database.
     """
     # schema_version table is created by v1; make sure it exists before reading.
     conn.execute("CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY)")
@@ -528,8 +587,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
             conn.execute("INSERT INTO schema_version(version) VALUES (?)", (version,))
         current = version
 
-    # First-run seeding: idempotent, only when the DB is otherwise empty.
-    if conn.execute("SELECT COUNT(*) AS c FROM member").fetchone()["c"] == 0:
+    if seed:
         _seed(conn)
 
 

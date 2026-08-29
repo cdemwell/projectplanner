@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import sqlite3
 
-from backend import db
+import pytest
+
+from backend import db, errors
 
 
 def test_connect_creates_and_seeds(db_path):
@@ -117,3 +119,65 @@ def test_bare_connect_never_touches_repo_db():
     assert connected != repo_db.resolve()
     assert connected.name == "default-test.db"
     c.close()
+
+
+# --------------------------------------------------------------------------- #
+# --db must never mutate a foreign database (story 111)
+# --------------------------------------------------------------------------- #
+
+def test_connect_refuses_foreign_sqlite_file(db_path):
+    """An unrelated SQLite file (its own tables, no schema_version) is refused
+    untouched: no planner schema is added, no seed rows are injected."""
+    from pathlib import Path
+
+    p = Path(db_path)
+    raw = sqlite3.connect(p)
+    raw.execute("CREATE TABLE user_data (id INTEGER PRIMARY KEY, note TEXT)")
+    raw.commit()
+    raw.close()
+
+    with pytest.raises(errors.ValidationError, match="not a planner database"):
+        db.connect(p)
+
+    # The foreign file is untouched: its single table, no planner schema.
+    check = sqlite3.connect(p)
+    names = {r[0] for r in check.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'")}
+    check.close()
+    assert names == {"user_data"}
+
+
+def test_connect_refuses_directory(tmp_path):
+    """A directory passed as --db is a refusal, not a traceback."""
+    target = tmp_path / "somedir"
+    target.mkdir()
+    with pytest.raises(errors.ValidationError):
+        db.connect(target)
+
+
+def test_connect_refuses_non_sqlite_file(tmp_path):
+    """A text file passed as --db is refused, not crashed into or overwritten."""
+    p = tmp_path / "junk.db"
+    p.write_text("this is not a database\n")
+    with pytest.raises(errors.ValidationError, match="not a valid SQLite"):
+        db.connect(p)
+    assert p.read_text() == "this is not a database\n"  # content unchanged
+
+
+def test_reconnect_never_reseeds(db_path):
+    """A planner DB is never re-seeded, even with zero members.
+
+    The old member-count heuristic resurrected a seeded member plus a second
+    Default workflow after any plan import that carried no members.
+    """
+    c = db.connect(db_path)
+    c.execute("DELETE FROM member")
+    c.execute("DELETE FROM workflow_state")
+    c.execute("DELETE FROM workflow")
+    c.commit()
+    c.close()
+
+    c2 = db.connect(db_path)  # second connect must not re-seed
+    assert c2.execute("SELECT COUNT(*) FROM member").fetchone()[0] == 0
+    assert c2.execute("SELECT COUNT(*) FROM workflow").fetchone()[0] == 0
+    c2.close()
