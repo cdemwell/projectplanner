@@ -40,21 +40,24 @@ def now() -> str:
     return datetime.now(UTC).isoformat()
 
 
-def _read_user_tables(path: Path) -> set[str]:
-    """Read the user-table names in the SQLite file at ``path`` (or empty set).
+def _read_db_state(path: Path) -> tuple[set[str], int | None]:
+    """Read-only census of the SQLite file at ``path``.
 
-    The file is opened read-only, so this never creates it or writes anything
-    — a missing file yields an empty set (treated as a fresh database).
+    The file is opened read-only via a file URI, so this never creates it or
+    writes anything — a missing file reports no tables (treated as a fresh
+    database by the caller).
 
     Args:
         path: Candidate database file path.
     Returns:
-        set of table names (SQLite internals excluded).
+        tuple of (table names excluding SQLite internals, stored schema
+        version — None when there is no readable version row yet).
     Raises:
-        errors.ValidationError: if the file exists but is not a SQLite database.
+        errors.ValidationError: if the file exists but cannot be opened as a
+            SQLite database (arbitrary bytes, a directory, an unreadable file).
     """
     if not path.exists():
-        return set()
+        return set(), None
     uri = Path(path).resolve().as_uri() + "?mode=ro"  # read-only: never create
     probe = None
     try:
@@ -62,15 +65,24 @@ def _read_user_tables(path: Path) -> set[str]:
         rows = probe.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
         ).fetchall()
+        tables = {r[0] for r in rows}
+        version: int | None = None
+        if "schema_version" in tables:
+            # MAX() of NULL returns None. Text deliberately stored in the
+            # version column can only mean "not our database" — validated by
+            # the caller, which refuses rather than guessing.
+            row = probe.execute("SELECT MAX(version) FROM schema_version").fetchone()
+            version = row[0]
     except sqlite3.DatabaseError as e:
-        # Covers both "cannot be opened at all" (a directory) and "opened but
-        # not a database" (arbitrary bytes) — same refusal either way.
+        # Covers "cannot be opened at all" (a directory, bad permissions) and
+        # "opened but not a database" (arbitrary bytes) — same refusal either way.
         raise errors.ValidationError(
-            f"refusing to open {path}: not a valid SQLite database ({e})") from e
+            f"refusing to open {path}: cannot be opened as a SQLite database "
+            f"({e})") from e
     finally:
         if probe is not None:
             probe.close()
-    return {r[0] for r in rows}
+    return tables, version
 
 
 def connect(db_path: str | os.PathLike[str] | None = None) -> sqlite3.Connection:
@@ -81,10 +93,12 @@ def connect(db_path: str | os.PathLike[str] | None = None) -> sqlite3.Connection
 
     The target is classified before anything is written: a missing/empty file
     is a fresh planner database (created, migrated, seeded); a file carrying
-    a ``schema_version`` table is one of ours (migrated if needed, never
-    re-seeded); any other existing SQLite file — a foreign database, e.g. one
-    that merely happens to have empty tables — is refused rather than silently
-    given planner tables and a seed row.
+    a readable ``schema_version`` in the supported range is one of ours
+    (migrated if needed); a file whose member table is absent self-heads a
+    first-run seed (the v1-crash window leaves exactly that shape), while a
+    present-but-empty member table stays empty. Any other existing SQLite
+    file — a foreign database, or one claiming an unsupported schema version
+    — is refused rather than silently given planner tables and a seed row.
 
     Args:
         db_path: Optional path to the database file. Defaults to ``DEFAULT_DB_PATH``.
@@ -94,16 +108,26 @@ def connect(db_path: str | os.PathLike[str] | None = None) -> sqlite3.Connection
 
     Raises:
         errors.ValidationError: if ``db_path`` exists but is not a planner
-            database (a foreign SQLite file, or a non-SQLite file).
+            database (a foreign SQLite file, a non-SQLite file, or a planner
+            schema version newer than this build understands).
     """
     path = Path(db_path) if db_path is not None else DEFAULT_DB_PATH
     # Classify before mutating: read-only, so nothing is created by the probe.
-    tables = _read_user_tables(path)
+    tables, stored_version = _read_db_state(path)
     if tables and "schema_version" not in tables:
         raise errors.ValidationError(
             f"refusing to open {path}: it is not a planner database "
             f"(no schema_version table; contains tables: {sorted(tables)[:8]})")
-    fresh = not tables
+    if stored_version is not None:
+        if not isinstance(stored_version, int):
+            raise errors.ValidationError(
+                f"refusing to open {path}: its schema_version table holds "
+                f"{stored_version!r}, which is not a schema version")
+        if stored_version > CURRENT_SCHEMA_VERSION:
+            raise errors.ValidationError(
+                f"refusing to open {path}: schema version {stored_version} is "
+                f"newer than this build supports ({CURRENT_SCHEMA_VERSION}); "
+                "upgrade projectplanner first")
 
     conn = sqlite3.connect(str(path))  # check_same_thread=True is fine: callers
     # own the connection and pass it explicitly.
@@ -112,7 +136,12 @@ def connect(db_path: str | os.PathLike[str] | None = None) -> sqlite3.Connection
     # block for up to 5s instead of raising SQLITE_BUSY immediately.
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA busy_timeout = 5000")
-    _migrate(conn, seed=fresh)
+    # Seed when the member table is absent: it exists in every migrated
+    # planner DB (v1 creates it with schema_version), so its absence means
+    # first-run or a v1-crash window — both of which want seeding. A present
+    # but empty member table (e.g. after a memberless plan import) must NOT
+    # resurrect a seed member and a second Default workflow.
+    _migrate(conn, seed="member" not in tables)
     return conn
 
 

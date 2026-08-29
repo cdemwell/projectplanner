@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+from pathlib import Path
 
 import pytest
 
@@ -128,8 +129,6 @@ def test_bare_connect_never_touches_repo_db():
 def test_connect_refuses_foreign_sqlite_file(db_path):
     """An unrelated SQLite file (its own tables, no schema_version) is refused
     untouched: no planner schema is added, no seed rows are injected."""
-    from pathlib import Path
-
     p = Path(db_path)
     raw = sqlite3.connect(p)
     raw.execute("CREATE TABLE user_data (id INTEGER PRIMARY KEY, note TEXT)")
@@ -159,9 +158,86 @@ def test_connect_refuses_non_sqlite_file(tmp_path):
     """A text file passed as --db is refused, not crashed into or overwritten."""
     p = tmp_path / "junk.db"
     p.write_text("this is not a database\n")
-    with pytest.raises(errors.ValidationError, match="not a valid SQLite"):
+    with pytest.raises(errors.ValidationError, match="cannot be opened as a SQLite"):
         db.connect(p)
     assert p.read_text() == "this is not a database\n"  # content unchanged
+
+
+def test_connect_refuses_text_schema_version(tmp_path):
+    """A schema_version table holding non-integer junk is not a planner DB.
+
+    (A foreign app's schema_version convention may use any column shape —
+    here a TEXT version column, which a rowid-aliased INTEGER PRIMARY KEY
+    could never legally hold.)"""
+    p = tmp_path / "forged.db"
+    forged = sqlite3.connect(p)
+    forged.execute("CREATE TABLE schema_version (version TEXT)")
+    forged.execute("INSERT INTO schema_version VALUES ('abc')")
+    forged.execute("CREATE TABLE app_data (id INTEGER)")
+    forged.commit()
+    forged.close()
+    with pytest.raises(errors.ValidationError, match="not a schema version"):
+        db.connect(p)
+    # The forged file is untouched (MAX(version) returned its TEXT value).
+    check = sqlite3.connect(p)
+    version = check.execute("SELECT version FROM schema_version").fetchone()[0]
+    check.close()
+    assert version == "abc"
+
+
+def test_connect_refuses_future_schema_version(tmp_path):
+    """A planner schema version newer than this build is refused, with the
+    first-version-vs-build dating explained."""
+    p = tmp_path / "future.db"
+    future = sqlite3.connect(p)
+    future.execute("CREATE TABLE schema_version (version INTEGER PRIMARY KEY)")
+    future.execute("INSERT INTO schema_version VALUES (?)", (99,))
+    future.commit()
+    future.close()
+    with pytest.raises(errors.ValidationError, match="newer than this build"):
+        db.connect(p)
+
+
+def test_connect_seeds_v1_crash_window(tmp_path):
+    """A DB holding only schema_version (crashed during first-run v1: the
+    out-of-transaction CREATE committed, the v1 tx rolled back) self-heals on
+    connect: migrate + seed."""
+    p = tmp_path / "crashed.db"
+    crashed = sqlite3.connect(p)
+    crashed.execute("CREATE TABLE schema_version (version INTEGER PRIMARY KEY)")
+    crashed.commit()
+    crashed.close()
+
+    c = db.connect(p)
+    version = c.execute("SELECT MAX(version) FROM schema_version").fetchone()[0]
+    members = c.execute("SELECT COUNT(*) FROM member").fetchone()[0]
+    workflows = c.execute("SELECT COUNT(*) FROM workflow").fetchone()[0]
+    c.close()
+    assert version == db.CURRENT_SCHEMA_VERSION
+    assert members == 1
+    assert workflows == 1
+
+
+def test_cli_refuses_bad_db_targets(tmp_path, capsys):
+    """The CLI surfaces the refusal per the documented error contract
+    (`error: ...`, exit 1), not as a traceback."""
+    from cli.commands import run
+
+    foreign = tmp_path / "foreign.db"
+    raw = sqlite3.connect(foreign)
+    raw.execute("CREATE TABLE user_data (id INTEGER)")
+    raw.commit()
+    raw.close()
+
+    rc = run(["--db", str(foreign), "story", "list"])
+    assert rc == 1
+    assert "error:" in capsys.readouterr().err
+
+    junk = tmp_path / "junk.db"
+    junk.write_text("nope\n")
+    rc = run(["--db", str(junk), "story", "list"])
+    assert rc == 1
+    assert "error:" in capsys.readouterr().err
 
 
 def test_reconnect_never_reseeds(db_path):
