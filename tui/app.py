@@ -4319,9 +4319,16 @@ class PlanManagerScreen(ModalScreen[bool]):
             return
         try:
             backup_path = backup.backup_db_file(db_path)
-            backup.prune_backups(db_path, self.BACKUP_KEEP)
         except OSError as e:
             self._status(f"error: {e}")
+            return
+        try:
+            backup.prune_backups(db_path, self.BACKUP_KEEP)
+        except OSError as e:
+            # The backup itself succeeded; say so, then surface the prune
+            # failure instead of swallowing it under a success message.
+            self._status(f"Backup created: {backup_path.name}; "
+                         f"pruning failed: {e}")
             return
         self._status(f"Backup created: {backup_path.name}")
 

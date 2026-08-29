@@ -976,11 +976,15 @@ def h_plan_backup(conn, a):
 
     Pruning only ever removes the tool's own backup files (see
     ``backend.backup.prune_backups``); other files next to the database are
-    never touched.
+    never touched. A negative ``--keep`` is rejected rather than guessed at:
+    the alternatives (prune everything, or delete exactly one) would both
+    destroy backups the user did not ask to lose.
     """
     db_path = Path(a.db) if getattr(a, "db", None) else Path("planner.db")
     if not db_path.exists():
         raise errors.PlannerError(f"Database file not found: {db_path}")
+    if a.keep is not None and a.keep < 0:
+        raise errors.ValidationError("--keep must be a non-negative integer")
 
     backup_path = backup.backup_db_file(db_path)
 

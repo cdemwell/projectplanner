@@ -172,7 +172,8 @@ def test_prune_keeps_non_backup_siblings(tmp_path):
 
     pruned = prune_backups(db_file, 0)
 
-    # Deleted newest-first (mtime sort); survivors are never in the list.
+    # Deleted newest-first by the embedded creation order (mtimes irrelevant);
+    # survivors are never in the list.
     assert [p.name for p in pruned] == [p.name for p in reversed(tool_backups)]
     assert not any(p.exists() for p in tool_backups)
     for s in survivors:
@@ -183,16 +184,12 @@ def test_prune_keeps_non_backup_siblings(tmp_path):
 def test_prune_counts_collision_suffixes_as_backups(tmp_path):
     """``.N``-suffixed same-second backups are tool backups: rotation prunes
     them too, so they cannot accumulate forever."""
-    import os
-
     from backend.backup import backup_db_file, prune_backups
 
     db_file = tmp_path / "planner.db"
     db_file.write_bytes(b"x")
     made = [backup_db_file(db_file) for _ in range(3)]  # <ts>, <ts>.1, <ts>.2
-    # Distinct mtimes so "newest" is deterministic even within one second.
-    for i, p in enumerate(made):
-        os.utime(p, (1_600_000_000.0 + i, 1_600_000_000.0 + i))
+    for p in made:
         assert p.exists()
 
     pruned = prune_backups(db_file, 1)
@@ -201,23 +198,70 @@ def test_prune_counts_collision_suffixes_as_backups(tmp_path):
     assert made[2].exists()
 
 
+def test_prune_keeps_fresh_backup_when_db_mtime_regresses(tmp_path):
+    """Pruning follows the embedded creation order, not file mtimes.
+
+    copy2 borrows the database's mtime for backups, so a restore that moves
+    the db mtime backwards (cp -p / rsync -a) makes the just-taken backup
+    look oldest by mtime; keep=1 must still keep it.
+    """
+    import os
+    import time as time_mod
+
+    from backend.backup import backup_db_file, prune_backups
+
+    db_file = tmp_path / "planner.db"
+    db_file.write_bytes(b"x")
+    first = backup_db_file(db_file)
+
+    time_mod.sleep(1.1)
+    # Simulate restoring the db from an old copy: its mtime moves backwards,
+    # and the next backup then borrows that stale mtime from it.
+    os.utime(db_file, (1_000_000_000.0, 1_000_000_000.0))
+    fresh = backup_db_file(db_file)
+    assert fresh.stat().st_mtime == db_file.stat().st_mtime  # borrowed mtime
+
+    pruned = prune_backups(db_file, 1)
+
+    # An mtime sort would have pruned the new backup; the name order does not.
+    assert [p.name for p in pruned] == [first.name]
+    assert not first.exists()
+    assert fresh.exists()
+
+
+def test_plan_backup_rejects_negative_keep(tmp_path):
+    """A negative --keep is refused, not interpreted as 'prune everything'."""
+    db_file = tmp_path / "planner.db"
+    sqlite3.connect(db_file).close()
+    rc = run(["--db", str(db_file), "plan", "backup", "--keep", "-1"])
+    assert rc == 1
+    # No backup was written and nothing pruned.
+    assert [p for p in tmp_path.iterdir() if p.name.startswith("planner.db.")] == []
+
+
 def test_rotate_backup_does_not_touch_foreign_files(tmp_path):
-    """The --rotate-backup path prunes via the same strict matcher."""
+    """The --rotate-backup path prunes via the same strict matcher.
+
+    Four runs force a real prune (3 backups, keep 2); the foreign sibling is
+    recorded before the runs and asserted byte-identical afterwards without
+    being rewritten, so deletion cannot hide behind recreation.
+    """
     import time
 
     db_file = tmp_path / "planner.db"
     foreign = tmp_path / "planner.db.backup"
     foreign.write_bytes(b"keep me")
+    foreign_bytes_before = foreign.read_bytes()
 
-    for i in range(3):
+    for i in range(4):
         rc = run(["--db", str(db_file), "--rotate-backup", "2",
                   "story", "create", "--name", f"rotation {i}"])
         assert rc == 0
         time.sleep(1.1)
-    foreign.write_bytes(b"still keep")
 
     backups = [p for p in tmp_path.iterdir()
                if p.name.startswith("planner.db.") and p != foreign]
-    assert len(backups) <= 2  # rotated down to --rotate-backup 2
-    assert foreign.read_bytes() == b"still keep"  # never deleted
+    assert len(backups) == 2  # exactly rotated down from 3
+    assert foreign.exists(), "foreign sibling was deleted by rotation"
+    assert foreign.read_bytes() == foreign_bytes_before
     assert db_file.exists()

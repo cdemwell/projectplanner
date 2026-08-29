@@ -19,7 +19,9 @@ from pathlib import Path
 # Files the tool itself produced: ``<db name>.<14-digit timestamp>[.N]``.
 # Anything else — manual copies, similarly named files — must never be pruned.
 # The ``.N`` suffix is the same-second collision sequence from backup_db_file.
-_BACKUP_SUFFIX_RE = re.compile(r"\.\d{14}(?:\.\d+)?$")
+# ASCII digits only: backup_db_file writes strftime output (ASCII), and \d
+# alone would also match Unicode digit shapes no tool file can carry.
+_BACKUP_SUFFIX_RE = re.compile(r"\.[0-9]{14}(?:\.[0-9]+)?$")
 
 
 def is_backup_file(db_path: Path, path: Path) -> bool:
@@ -63,27 +65,48 @@ def backup_db_file(db_path: Path) -> Path:
     return backup_path
 
 
+def _backup_order_key(path: Path, db_name: str) -> tuple[int, int]:
+    """Creation-embedded sort key for a backup file: (timestamp, collision n).
+
+    The name encodes creation order, so sorting is deterministic and immune
+    to file mtimes (which copy2 borrows from the database, and which tie for
+    same-second ``.N`` collisions).
+
+    Args:
+        path: Backup path next to the database.
+        db_name: The database file's name (the shared prefix).
+    Returns:
+        tuple[int, int]: (0-based timestamp as YYYYMMDDHHMMSS, collision n).
+    """
+    parts = path.name[len(db_name):].split(".")
+    return int(parts[1]), int(parts[2]) if len(parts) > 2 else 0
+
+
 def prune_backups(db_path: Path, keep: int) -> list[Path]:
     """Delete the oldest backups for ``db_path`` beyond ``keep``.
 
     Only files matching the backup naming (:func:`is_backup_file`) are
     candidates, so unrelated files next to the database are never touched.
-    The newest ``keep`` backups (by mtime) survive; call this *after*
+    The ``keep`` most recent backups — by the creation order embedded in
+    their names, not file mtimes — survive; call this *after*
     :func:`backup_db_file` so the backup just taken always counts.
 
     Args:
         db_path: Path to the SQLite database file.
-        keep: Number of most recent backups to keep (0 prunes all backups).
+        keep: Number of most recent backups to keep (0 prunes all backups;
+            negative values are treated the same as 0 by the backend, but the
+            CLI rejects them before calling).
     Returns:
-        list of the deleted paths, newest pruned candidate first (matching
-        the mtime ordering used to choose them).
+        list of the deleted paths, most recent pruned candidate first
+        (matching the embedded-timestamp ordering used to choose them).
     Raises:
         OSError: if a candidate cannot be removed.
     """
     candidates = [
         p for p in db_path.parent.glob(f"{glob.escape(db_path.name)}.*")
         if is_backup_file(db_path, p)]
-    candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    candidates.sort(key=lambda p: _backup_order_key(p, db_path.name),
+                    reverse=True)
     pruned = candidates[max(keep, 0):]
     for old in pruned:
         old.unlink()
