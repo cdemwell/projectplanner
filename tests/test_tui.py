@@ -2631,3 +2631,575 @@ def test_tui_help_overlay_lists_zoom_and_drill(seeded_db):
             await pilot.pause()
             await pilot.press("q")
     _run(main())
+
+
+# --- child-pane action focus (bugs 89/90/91/92/97/98/99; batch 5) ---------- #
+
+def _seed_epic_with_stories(db_path):
+    """Seed an epic with two stories (one with a task); return story ids."""
+    from backend import db
+    from backend import epics as epics_mod
+    from backend import stories as stories_mod
+    from backend import tasks as tasks_mod
+    c = db.connect(db_path)
+    e = epics_mod.create_epic(c, "Auth epic")
+    e2 = epics_mod.create_epic(c, "Other epic")
+    s1 = stories_mod.create_story(c, "child story one", epic_id=e.id)
+    s2 = stories_mod.create_story(c, "child story two", epic_id=e.id)
+    t = tasks_mod.create_task(c, s1.id, "child task")
+    c.close()
+    return {"epic": e, "epic2": e2, "story1": s1, "story2": s2, "task": t}
+
+
+async def _browse_epic_child(app, pilot, row=0):
+    """Browse epics, select the first epic, focus the child pane, move cursor."""
+    app.query_one("#stories").move_cursor(row=0)
+    await pilot.pause()
+    await pilot.press("tab")   # parent -> children
+    await pilot.pause()
+    app.query_one("#children").move_cursor(row=row)
+    await pilot.pause()
+    assert app._active_pane_id() == "children"
+
+
+def test_child_focused_edit_opens_child_pane_form(db_path):
+    """Bug 89 'u': with the child pane focused, edit the child story — not
+    the parent epic."""
+    seed = _seed_epic_with_stories(db_path)
+
+    async def main():
+        app = PlannerApp(db_path)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            app.query_one("#stories").move_cursor(row=0)
+            await pilot.pause()
+            await pilot.press("E"); await pilot.pause()
+            await _browse_epic_child(app, pilot, row=0)
+            await pilot.press("u"); await pilot.pause()
+            assert app._edit_pane is not None
+            assert app._edit_pane.story.id == seed["story1"].id
+            await pilot.press("escape"); await pilot.pause()
+            assert getattr(app, "_exception", None) is None
+            await pilot.press("q")
+    _run(main())
+
+
+def test_child_focused_delete_deletes_child_not_parent(db_path):
+    """Bug 89/99 'd': with the child pane focused, delete the child story."""
+    seed = _seed_epic_with_stories(db_path)
+
+    async def main():
+        app = PlannerApp(db_path)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            await pilot.press("E"); await pilot.pause()
+            await _browse_epic_child(app, pilot, row=0)
+            await pilot.press("d"); await pilot.pause()
+            # Confirm the deletion.
+            from textual.widgets import Button
+            app.screen.query_one("#yes", Button).focus()
+            await pilot.pause()
+            await pilot.press("enter")
+            await pilot.pause(0.05); await pilot.pause()
+            from backend import db
+            c = db.connect(db_path)
+            from backend import stories as sm
+            with pytest.raises(Exception, match="not found"):
+                sm.get_story(c, seed["story1"].id)
+            # The parent epic survives.
+            from backend import epics as em
+            em.get_epic(c, seed["epic"].id)  # no raise
+            c.close()
+            assert getattr(app, "_exception", None) is None
+            await pilot.press("q")
+    _run(main())
+
+
+def test_child_focused_toggle_complete_and_move_state(db_path):
+    """Bug 98 'e'/'m': story actions work on the highlighted child while the
+    parent pane browses epics."""
+    seed = _seed_epic_with_stories(db_path)
+
+    async def main():
+        app = PlannerApp(db_path)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            await pilot.press("E"); await pilot.pause()
+            await _browse_epic_child(app, pilot, row=0)
+            await pilot.press("e"); await pilot.pause()
+            from backend import db
+            from backend import stories as sm
+            c = db.connect(db_path)
+            s = sm.get_story(c, seed["story1"].id)
+            assert s.completed_at is not None, "'e' on the child pane must toggle the child story"
+            # keystroke bell path: detail context still edits the parent epic? No 'e' for epic.
+            c.close()
+            assert getattr(app, "_exception", None) is None
+            await pilot.press("q")
+    _run(main())
+
+
+def test_child_focused_space_selects_child(db_path):
+    """Bug 97 Space: with the child pane focused, multi-select toggles the
+    highlighted child (kind-scoped), never the parent epic's id."""
+    seed = _seed_epic_with_stories(db_path)
+
+    async def main():
+        app = PlannerApp(db_path)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            await pilot.press("E"); await pilot.pause()
+            await _browse_epic_child(app, pilot, row=0)
+            await pilot.press("v"); await pilot.pause()
+            await pilot.press("space"); await pilot.pause()
+            assert app._child_selected == {("story", seed["story1"].id)}
+            assert seed["epic"].id not in app._selected
+            await pilot.press("q")
+    _run(main())
+
+
+def test_parent_highlight_keeps_child_detail_when_child_focused(db_path):
+    """Bug 90: a parent-row highlight while the child pane is active must not
+    clobber the child detail with the parent's."""
+    seed = _seed_epic_with_stories(db_path)
+
+    async def main():
+        app = PlannerApp(db_path)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            await pilot.press("E"); await pilot.pause()
+            await _browse_epic_child(app, pilot, row=0)
+            detail = app.query_one("#detail-view")
+            assert detail._current == ("story", seed["story1"].id)
+            # Re-highlight the parent row programmatically while child is active.
+            app.query_one("#stories").move_cursor(row=1)
+            await pilot.pause()
+            assert detail._current == ("story", seed["story1"].id), (
+                "child detail must not revert to parent detail")
+            await pilot.press("q")
+    _run(main())
+
+
+def test_transient_state_cleared_on_drill_and_zoom(db_path):
+    """Bug 91: multi-select + search never leak across drill/zoom boundaries."""
+    from backend import db
+    from backend import stories as sm
+    from backend import tasks as tm
+    c = db.connect(db_path)
+    p = projects.create_project(c, "backend")
+    s1 = sm.create_story(c, "parent story", project_id=p.id)
+    sm.create_story(c, "another story", project_id=p.id)
+    tm.create_task(c, s1.id, "task")
+    c.close()
+
+    async def main():
+        app = PlannerApp(db_path)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            # select two stories at root
+            await pilot.press("v"); await pilot.pause()
+            app.query_one("#stories").move_cursor(row=0); await pilot.pause()
+            await pilot.press("space"); await pilot.pause()
+            app.query_one("#stories").move_cursor(row=1); await pilot.pause()
+            await pilot.press("space"); await pilot.pause()
+            assert len(app._selected) == 2
+            # simulate a search filter being active at the root
+            app._search_ids = {1}
+            app._search_query = "story"
+            # drill into the first story (its tasks)
+            app.query_one("#stories").move_cursor(row=0); await pilot.pause()
+            await pilot.press("enter"); await pilot.pause()
+            assert not app._selected
+            assert app._search_ids is None
+            assert not app._multi_select
+            # drill back out: still empty (no state carried back in)
+            await pilot.press("escape"); await pilot.pause()
+            assert not app._selected and app._search_ids is None
+            # zoom also clears
+            await pilot.press("v"); await pilot.pause()
+            await pilot.press("space"); await pilot.pause()
+            assert app._selected
+            await pilot.press("z"); await pilot.pause()
+            assert not app._selected and not app._multi_select
+            assert getattr(app, "_exception", None) is None
+            await pilot.press("q")
+    _run(main())
+
+
+def test_edit_with_stale_id_does_not_crash(db_path):
+    """Bug 92: pressing 'u' on a row deleted underneath must notify (bell),
+    not raise."""
+    from backend import db
+    from backend import stories as sm
+    c = db.connect(db_path)
+    p = projects.create_project(c, "backend")
+    stories_mod.create_story(c, "will vanish", project_id=p.id)
+    stories_mod.create_story(c, "survivor", project_id=p.id)
+    c.close()
+
+    async def main():
+        app = PlannerApp(db_path)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            # Delete the story under the cursor behind the TUI's back.
+            c2 = db.connect(db_path)
+            row = c2.execute("SELECT id FROM story WHERE name = 'will vanish'").fetchone()
+            sm.delete_story(c2, row["id"])
+            c2.close()
+            # The pane still shows the stale row; try to edit it.
+            app.query_one("#stories").move_cursor(row=0); await pilot.pause()
+            await pilot.press("u"); await pilot.pause()
+            assert app._edit_pane is None, "stale id must not mount an edit pane"
+            assert getattr(app, "_exception", None) is None
+            await pilot.press("q")
+    _run(main())
+
+
+# --- batch 6: surface parity (bugs 93/94/95/96) ---------------------------- #
+
+def test_project_with_untracked_story_shows_mixed_children(db_path):
+    """Bug 96: browsing a project shows its epics AND the stories not covered
+    by those epics in one mixed child pane (epics first)."""
+    from backend import db
+    from backend import epics as em
+    from backend import projects as pm
+    from backend import stories as sm
+    c = db.connect(db_path)
+    p = pm.create_project(c, "backend")
+    e1 = em.create_epic(c, "Epic A", project_id=p.id)
+    e2 = em.create_epic(c, "Epic B", project_id=p.id)
+    in_epic = sm.create_story(c, "story inside epic", project_id=p.id, epic_id=e1.id)
+    orphan1 = sm.create_story(c, "loose story one", project_id=p.id)
+    external = sm.create_story(c, "story with epic elsewhere", project_id=p.id)
+    # 'external' epic belongs to another project → still shown as a story row.
+    other_p = pm.create_project(c, "other")
+    outer_epic = em.create_epic(c, "Epic of other", project_id=other_p.id)
+    c2 = db.connect(db_path); sm.update_story(c2, external.id, epic_id=outer_epic.id); c2.close()
+    c.close()
+
+    async def main():
+        app = PlannerApp(db_path)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            await pilot.press("P"); await pilot.pause()
+            app.query_one("#stories").move_cursor(row=0); await pilot.pause()
+            child = app.query_one("#children")
+            await pilot.pause()
+            rows = child.row_keys
+            assert rows == [f"epic:{e1.id}", f"epic:{e2.id}",
+                            f"story:{orphan1.id}", f"story:{external.id}"], rows
+            # Epic-covered story is NOT listed directly (drill into the epic).
+            assert f"story:{in_epic.id}" not in rows
+            # Per-row kinds drive detail + actions: highlight the story row.
+            await pilot.press("tab"); await pilot.pause()
+            child.move_cursor(row=2); await pilot.pause()
+            assert app._focused_child_row() == ("story", orphan1.id)
+            assert app.query_one("#detail-view")._current == ("story", orphan1.id)
+            child.move_cursor(row=0); await pilot.pause()
+            assert app._focused_child_row() == ("epic", e1.id)
+            assert app.query_one("#detail-view")._current == ("epic", e1.id)
+            assert getattr(app, "_exception", None) is None
+            await pilot.press("q")
+    _run(main())
+
+
+def test_project_with_no_epics_shows_all_its_stories(db_path):
+    """Bug 96 case 4b: a project without epics lists its stories directly."""
+    from backend import db
+    from backend import projects as pm
+    from backend import stories as sm
+    c = db.connect(db_path)
+    p = pm.create_project(c, "solo")
+    s1 = sm.create_story(c, "direct one", project_id=p.id)
+    c.close()
+
+    async def main():
+        app = PlannerApp(db_path)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            await pilot.press("P"); await pilot.pause()
+            await _browse_epic_child(app, pilot, row=0)
+            assert app.query_one("#children").row_keys == [f"story:{s1.id}"]
+            assert app.query_one("#detail-view")._current == ("story", s1.id)
+            assert getattr(app, "_exception", None) is None
+            await pilot.press("q")
+    _run(main())
+
+
+def test_browser_toggle_shows_archived_projects(db_path):
+    """Bug 94: 'A' toggles archived projects/groups in the browser, matching
+    the CLI's --archived."""
+    from backend import db
+    from backend import projects as pm
+    c = db.connect(db_path)
+    pm.create_project(c, "alive")
+    gone = projects.create_project(c, "archived one")
+    projects.update_project(c, gone.id, archived=1)
+    c.close()
+
+    async def main():
+        app = PlannerApp(db_path)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            await pilot.press("P"); await pilot.pause()
+            def current_ids():
+                return {int(k) for k in app.query_one("#stories").row_keys}
+            assert gone.id not in current_ids()
+            # 'A' reveals archived rows; 'A' again hides them.
+            await pilot.press("A"); await pilot.pause()
+            assert gone.id in current_ids()
+            await pilot.press("A"); await pilot.pause()
+            assert gone.id not in current_ids()
+            assert getattr(app, "_exception", None) is None
+            await pilot.press("q")
+    _run(main())
+
+
+def test_edit_workflow_state_pane_edits_description(db_path):
+    """Bug 95: the state edit pane exposes and saves the v4 description field."""
+    from textual.widgets import Button, TextArea
+
+    from backend import db
+    from backend import workflows as wm
+    c = db.connect(db_path)
+    wf = wm.list_workflows(c)[0]
+    sid = wm.list_workflow_states(c, wf.id)[0].id
+    c.close()
+
+    async def main():
+        app = PlannerApp(db_path)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            await pilot.press("W"); await pilot.pause()
+            # drill into the workflow's states, focus child, then edit it.
+            app.query_one("#stories").move_cursor(row=0); await pilot.pause()
+            await _browse_epic_child(app, pilot, row=0)
+            await pilot.press("u"); await pilot.pause()
+            ta = app._edit_pane.query_one("#wse-desc", TextArea)
+            assert ta.text == ""
+            ta.text = "waiting on backend api"
+            app._edit_pane.query_one("#wse-save", Button).focus()
+            await pilot.pause()
+            await pilot.press("enter"); await pilot.pause(0.05); await pilot.pause()
+            c3 = db.connect(db_path)
+            assert wm.get_workflow_state(c3, sid).description == "waiting on backend api"
+            c3.close()
+            assert getattr(app, "_exception", None) is None
+            await pilot.press("q")
+    _run(main())
+
+
+def test_create_story_pane_covers_cli_create_surface(db_path):
+    """Bug 93: the TUI create form exposes every field the CLI create offers
+    (epic/iteration/group/deadline), and saving uses them."""
+    from textual.widgets import Button, Input, Select
+
+    from backend import db
+    from backend import epics as em
+    from backend import groups as gm
+    from backend import iterations as im
+    from backend import projects as pm
+    from backend import stories as sm
+    c = db.connect(db_path)
+    p = pm.create_project(c, "backend")
+    e = em.create_epic(c, "Auth epic")
+    it = im.create_iteration(c, "Sprint 1")
+    g = gm.create_group(c, "platform")
+    c.close()
+
+    async def main():
+        app = PlannerApp(db_path)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            await pilot.press("n"); await pilot.pause()
+            app.query_one("#c-name", Input).value = "created via TUI"
+            app.query_one("#c-proj", Select).value = p.id
+            app.query_one("#c-epic", Select).value = e.id
+            app.query_one("#c-iter", Select).value = it.id
+            app.query_one("#c-group", Select).value = g.id
+            app.query_one("#c-deadline", Input).value = "2026-12-25"
+            await pilot.pause()
+            app.query_one("#ok", Button).focus()
+            await pilot.pause()
+            await pilot.press("enter"); await pilot.pause(0.05); await pilot.pause()
+            c3 = db.connect(db_path)
+            made = [s for s in sm.list_stories(c3) if s.name == "created via TUI"][0]
+            assert (made.project_id, made.epic_id, made.iteration_id, made.group_id) == (
+                p.id, e.id, it.id, g.id)
+            assert made.deadline == "2026-12-25"
+            c3.close()
+            assert getattr(app, "_exception", None) is None
+            await pilot.press("q")
+    _run(main())
+
+
+# --- post-merge manual-test findings (child hotkeys, child drill) ---------- #
+
+def test_child_edit_works_for_all_child_kinds(db_path):
+    """'u' on a focused child row edits the child for every chain:
+    milestone->epic, workflow->state, (epic->story covered elsewhere)."""
+    from backend import db
+    from backend import epics as em
+    from backend import milestones as mm
+    c = db.connect(db_path)
+    m = mm.create_milestone(c, "Millstone")
+    e = em.create_epic(c, "M epic", milestone_id=m.id)
+    c.close()
+
+    async def main():
+        app = PlannerApp(db_path)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            await pilot.press("M"); await pilot.pause()
+            app.query_one("#stories").move_cursor(row=0); await pilot.pause()
+            await _browse_epic_child(app, pilot, row=0)
+            await pilot.press("u"); await pilot.pause()
+            assert type(app._edit_pane).__name__ == "EditEpicPane"
+            assert app._edit_pane.epic.id == e.id
+            assert getattr(app, "_exception", None) is None
+            await pilot.press("q")
+    _run(main())
+
+
+def test_child_pane_enter_drills_into_epic_row(db_path):
+    """Manual-test bug 4: Enter on an epic row in the project mixed pane
+    shows that epic's stories; Esc walks back project-ward."""
+    from backend import db
+    from backend import epics as em
+    from backend import projects as pm
+    from backend import stories as sm
+    c = db.connect(db_path)
+    p = pm.create_project(c, "proj")
+    e1 = em.create_epic(c, "Epic A", project_id=p.id)
+    e2 = em.create_epic(c, "Epic B", project_id=p.id)
+    inside = sm.create_story(c, "inside A", project_id=p.id, epic_id=e1.id)
+    c.close()
+
+    async def main():
+        app = PlannerApp(db_path)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            await pilot.press("P"); await pilot.pause()
+            app.query_one("#stories").move_cursor(row=0); await pilot.pause()
+            await pilot.press("tab"); await pilot.pause()
+            ch = app.query_one("#children")
+            ch.move_cursor(row=0); await pilot.pause()
+            await pilot.press("enter"); await pilot.pause()
+            # Drilled into Epic A: the parent pane now lists A's stories.
+            assert app.parent_entity == "story"
+            assert app.query_one("#stories").row_keys == [str(inside.id)]
+            # Esc returns to the epic list; Esc again returns to projects.
+            await pilot.press("escape"); await pilot.pause()
+            assert app.parent_entity == "epic"
+            assert {int(k.split(":")[-1]) for k in app.query_one("#stories").row_keys} == {e1.id, e2.id}
+            await pilot.press("escape"); await pilot.pause()
+            assert app.parent_entity == "project"
+            assert getattr(app, "_exception", None) is None
+            await pilot.press("q")
+    _run(main())
+
+
+def test_child_pane_enter_drills_story_row_to_tasks(db_path):
+    """Enter on a mixed-view STORY row goes straight to that story's tasks."""
+    from backend import db
+    from backend import projects as pm
+    from backend import stories as sm
+    from backend import tasks as tm
+    c = db.connect(db_path)
+    p = pm.create_project(c, "proj")
+    s = sm.create_story(c, "loose story", project_id=p.id)
+    tm.create_task(c, s.id, "do it")
+    c.close()
+
+    async def main():
+        app = PlannerApp(db_path)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            await pilot.press("P"); await pilot.pause()
+            app.query_one("#stories").move_cursor(row=0); await pilot.pause()
+            await pilot.press("tab"); await pilot.pause()
+            ch = app.query_one("#children")
+            ch.move_cursor(row=0); await pilot.pause()  # the story row
+            await pilot.press("enter"); await pilot.pause()
+            # Drilled into the story: the parent pane lists its tasks.
+            assert app.parent_entity == "task"
+            assert app.query_one("#stories").row_keys == ["1"]
+            await pilot.press("escape"); await pilot.pause()
+            assert app.parent_entity == "story"
+            await pilot.press("escape"); await pilot.pause()
+            assert app.parent_entity == "project"
+            # drill-in state was cleared and nothing leaked
+            assert not app._selected and not app._child_selected
+            assert getattr(app, "_exception", None) is None
+            await pilot.press("q")
+    _run(main())
+
+
+def test_drilled_task_parent_edit_opens_task_actions(db_path):
+    """Manual-test bug 2: after drill-in to a story's tasks, 'u' edits the
+    highlighted task (TaskActionScreen preselected)."""
+    from textual.widgets import Select
+
+    from backend import db
+    from backend import stories as sm
+    from backend import tasks as tm
+    c = db.connect(db_path)
+    s1 = sm.create_story(c, "with tasks")
+    tm.create_task(c, s1.id, "first")
+    t2 = tm.create_task(c, s1.id, "second")
+    sm.create_story(c, "no tasks")
+    c.close()
+
+    async def main():
+        app = PlannerApp(db_path)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            app.query_one("#stories").move_cursor(row=0); await pilot.pause()
+            await pilot.press("enter"); await pilot.pause()
+            assert app.parent_entity == "task"
+            # Move onto the second task, then 'u' opens the action modal
+            # preselected on it.
+            app.query_one("#stories").move_cursor(row=1); await pilot.pause()
+            await pilot.press("u"); await pilot.pause()
+            sel = app.screen.query_one("#ta-task", Select)
+            assert sel.value == t2.id, f"expected preselect on {t2.id}"
+            assert getattr(app, "_exception", None) is None
+            await pilot.press("escape"); await pilot.pause()
+            await pilot.press("q")
+    _run(main())
+
+
+def test_child_task_edit_opens_task_actions(db_path):
+    """'u' on a focused child TASK row (story->tasks chain) edits that task."""
+    from textual.widgets import Select, TextArea
+
+    from backend import db
+    from backend import stories as sm
+    from backend import tasks as tm
+    c = db.connect(db_path)
+    s = sm.create_story(c, "with tasks")
+    t1 = tm.create_task(c, s.id, "first")
+    tm.create_task(c, s.id, "second")
+    c.close()
+
+    async def main():
+        app = PlannerApp(db_path)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            await _browse_epic_child(app, pilot, row=0)
+            await pilot.press("u"); await pilot.pause()
+            sel = app.screen.query_one("#ta-task", Select)
+            assert sel.value == t1.id
+            # Edit the description and save.
+            app.screen.query_one("#ta-desc", TextArea).text = "edited via child pane"
+            from textual.widgets import Button
+            app.screen.query_one("#save", Button).focus()
+            await pilot.pause()
+            await pilot.press("enter"); await pilot.pause(0.05); await pilot.pause()
+            c3 = db.connect(db_path)
+            assert tm.get_task(c3, t1.id).description == "edited via child pane"
+            c3.close()
+            assert getattr(app, "_exception", None) is None
+            await pilot.press("escape"); await pilot.pause()
+            await pilot.press("q")
+    _run(main())

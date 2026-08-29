@@ -13,7 +13,7 @@ from __future__ import annotations
 import shutil
 import sqlite3
 from collections.abc import Callable
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -311,6 +311,47 @@ def _task_columns() -> list[Column]:
 
 # Per-entity column schemas keyed by entity name. Every pane is an instance of
 # :class:`EntityListPane` configured with one of these.
+@dataclass
+class _ChildRow:
+    """One row of the mixed project-children pane (bug 96).
+
+    Wraps a real epic or story so a single column schema can render both
+    kinds; ``entity`` and ``kind`` stay available for drill/act dispatch.
+    """
+
+    kind: str           # "epic" | "story"
+    kind_label: str     # "EPIC" | "STORY"
+    entity: Any
+
+    @property
+    def id(self) -> int:
+        return self.entity.id
+
+    @property
+    def name(self) -> str:
+        return self.entity.name
+
+
+def _mixed_state_column(row: _ChildRow, conn: sqlite3.Connection | None) -> str:
+    """State cell for a mixed row: an epic's enum state, a story's workflow state."""
+    if row.kind == "epic":
+        return getattr(row.entity, "state", "") or ""
+    if conn is None or getattr(row.entity, "workflow_state_id", None) is None:
+        return ""
+    try:
+        return workflows.get_workflow_state(conn, row.entity.workflow_state_id).name
+    except errors.NotFound:
+        return ""
+
+
+_MIXED_CHILD_COLUMNS: list[Column] = [
+    Column("Kind", lambda it, c: it.kind_label),
+    Column("ID", "id"),
+    Column("Name", "name"),
+    Column("State", _mixed_state_column),
+]
+
+
 ENTITY_COLUMNS: dict[str, list[Column]] = {
     "story": _story_columns(),
     "task": _task_columns(),
@@ -356,6 +397,16 @@ _BULK_DELETERS: dict[str, Callable[[sqlite3.Connection, int], None]] = {
     "member": members.delete_member,
 }
 
+# Delete function per child-pane entity kind (bug 89/91: a focused child row,
+# selected or highlighted, is deleted through its own kind's backend delete).
+# Every child kind is deletable: whatever ``valid_children`` can return.
+_CHILD_DELETERS: dict[str, Callable[[sqlite3.Connection, int], None]] = {
+    "story": stories.delete_story,
+    "epic": epics.delete_epic,
+    "workflow_state": workflows.delete_workflow_state,
+    "task": tasks.delete_task,
+}
+
 # Parent-pane entity kinds that the backend ``search.search`` can query (i.e.
 # kinds that are both switchable and FTS5-searchable). Search is scoped to
 # these so it can filter the parent list (story 81); group/workflow/member
@@ -379,10 +430,16 @@ class EntityListPane(DataTable):
     def __init__(self, *, columns: list[Column], id: str | None = None,
                  on_drill_in: Callable[[], None] | None = None,
                  on_drill_out: Callable[[], None] | None = None,
+                 entity_kind: str | None = None,
                  **kwargs: Any) -> None:
         super().__init__(id=id, cursor_type="row", **kwargs)
         self._columns = list(columns)
         self._row_keys: list[str] = []
+        # The entity kind this pane renders when rows are keyed by bare id.
+        # ``entity_kind=None`` (set per item via ``set_items(kinds=...)``)
+        # marks a mixed-kind pane.
+        self._entity_kind = entity_kind
+        self._row_kinds: list[str] | None = None
         # Optional drill navigation callbacks (story 72). The parent pane sets
         # these so Enter/Right drill into the selected row's children and
         # Left returns to the parent; child panes leave them unset so those keys
@@ -426,13 +483,19 @@ class EntityListPane(DataTable):
         self.clear(columns=True)
 
     @property
+    def entity_kind(self) -> str | None:
+        """The rendered entity kind (per-row kinds win for mixed panes)."""
+        return self.current_kind() or self._entity_kind
+
+    @property
     def row_keys(self) -> list[str]:
         """DB ids (as strings) of the rows currently shown, in display order."""
         return self._row_keys
 
     def set_items(self, items: list[Any],
                   conn: sqlite3.Connection | None = None,
-                  selected: set[int] | None = None) -> int | None:
+                  selected: set | None = None,
+                  kinds: list[str] | None = None) -> int | None:
         """Replace the table's rows with ``items``.
 
         Every row is keyed by ``item.id``. The cursor is restored to the row it
@@ -442,8 +505,12 @@ class EntityListPane(DataTable):
         Args:
             items: Entity model instances (any type with an ``id``).
             conn: Connection passed to callable columns (related-name lookups).
-            selected: Optional set of ids to render reverse-highlighted
-                (used by story multi-select mode).
+            selected: Optional set to render reverse-highlighted (used by
+                multi-select mode). With ``kinds`` given this is a set of
+                ``(kind, id)`` pairs; otherwise a set of bare ids.
+            kinds: Optional list parallel to ``items`` giving each row's entity
+                kind for a mixed-kind pane (project children, bug 96). Rows are
+                then keyed ``"kind:id"`` and ``current_row`` reports the pair.
         """
         prev_row = prev_col = None
         prev_key: str | None = None
@@ -457,14 +524,18 @@ class EntityListPane(DataTable):
         self.clear(columns=True)
         if not self.columns:
             self.add_columns(*[c.label for c in self._columns])
-        self._row_keys = [str(it.id) for it in items]
-        for it in items:
+        self._row_kinds = list(kinds) if kinds is not None else None
+        if self._row_kinds is not None:
+            self._row_keys = [f"{k}:{it.id}" for k, it in zip(kinds, items)]
+        else:
+            self._row_keys = [str(it.id) for it in items]
+        for key, it in zip(self._row_keys, items):
             cells = [c.render(it, conn) for c in self._columns]
-            if selected is not None and it.id in selected:
+            if selected is not None and self._is_selected(it.id, key, selected):
                 self.add_row(*[Text(c, style=Style(reverse=True)) for c in cells],
-                             key=str(it.id))
+                             key=key)
             else:
-                self.add_row(*cells, key=str(it.id))
+                self.add_row(*cells, key=key)
         if not items:
             return None
         if prev_key is not None and prev_key in self._row_keys:
@@ -474,21 +545,45 @@ class EntityListPane(DataTable):
         else:
             new_row = 0
         self.cursor_coordinate = (new_row, prev_col or 0)
-        return int(self._row_keys[new_row])
+        return int(self._row_keys[new_row].rsplit(":", 1)[-1])
+
+    def _is_selected(self, item_id: int, key: str, selected: set) -> bool:
+        """Check ``selected`` for this row (kind-scoped for mixed panes)."""
+        if self._row_kinds is not None:
+            kind, _, id_part = str(key).rpartition(":")
+            return (kind, int(id_part)) in selected
+        return item_id in selected
+
+    def current_row(self) -> tuple[str | None, int | None]:
+        """``(kind, id)`` of the row under the cursor (``(None, None)`` if any)."""
+        try:
+            key = self.coordinate_to_cell_key(self.cursor_coordinate).row_key
+        except Exception:
+            return (None, None)
+        if key is None or key.value is None:
+            return (None, None)
+        text = str(key.value)
+        if ":" in text:
+            kind, _, id_part = text.rpartition(":")
+            try:
+                return (kind, int(id_part))
+            except ValueError:
+                return (None, None)
+        try:
+            return (self._entity_kind, int(text))
+        except ValueError:
+            return (self._entity_kind, None)
+
+    def current_kind(self) -> str | None:
+        """The entity kind of the row under the cursor (mixed panes per-row)."""
+        kind, _ = self.current_row()
+        return kind
 
     @property
     def current_id(self) -> int | None:
         """The id of the row under the cursor, or ``None``."""
-        try:
-            key = self.coordinate_to_cell_key(self.cursor_coordinate).row_key
-        except Exception:
-            return None
-        if key is None or key.value is None:
-            return None
-        try:
-            return int(key.value)
-        except (TypeError, ValueError):
-            return None
+        _, eid = self.current_row()
+        return eid
 
 
 # --------------------------------------------------------------------------- #
@@ -1125,6 +1220,8 @@ class EditWorkflowStatePane(Vertical):
         yield Select(type_opts, value=st.type, id="wse-type")
         yield Label("Position:")
         yield Input(value=str(st.position), id="wse-position")
+        yield Label("Description:")
+        yield TextArea(st.description, id="wse-desc")
         yield Horizontal(Button("Save", id="wse-save", variant="primary"),
                          Button("Cancel", id="wse-cancel"))
         yield Label("", id="wse-err", classes="err")
@@ -1142,7 +1239,8 @@ class EditWorkflowStatePane(Vertical):
             self.query_one("#wse-err", Label).update("Invalid state type.")
             return
         pos_str = self.query_one("#wse-position", Input).value.strip()
-        fields: dict[str, Any] = {"name": name, "type": stype}
+        fields: dict[str, Any] = {"name": name, "type": stype,
+                                  "description": self.query_one("#wse-desc", TextArea).text}
         if pos_str:
             try:
                 fields["position"] = float(pos_str)
@@ -1189,6 +1287,18 @@ class CreateStoryPane(Vertical):
         if wfs:
             for s in workflows.list_workflow_states(self.conn, wfs[0].id):
                 state_opts.append((f"{s.name} ({s.type})", s.id))
+        # Epic / iteration / group / deadline round out the create form to the
+        # CLI's create surface (bug 93), so a story doesn't need a second
+        # edit step to attach its containers.
+        epic_opts = [("(no epic)", _NONE_INT)]
+        for e in epics.list_epics(self.conn):
+            epic_opts.append((e.name, e.id))
+        iter_opts = [("(no iteration)", _NONE_INT)]
+        for it in iterations.list_iterations(self.conn):
+            iter_opts.append((it.name, it.id))
+        group_opts = [("(no group)", _NONE_INT)]
+        for g in groups.list_groups(self.conn):
+            group_opts.append((g.name, g.id))
 
         yield Static("New story", classes="detail-title")
         yield Label("Name:")
@@ -1200,6 +1310,14 @@ class CreateStoryPane(Vertical):
                      value="feature", id="c-type")
         yield Label("Project:")
         yield Select(proj_opts, value=_NONE_INT, id="c-proj")
+        yield Label("Epic:")
+        yield Select(epic_opts, value=_NONE_INT, id="c-epic")
+        yield Label("Iteration:")
+        yield Select(iter_opts, value=_NONE_INT, id="c-iter")
+        yield Label("Group:")
+        yield Select(group_opts, value=_NONE_INT, id="c-group")
+        yield Label("Deadline (YYYY-MM-DD):")
+        yield Input(id="c-deadline", placeholder="optional")
         yield Label("Owner:")
         yield Select(owner_opts, value=_NONE_INT, id="c-owner")
         yield Label("State:")
@@ -1223,6 +1341,10 @@ class CreateStoryPane(Vertical):
         proj = _sel(self.query_one("#c-proj", Select).value)
         owner = _sel(self.query_one("#c-owner", Select).value)
         state = _sel(self.query_one("#c-state", Select).value)
+        epic = _sel(self.query_one("#c-epic", Select).value)
+        iteration = _sel(self.query_one("#c-iter", Select).value)
+        group = _sel(self.query_one("#c-group", Select).value)
+        deadline = self.query_one("#c-deadline", Input).value.strip() or None
         labels_str = self.query_one("#c-labels", Input).value.strip()
 
         owner_ids = [owner] if owner is not None else None
@@ -1230,7 +1352,8 @@ class CreateStoryPane(Vertical):
             sid = stories.create_story(
                 self.conn, name, description=desc, story_type=stype,
                 workflow_state_id=state, project_id=proj,
-                owner_ids=owner_ids)
+                epic_id=epic, iteration_id=iteration, group_id=group,
+                deadline=deadline, owner_ids=owner_ids)
 
             if labels_str:
                 for lb_name in labels_str.split(','):
@@ -1668,19 +1791,24 @@ class TaskActionScreen(ModalScreen[bool]):
         bool: True if a change was made, None on cancel.
     """
 
-    def __init__(self, conn: sqlite3.Connection, story_id: int) -> None:
+    def __init__(self, conn: sqlite3.Connection, story_id: int,
+                 task_id: int | None = None) -> None:
         super().__init__()
         self.conn = conn
         self.story_id = story_id
+        self.task_id = task_id
 
     def compose(self) -> ComposeResult:
         opts = [(f"[{'x' if t.complete else ' '}] #{t.id} {t.description}", t.id)
                 for t in tasks.list_tasks(self.conn, self.story_id)]
         if not opts:
             opts = [("(no tasks)", _NONE_INT)]
+        if self.task_id is not None:
+            existing = {v for _, v in opts}
+            self.task_id = self.task_id if self.task_id in existing else opts[0][1]
         yield VerticalScroll(
             Static("Task actions", classes="modal-title"),
-            Label("Task:"), Select(opts, value=opts[0][1], id="ta-task"),
+            Label("Task:"), Select(opts, value=self.task_id or opts[0][1], id="ta-task"),
             Label("New description:"), TextArea(id="ta-desc"),
             Horizontal(Button("Toggle", id="toggle", variant="primary"),
                        Button("Save Desc", id="save"), Button("Delete", id="delete", variant="error"),
@@ -4519,6 +4647,7 @@ class PlannerApp(App):
         Binding("D", "delete_epic", "Delete epic", show=False),
         Binding("e", "toggle_complete", "Complete"),
         Binding("v", "toggle_multiselect", "Multi"),
+        Binding("A", "toggle_archived", "Archived"),
         Binding("space", "toggle_select", "Toggle", show=False),
         # Esc leaves multi-select mode when active, otherwise drills back out.
         Binding("escape", "back", "Back", show=False),
@@ -4563,6 +4692,11 @@ class PlannerApp(App):
         # Multi-select (visual) mode: a set of selected story ids, toggled by Space.
         self._multi_select = False
         self._selected: set[int] = set()
+        # Show archived projects/groups in the browser (bug 94; 'A' toggles).
+        self._show_archived = False
+        # Child-pane multi-select (bug 97): kind-scoped (kind, id) pairs, since
+        # bare ids collide across entity kinds (epic #3 vs story #3).
+        self._child_selected: set[tuple[str, int]] = set()
         # Three-pane Miller-columns browser: the parent list, child list, and
         # detail pane. Tab / Shift+Tab cycle focus through these ids in order.
         self._pane_ids = ["stories", "children", "detail"]
@@ -4614,7 +4748,9 @@ class PlannerApp(App):
                 yield EntityListPane(columns=_story_columns(), id="stories",
                                      on_drill_in=self.action_drill_in,
                                      on_drill_out=self.action_drill_out)
-                yield EntityListPane(columns=_task_columns(), id="children")
+                yield EntityListPane(columns=_task_columns(), id="children",
+                                     on_drill_in=self.action_drill_in,
+                                     on_drill_out=self.action_drill_out)
             # Right pane: read-only generic detail view, or an EditStoryPane
             # when editing.
             with VerticalScroll(id="detail"):
@@ -4662,6 +4798,16 @@ class PlannerApp(App):
             # Focus is best-effort (e.g. a modal is open); the marker still moves.
             pass
         self._refresh_footer()
+        # Keep the detail pane in sync with the focused list pane.
+        # Parent highlights already show parent details via _on_highlight;
+        # child highlights are ignored until the user tabs into the child
+        # pane, so we sync here as well. Tabbing back to the parent
+        # restores the parent's details.
+        if not self._zoomed:
+            if ids[self._active_pane] == "children":
+                self.show_child_detail()
+            elif ids[self._active_pane] == "stories":
+                self.show_current_detail()
 
     def _parent_focused(self) -> bool:
         """True when the parent (#stories) list pane has focus.
@@ -4671,6 +4817,30 @@ class PlannerApp(App):
         correct even when zoomed onto the child list.
         """
         return self.focused is not None and self.focused.id == "stories"
+
+    def _focused_child_row(self) -> tuple[str, int] | None:
+        """``(kind, id)`` of the highlighted child row, or ``None``.
+
+        The kind is the child pane's per-row kind, so a mixed pane (project
+        children, bug 96) dispatches on the actual kind of the focused row.
+        """
+        kind, eid = self.query_one("#children", EntityListPane).current_row()
+        if kind is None or eid is None:
+            return None
+        return (kind, eid)
+
+    def _focused_row(self) -> tuple[str, int] | None:
+        """``(kind, id)`` of the row the user is acting on, honouring focus.
+
+        The active pane decides which list an action targets: the parent
+        pane resolves to the browsed parent kind, the child pane to the
+        highlighted child (bug 89/97/98 — actions must follow focus, not
+        the parent pane).
+        """
+        if self._active_pane_id() == "children":
+            return self._focused_child_row()
+        return (self.parent_entity,
+                self.query_one("#stories", EntityListPane).current_id)
 
     def action_focus_next_pane(self) -> None:
         """Cycle focus to the next pane (parent -> child -> detail)."""
@@ -4751,6 +4921,8 @@ class PlannerApp(App):
             self.refresh_children()
             self.show_current_detail()
             return
+        # Transient state is scoped to a view; zoom changes the view (bug 91).
+        self._clear_transient_state()
         # Entering zoom: decide which list becomes the master.
         if self._active_pane == 1 and valid_children(self.parent_entity):
             self._zoom_left = "children"
@@ -4864,6 +5036,20 @@ class PlannerApp(App):
             return None
         return self._drill_stack[-1][0], self._drill_stack[-1][1]
 
+    def action_toggle_archived(self) -> None:
+        """Toggle showing archived rows in the project/group browser (bug 94).
+
+        The CLI exposes ``--archived``; without the same override in the TUI,
+        an archived project or group vanishes from the browser with no way
+        back to it, so 'A' flips the filter and re-derives the panes. A no-op
+        (bell) for entity kinds with no archived flag.
+        """
+        if self.parent_entity not in ("project", "group"):
+            self.bell()
+            return
+        self._show_archived = not self._show_archived
+        self.refresh_parent()
+
     def _parent_rows(self) -> list[Any]:
         """Rows for the parent pane in the current navigation context.
 
@@ -4875,7 +5061,12 @@ class PlannerApp(App):
         assert self.conn is not None
         scope = self._drill_scope()
         if scope is None:
-            return _PARENT_LISTERS[self.parent_entity](self.conn)
+            lister = _PARENT_LISTERS[self.parent_entity]
+            if self.parent_entity in ("project", "group"):
+                # Archived rows are hidden by default; 'A' toggles them on so
+                # an archived project/group is reachable in the browser (94).
+                return lister(self.conn, include_archived=self._show_archived)
+            return lister(self.conn)
         parent_kind, parent_id = scope
         return resolve_children(self.conn, parent_kind, parent_id,
                                 self.parent_entity)
@@ -4913,6 +5104,8 @@ class PlannerApp(App):
             parts.append("(all stories)")
         else:
             parts.append(f"browsing {entity}")
+        if entity in ("project", "group") and self._show_archived and scope is None:
+            parts.append("(showing archived — 'A' to hide)")
         # The search-scope caption only applies when the search actually
         # filters this list, i.e. at the root context (drill-scope is None).
         if scope is None and self._search_ids is not None:
@@ -4937,6 +5130,11 @@ class PlannerApp(App):
         shows for the current parent entity. The first valid child kind (in the
         chain model's order) is shown; nothing is rendered until a parent row is
         selected.
+
+        A project is the special case: its children are its epics *and* the
+        stories not covered by one of those epics (bug 96). Both kinds render
+        in one mixed list — every row is a real, actionable entity — so a
+        project's full contents are visible (and editable) without drilling.
         """
         assert self.conn is not None
         parent = self.parent_entity
@@ -4948,12 +5146,38 @@ class PlannerApp(App):
             child.set_items([], conn=self.conn)
             return
         child_entity = kinds[0]
+        child._entity_kind = child_entity
         child.set_columns(ENTITY_COLUMNS[child_entity])
         if parent_id is None:
             child.set_items([], conn=self.conn)
             return
+        if parent == "project":
+            self._set_project_children(child, parent_id)
+            return
         rows = resolve_children(self.conn, parent, parent_id, child_entity)
         child.set_items(rows, conn=self.conn)
+
+    def _set_project_children(self, child: EntityListPane, project_id: int) -> None:
+        """Render a project as a mixed epic-then-orphan-story list (bug 96).
+
+        A story appears directly iff it belongs to the project and is not
+        covered by one of the project's listed epics — including a story whose
+        epic lives in a *different* project (the user's chosen boundary).
+        Stories are appended after the epics, as agreed.
+        """
+        epics_rows = epics.list_epics(self.conn, project_id=project_id)
+        epic_ids = {e.id for e in epics_rows}
+        all_stories = stories.list_stories(self.conn, project_id=project_id)
+        orphan_stories = [s for s in all_stories if s.epic_id not in epic_ids]
+        rows = ([_ChildRow("epic", "EPIC", e) for e in epics_rows]
+                + [_ChildRow("story", "STORY", s) for s in orphan_stories])
+        if not rows:
+            child.set_items([], conn=self.conn)
+            return
+        child.set_columns(_MIXED_CHILD_COLUMNS)
+        child.set_items(rows, conn=self.conn,
+                        kinds=[r.kind for r in rows],
+                        selected=self._child_selected)
 
     def name_of(self, table: str, id: int) -> str:
         """Look up a name for a given ID in the specified table.
@@ -5002,6 +5226,19 @@ class PlannerApp(App):
         except (errors.NotFound, KeyError):
             pane.show_message(f"(no detail for {entity} #{eid})")
 
+    def show_child_detail(self) -> None:
+        """Render the highlighted child row's details into the detail pane."""
+        row = self._focused_child_row()
+        if row is None:
+            return
+        child_entity, eid = row
+        assert self.conn is not None
+        pane = self.query_one("#detail-view", EntityDetailPane)
+        try:
+            pane.show(self.conn, child_entity, eid)
+        except (errors.NotFound, KeyError):
+            pane.show_message(f"(no detail for {child_entity} #{eid})")
+
     @on(DataTable.RowHighlighted)
     def _on_highlight(self, event: DataTable.RowHighlighted) -> None:
         if self._zoomed:
@@ -5016,7 +5253,20 @@ class PlannerApp(App):
             if self._edit_pane is not None:
                 self._close_edit()
             self.refresh_children()
-            self.show_current_detail()
+            # The detail pane follows focus (bug 90): with the child pane
+            # active, a parent-cursor refresh must re-derive the *child*
+            # detail for the row now under the child cursor, not clobber it
+            # with the parent's detail.
+            if self._active_pane_id() == "children":
+                self.show_child_detail()
+            else:
+                self.show_current_detail()
+        elif event.data_table.id == "children":
+            # Selecting a child row shows that child's details on the right.
+            # The container view (child pane) is the Miller-columns middle
+            # column; its highlighted row is the entity the detail pane should
+            # render when the user navigates into it.
+            self.show_child_detail()
 
     # --- actions ----------------------------------------------------------- #
     def action_open_palette(self) -> None:
@@ -5042,13 +5292,10 @@ class PlannerApp(App):
             self.bell()
             return
         self._drill_stack.clear()
-        # A root search filter is scoped to the previous kind; never carry it
-        # onto a different entity's parent list.
-        self._clear_search()
         self.parent_entity = entity
-        # A multi-select is scoped to the previous kind; reset it on switch.
-        self._multi_select = False
-        self._selected.clear()
+        # Search filter + multi-select are scoped to the previous kind; never
+        # carry them onto a different entity's parent list.
+        self._clear_transient_state()
         self.refresh_parent()
 
     def action_switch_to_story(self) -> None:
@@ -5089,20 +5336,27 @@ class PlannerApp(App):
 
     # --- drill-in / drill-out navigation (story 72) ----------------------- #
     def action_drill_in(self) -> None:
-        """Enter/Right: drill into the focused related link or parent row.
+        """Enter/Right: drill into the focused related link or list row.
 
-        If a :class:`RelatedLink` in the detail pane is focused, jump to that
-        related entity. Otherwise, when the parent pane is focused, drill into
-        the selected row's children (via :func:`~tui.chains.valid_children`),
-        pushing the navigation history. A parent with no children no-ops
-        (bell).
+        With the child pane focused, the highlighted child row drills in
+        directly (bug 4: e.g. an epic row under project shows that epic's
+        stories without a round-trip through the parent pane). If a
+        :class:`RelatedLink` in the detail pane is focused, jump to that
+        related entity; otherwise a focused parent row drills into the
+        selected row's children. Each step pushes navigation history; a row
+        with no children no-ops (bell).
         """
         focused = self.focused
         if isinstance(focused, RelatedLink):
             self._open_related(focused)
             return
         if not self._parent_focused():
+            if self._active_pane_id() == "children" and not self._zoomed:
+                self._drill_child()
             return
+        # Transient state (selection/search) is scoped to a navigation
+        # context; it never carries across a drill boundary (bug 91).
+        self._clear_transient_state()
         pane = self.query_one("#stories", EntityListPane)
         parent_id = pane.current_id
         kinds = valid_children(self.parent_entity)
@@ -5114,17 +5368,59 @@ class PlannerApp(App):
         self.parent_entity = child_kind
         self.refresh_parent()
 
+    def _drill_child(self) -> None:
+        """Drill into the highlighted child row (child pane focused, bug 4).
+
+        Pushes the parent context *and* the child row's own frame, so Esc
+        steps back through both levels (e.g. project ▸ epic ▸ story). A
+        child kind with no chains of its own (task) no-ops with a bell.
+        """
+        row = self._focused_child_row()
+        if row is None:
+            self.bell()
+            return
+        kind, eid = row
+        sub_kinds = valid_children(kind)
+        if not sub_kinds:
+            self.bell()
+            return
+        parent_id = self.query_one("#stories", EntityListPane).current_id
+        if parent_id is None:
+            self.bell()
+            return
+        self._clear_transient_state()
+        self._drill_stack.append((self.parent_entity, parent_id, kind))
+        self._drill_stack.append((kind, eid, sub_kinds[0]))
+        self.parent_entity = sub_kinds[0]
+        self.refresh_parent()
+
     def action_drill_out(self) -> None:
         """Left: return to the parent level, restoring the previous view.
 
         Pops the drill navigation history; when none is left this no-ops
-        (bell) rather than leaving the current root view.
+        (bell) rather than leaving the current root view. A focused child
+        pane steps back out too (bug 4 pairing): Esc from a drilled child
+        walks up one level through the shared history.
         """
-        if not self._parent_focused():
+        if not self._parent_focused() and self._active_pane_id() == "children" \
+                and not self._zoomed:
+            self._drill_out_child()
             return
         if not self._drill_stack:
             self.bell()
             return
+        # Transient state is scoped to a navigation context (bug 91).
+        self._clear_transient_state()
+        frame = self._drill_stack.pop()
+        self.parent_entity = frame[0]
+        self.refresh_parent()
+
+    def _drill_out_child(self) -> None:
+        """Drill out one level from a focused child pane (bug 4)."""
+        if not self._drill_stack:
+            self.bell()
+            return
+        self._clear_transient_state()
         frame = self._drill_stack.pop()
         self.parent_entity = frame[0]
         self.refresh_parent()
@@ -5134,7 +5430,7 @@ class PlannerApp(App):
         if self._multi_select:
             self.action_exit_multiselect()
             return
-        if self._parent_focused() and self._drill_stack:
+        if self._drill_stack:
             self.action_drill_out()
 
     def _open_related(self, link: RelatedLink) -> None:
@@ -5170,7 +5466,8 @@ class PlannerApp(App):
         """A ``[MULTI]`` caption suffix when multi-select has active selections."""
         if not self._multi_select:
             return ""
-        return f"  [MULTI] {len(self._selected)} selected"
+        count = max(len(self._selected), len(self._child_selected))
+        return f"  [MULTI] {count} selected"
 
     def action_toggle_multiselect(self) -> None:
         """Enter or exit multi-select (visual) mode."""
@@ -5190,24 +5487,45 @@ class PlannerApp(App):
         self._selected.clear()
         self.refresh_stories()
 
+    def _clear_transient_state(self) -> None:
+        """Reset selection + search state on a navigation boundary.
+
+        Transient state (multi-select, search filter) is scoped to the
+        navigation context it was made in and must be cleared on switch,
+        drill-in/out, and zoom (CONTEXT.md §7; bug 91).
+        """
+        self._clear_search()
+        self._multi_select = False
+        self._selected.clear()
+        self._child_selected.clear()
+
     def action_toggle_select(self) -> None:
         """Toggle the current row's selection (Space) in multi-select mode.
 
-        Works on any parent entity kind (stories plus the other browsable
-        kinds), since :attr:`_selected` tracks ids of the currently-focused
-        parent entity type (story 80).
+        Honours focus: the parent pane toggles rows of the browsed parent
+        kind in :attr:`_selected`; the child pane toggles the highlighted
+        child in :attr:`_child_selected` (a kind-scoped ``(kind, id)`` set,
+        since ids collide across entity kinds — bug 97).
         """
         if not self._multi_select:
             return
-        eid = self._current_story_id()
-        if eid is None:
+        row = self._focused_row()
+        if row is None:
             self.bell()
             return
-        if eid in self._selected:
-            self._selected.discard(eid)
+        if self._active_pane_id() == "children":
+            if row in self._child_selected:
+                self._child_selected.discard(row)
+            else:
+                self._child_selected.add(row)
+            self.show_child_detail()
         else:
-            self._selected.add(eid)
-        self.refresh_stories()
+            eid = row[1]
+            if eid in self._selected:
+                self._selected.discard(eid)
+            else:
+                self._selected.add(eid)
+            self.refresh_stories()
 
     def action_refresh(self) -> None:
         """Refresh the story list based on current filters."""
@@ -5332,13 +5650,50 @@ class PlannerApp(App):
             self._create_pane = None
         self.query_one("#detail-view").display = True
 
+    # --- shared edit-pane mounting ------------------------------------------ #
+    def _mount_edit_pane(self, build: Callable[[], Any]) -> None:
+        """Build + mount an inline edit pane in the detail pane's place.
+
+        The build callable constructs the ``Edit*Pane``; its backing ``get_*``
+        may race against an external delete, which must surface as a bell +
+        message rather than an uncaught crash (bug 92).
+        """
+        if self._edit_pane is not None:
+            self.bell()  # already editing
+            return
+        try:
+            pane = build()
+        except errors.NotFound:
+            self.bell()
+            self.notify("That entity no longer exists — press 'a' to refresh.",
+                        title="Not found")
+            return
+        self.query_one("#detail-view").display = False
+        self._edit_pane = pane
+        self.query_one("#detail", VerticalScroll).mount(pane)
+
     def action_edit_story(self) -> None:
         """Edit the selected entity in-place in the right detail pane.
 
-        'u' edits the kind currently being browsed: a story, epic, iteration,
-        milestone, project, group, workflow, or workflow state each opens its
-        inline form in the detail pane; other parent kinds bell and no-op.
+        'u' honours focus (bug 89): on the parent pane it edits the kind
+        currently being browsed; on the child pane it edits the highlighted
+        child, as the help overlay promises (bug 99).
         """
+        if self._active_pane_id() == "children":
+            self._edit_child()
+            return
+        if self.parent_entity == "task":
+            # Drill-in shows a story's tasks as the parent list (story 72);
+            # 'u' must edit the highlighted task there too (help parity).
+            assert self.conn is not None
+            tid = self.query_one("#stories", EntityListPane).current_id
+            if tid is None:
+                self.bell()
+                return
+            t = tasks.get_task(self.conn, tid)
+            self.push_screen(TaskActionScreen(self.conn, t.story_id, task_id=tid),
+                             lambda changed: self.refresh_stories() if changed else None)
+            return
         if self.parent_entity == "epic":
             self._open_epic_edit()
             return
@@ -5363,33 +5718,45 @@ class PlannerApp(App):
         if eid is None:
             self.bell()
             return
-        if self._edit_pane is not None:
-            self.bell()  # already editing
-            return
         # Hide the read-only view and mount the edit form in its place.
-        self.query_one("#detail-view").display = False
-        if self.parent_entity == "story":
-            pane = EditStoryPane(self.conn, eid,
-                                 on_saved=self._edit_saved,
-                                 on_cancelled=self._edit_cancelled)
-        elif self.parent_entity == "iteration":
-            pane = EditIterationPane(self.conn, eid,
-                                     on_saved=self._edit_saved,
-                                     on_cancelled=self._edit_cancelled)
-        elif self.parent_entity == "milestone":
-            pane = EditMilestonePane(self.conn, eid,
-                                     on_saved=self._edit_saved,
-                                     on_cancelled=self._edit_cancelled)
-        elif self.parent_entity == "project":
-            pane = EditProjectPane(self.conn, eid,
-                                   on_saved=self._edit_saved,
-                                   on_cancelled=self._edit_cancelled)
-        else:  # group
-            pane = EditGroupPane(self.conn, eid,
-                                 on_saved=self._edit_saved,
-                                 on_cancelled=self._edit_cancelled)
-        self._edit_pane = pane
-        self.query_one("#detail", VerticalScroll).mount(pane)
+        edit_panes = {
+            "story": EditStoryPane, "iteration": EditIterationPane,
+            "milestone": EditMilestonePane, "project": EditProjectPane,
+            "group": EditGroupPane,
+        }
+        pane_cls = edit_panes[self.parent_entity]
+        self._mount_edit_pane(lambda: pane_cls(
+            self.conn, eid, on_saved=self._edit_saved,
+            on_cancelled=self._edit_cancelled))
+
+    def _edit_child(self) -> None:
+        """Edit the highlighted child row via its own edit surface (bug 89).
+
+        Each child kind opens the same inline form drilling into it would;
+        task children (no dedicated form) open the story's task-action modal.
+        """
+        assert self.conn is not None
+        row = self._focused_child_row()
+        if row is None:
+            self.bell()
+            return
+        kind, eid = row
+        builders = {
+            "story": EditStoryPane, "epic": EditEpicPane,
+            "workflow_state": EditWorkflowStatePane,
+        }
+        if kind == "task":
+            t = tasks.get_task(self.conn, eid)
+            self.push_screen(TaskActionScreen(self.conn, t.story_id),
+                             lambda changed: self.show_child_detail() if changed else None)
+            return
+        pane_cls = builders.get(kind)
+        if pane_cls is None:
+            self.bell()
+            return
+        self._mount_edit_pane(lambda: pane_cls(
+            self.conn, eid, on_saved=self._edit_saved,
+            on_cancelled=self._edit_cancelled))
 
     def _open_epic_edit(self) -> None:
         """Mount the epic edit form into the right detail pane in-place."""
@@ -5398,16 +5765,9 @@ class PlannerApp(App):
         if eid is None:
             self.bell()
             return
-        if self._edit_pane is not None:
-            self.bell()  # already editing
-            return
-        # Hide the read-only view and mount the edit form in its place.
-        self.query_one("#detail-view").display = False
-        pane = EditEpicPane(self.conn, eid,
-                            on_saved=self._edit_saved,
-                            on_cancelled=self._edit_cancelled)
-        self._edit_pane = pane
-        self.query_one("#detail", VerticalScroll).mount(pane)
+        self._mount_edit_pane(lambda: EditEpicPane(
+            self.conn, eid, on_saved=self._edit_saved,
+            on_cancelled=self._edit_cancelled))
 
     def _open_workflow_edit(self) -> None:
         """Mount the workflow edit form into the right detail pane in-place."""
@@ -5419,13 +5779,9 @@ class PlannerApp(App):
         if self._edit_pane is not None:
             self.bell()  # already editing
             return
-        # Hide the read-only view and mount the edit form in its place.
-        self.query_one("#detail-view").display = False
-        pane = EditWorkflowPane(self.conn, wid,
-                                on_saved=self._edit_saved,
-                                on_cancelled=self._edit_cancelled)
-        self._edit_pane = pane
-        self.query_one("#detail", VerticalScroll).mount(pane)
+        self._mount_edit_pane(lambda: EditWorkflowPane(
+            self.conn, wid, on_saved=self._edit_saved,
+            on_cancelled=self._edit_cancelled))
 
     def _open_workflow_state_edit(self) -> None:
         """Mount the workflow-state edit form into the right detail pane in-place."""
@@ -5437,13 +5793,9 @@ class PlannerApp(App):
         if self._edit_pane is not None:
             self.bell()  # already editing
             return
-        # Hide the read-only view and mount the edit form in its place.
-        self.query_one("#detail-view").display = False
-        pane = EditWorkflowStatePane(self.conn, sid,
-                                     on_saved=self._edit_saved,
-                                     on_cancelled=self._edit_cancelled)
-        self._edit_pane = pane
-        self.query_one("#detail", VerticalScroll).mount(pane)
+        self._mount_edit_pane(lambda: EditWorkflowStatePane(
+            self.conn, sid, on_saved=self._edit_saved,
+            on_cancelled=self._edit_cancelled))
 
     def _open_label_edit(self) -> None:
         """Mount the label edit form into the right detail pane in-place."""
@@ -5455,13 +5807,9 @@ class PlannerApp(App):
         if self._edit_pane is not None:
             self.bell()  # already editing
             return
-        # Hide the read-only view and mount the edit form in its place.
-        self.query_one("#detail-view").display = False
-        pane = EditLabelPane(self.conn, eid,
-                             on_saved=self._edit_saved,
-                             on_cancelled=self._edit_cancelled)
-        self._edit_pane = pane
-        self.query_one("#detail", VerticalScroll).mount(pane)
+        self._mount_edit_pane(lambda: EditLabelPane(
+            self.conn, eid, on_saved=self._edit_saved,
+            on_cancelled=self._edit_cancelled))
 
     def _open_member_edit(self) -> None:
         """Mount the member edit form into the right detail pane in-place."""
@@ -5473,13 +5821,9 @@ class PlannerApp(App):
         if self._edit_pane is not None:
             self.bell()  # already editing
             return
-        # Hide the read-only view and mount the edit form in its place.
-        self.query_one("#detail-view").display = False
-        pane = EditMemberPane(self.conn, eid,
-                              on_saved=self._edit_saved,
-                              on_cancelled=self._edit_cancelled)
-        self._edit_pane = pane
-        self.query_one("#detail", VerticalScroll).mount(pane)
+        self._mount_edit_pane(lambda: EditMemberPane(
+            self.conn, eid, on_saved=self._edit_saved,
+            on_cancelled=self._edit_cancelled))
 
     def _edit_saved(self, entity_id: int) -> None:
         self._close_edit()
@@ -5543,11 +5887,23 @@ class PlannerApp(App):
         self.refresh_parent()
 
     def action_move_state(self) -> None:
-        """Open modal to change the workflow state of the selected story/selection."""
+        """Open modal to change the workflow state of the selected story/selection.
+
+        Honours focus (bug 98): a child story can be moved directly without
+        first drilling into it.
+        """
+        assert self.conn is not None
+        child_row = self._focused_row()
+        if self._active_pane_id() == "children":
+            if child_row is None or child_row[0] != "story":
+                self.bell()
+                return
+            self.push_screen(MoveStateScreen(self.conn, [child_row[1]]),
+                             lambda _: self.refresh_stories())
+            return
         if self.parent_entity != "story":
             self.bell()
             return
-        assert self.conn is not None
         ids = self._selected_ids()
         if self._multi_select and ids:
             self.push_screen(MoveStateScreen(self.conn, ids),
@@ -5883,8 +6239,14 @@ class PlannerApp(App):
 
         In multi-select mode the whole selection is deleted after a single
         :class:`ConfirmScreen` (story 80). Otherwise the highlighted single
-        entity is deleted after confirmation. Other parent kinds bell.
+        entity is deleted after confirmation. Honours focus (bug 89): on the
+        child pane the highlighted child is deleted, as the help promises.
         """
+        if self._active_pane_id() == "children":
+            self._delete_child()
+            return
+        if self._delete_child_selection():
+            return
         if self._bulk_delete_current():
             return
         if self.parent_entity == "iteration":
@@ -5921,6 +6283,70 @@ class PlannerApp(App):
         name = self.name_of("story", sid) if self.conn else str(sid)
         self.push_screen(ConfirmScreen(f"Delete story #{sid} ({name})?"),
                          lambda ok: self._after_delete(sid, ok))
+
+    def _delete_child_selection(self) -> bool:
+        """Confirm once and delete the child-pane multi-select, if any.
+
+        Returns ``True`` when a bulk delete was triggered (or awaits
+        confirmation), ``False`` when the child selection is empty so the
+        single-item flows continue unchanged.
+        """
+        if not self._child_selected:
+            return False
+        rows = sorted(self._child_selected)
+        self.push_screen(
+            ConfirmScreen(f"Delete {len(rows)} selected child rows?"),
+            lambda ok: self._after_child_bulk_delete(ok, rows))
+        return True
+
+    def _after_child_bulk_delete(self, ok: bool | None,
+                                 rows: list[tuple[str, int]]) -> None:
+        """Delete each selected (kind, id) through its kind's deleter."""
+        if not ok:
+            return
+        assert self.conn is not None
+        for kind, eid in rows:
+            deleter = _CHILD_DELETERS.get(kind)
+            if deleter is None:
+                continue
+            try:
+                deleter(self.conn, eid)
+            except errors.NotFound:
+                continue
+        self._child_selected.clear()
+        self.refresh_stories()
+
+    def _delete_child(self) -> None:
+        """Delete the highlighted child row after confirmation (bug 89).
+
+        A child-kind row is deleted through that kind's backend delete; task
+        children use the task's own delete.
+        """
+        assert self.conn is not None
+        row = self._focused_child_row()
+        if row is None:
+            self.bell()
+            return
+        kind, eid = row
+        noun = kind.replace("_", " ")
+        self.push_screen(ConfirmScreen(f"Delete child {noun} #{eid}?"),
+                         lambda ok: self._after_timestamped_delete(kind, eid, ok))
+
+    def _after_timestamped_delete(self, kind: str, eid: int, ok: bool | None) -> None:
+        """Run the confirmed child delete through the kind's backend deleter."""
+        if not ok:
+            return
+        assert self.conn is not None
+        deleter = _CHILD_DELETERS.get(kind)
+        if deleter is None:
+            self.bell()
+            return
+        try:
+            deleter(self.conn, eid)
+        except errors.NotFound:
+            self.notify("That entity no longer exists — press 'a' to refresh.",
+                        title="Not found")
+        self.refresh_stories()
 
     def _after_delete(self, sid: int, ok: bool | None) -> None:
         if not ok:
@@ -6152,12 +6578,13 @@ class PlannerApp(App):
 
     def action_toggle_complete(self) -> None:
         """Toggle the selected story between 'done' and 'unstarted' states.
+
+        Honours focus (bug 98): on the child pane the highlighted child story
+        is toggled, even when the parent pane is browsing a non-story kind.
         """
-        if self.parent_entity != "story":
-            self.bell()
-            return
-        sid = self._current_story_id()
-        if sid is None or self.conn is None:
+        row = self._focused_row()
+        kind, sid = row if row is not None else (None, None)
+        if kind != "story" or sid is None or self.conn is None:
             self.bell()
             return
         s = stories.get_story(self.conn, sid)

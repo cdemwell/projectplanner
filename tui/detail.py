@@ -234,6 +234,21 @@ def _workflow_state_model(conn, id: int) -> DetailModel:
     return DetailModel(title=title, fields=fields)
 
 
+def _task_model(conn, id: int) -> DetailModel:
+    from backend import tasks
+    t = tasks.get_task(conn, id)
+    title = f"#{t.id}  {t.description[:40]}  [{'x' if t.complete else ' '}]"
+    fields = [
+        Field("desc", t.description),
+        Field("complete", "yes" if t.complete else "no"),
+        Field("position", str(t.position)),
+    ]
+    if t.completed_at:
+        fields.append(Field("completed", t.completed_at))
+    links = [Link("story", t.story_id, _entity_name(conn, "story", t.story_id) or str(t.story_id))]
+    return DetailModel(title=title, fields=fields, links=links)
+
+
 _BUILDERS: dict[str, object] = {
     "story": _story_model,
     "epic": _epic_model,
@@ -245,6 +260,7 @@ _BUILDERS: dict[str, object] = {
     "member": _member_model,
     "workflow": _workflow_model,
     "workflow_state": _workflow_state_model,
+    "task": _task_model,
 }
 
 
@@ -301,6 +317,12 @@ class EntityDetailPane(Vertical):
     .detail-link:focus { background: $primary; color: $text; }
     """
 
+    def __init__(self, **kwargs: object) -> None:
+        super().__init__(**kwargs)
+        # (kind, id) currently rendered, or None for a message view. Used to
+        # assert which entity the pane tracks (e.g. bug 90's focus sync).
+        self._current: tuple[str, int] | None = None
+
     def show(self, conn, kind: str, id: int) -> None:
         """Render an entity's details read-only into this pane.
 
@@ -310,10 +332,12 @@ class EntityDetailPane(Vertical):
             id: The entity id.
         """
         model = build_model(conn, kind, id)
+        self._current = (kind, id)
         self._populate(model)
 
     def show_message(self, message: str) -> None:
         """Render a plain message in place of a detail view."""
+        self._current = None
         self.remove_children()
         self.mount(Static(message, classes="detail-field"))
 
