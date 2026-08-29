@@ -199,11 +199,11 @@ def test_connect_refuses_future_schema_version(tmp_path):
 
 
 def test_connect_refuses_versionless_schema_version_collision(tmp_path):
-    """A foreign `schema_version` table with no usable version row (empty, or
-    0 — a real planner DB stores 1..N) alongside other tables is a collision,
-    not a first run: refused untouched. Only `schema_version` alone (the
-    v1-crash window) self-heals."""
-    for name, version_value in (("empty", None), ("zero", 0)):
+    """A foreign `schema_version` table with no usable version row (empty, 0,
+    or negative — a real planner DB stores 1..N) alongside other tables is a
+    collision, not a first run: refused untouched. Only `schema_version` alone
+    (the v1-crash window) self-heals."""
+    for name, version_value in (("empty", None), ("zero", 0), ("negative", -1)):
         p = tmp_path / f"collide-{name}.db"
         collide = sqlite3.connect(p)
         collide.execute("CREATE TABLE schema_version (version INTEGER)")

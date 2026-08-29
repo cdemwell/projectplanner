@@ -123,7 +123,7 @@ def connect(db_path: str | os.PathLike[str] | None = None) -> sqlite3.Connection
         raise errors.ValidationError(
             f"refusing to open {path}: it is not a planner database "
             f"(no schema_version table; contains tables: {sorted(tables)[:8]})")
-    if tables and (stored_version is None or stored_version == 0) \
+    if tables and (stored_version is None or stored_version <= 0) \
             and tables != {"schema_version"}:
         # A real planner DB always stores a version >= 1 (the first migration
         # stamps it in the same transaction that creates the tables), and the
