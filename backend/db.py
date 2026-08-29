@@ -123,26 +123,26 @@ def connect(db_path: str | os.PathLike[str] | None = None) -> sqlite3.Connection
         raise errors.ValidationError(
             f"refusing to open {path}: it is not a planner database "
             f"(no schema_version table; contains tables: {sorted(tables)[:8]})")
+    if stored_version is not None and not isinstance(stored_version, int):
+        raise errors.ValidationError(
+            f"refusing to open {path}: its schema_version table holds "
+            f"{stored_version!r}, which is not a schema version")
+    if stored_version is not None and stored_version > CURRENT_SCHEMA_VERSION:
+        raise errors.ValidationError(
+            f"refusing to open {path}: schema version {stored_version} is "
+            f"newer than this build supports ({CURRENT_SCHEMA_VERSION}); "
+            "upgrade projectplanner first")
     if tables and (stored_version is None or stored_version <= 0) \
             and tables != {"schema_version"}:
         # A real planner DB always stores a version >= 1 (the first migration
         # stamps it in the same transaction that creates the tables), and the
         # only legal no-version-rows shape is the v1-crash window: exactly
         # schema_version and nothing else. A name-collision with other tables
-        # is someone else's database — refuse it.
+        # is someone else's database — refuse it. (Non-int version rows were
+        # refused above, so the <= here is int-safe.)
         raise errors.ValidationError(
             f"refusing to open {path}: its schema_version table has no usable "
             "version row, but other tables exist — not a planner database")
-    if stored_version is not None:
-        if not isinstance(stored_version, int):
-            raise errors.ValidationError(
-                f"refusing to open {path}: its schema_version table holds "
-                f"{stored_version!r}, which is not a schema version")
-        if stored_version > CURRENT_SCHEMA_VERSION:
-            raise errors.ValidationError(
-                f"refusing to open {path}: schema version {stored_version} is "
-                f"newer than this build supports ({CURRENT_SCHEMA_VERSION}); "
-                "upgrade projectplanner first")
 
     conn = sqlite3.connect(str(path))  # check_same_thread=True is fine: callers
     # own the connection and pass it explicitly.
