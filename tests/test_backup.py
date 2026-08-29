@@ -206,7 +206,6 @@ def test_prune_keeps_fresh_backup_when_db_mtime_regresses(tmp_path):
     look oldest by mtime; keep=1 must still keep it.
     """
     import os
-    import time as time_mod
 
     from backend.backup import backup_db_file, prune_backups
 
@@ -214,7 +213,7 @@ def test_prune_keeps_fresh_backup_when_db_mtime_regresses(tmp_path):
     db_file.write_bytes(b"x")
     first = backup_db_file(db_file)
 
-    time_mod.sleep(1.1)
+    time.sleep(1.1)
     # Simulate restoring the db from an old copy: its mtime moves backwards,
     # and the next backup then borrows that stale mtime from it.
     os.utime(db_file, (1_000_000_000.0, 1_000_000_000.0))

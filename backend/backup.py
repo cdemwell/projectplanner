@@ -76,7 +76,8 @@ def _backup_order_key(path: Path, db_name: str) -> tuple[int, int]:
         path: Backup path next to the database.
         db_name: The database file's name (the shared prefix).
     Returns:
-        tuple[int, int]: (0-based timestamp as YYYYMMDDHHMMSS, collision n).
+        tuple[int, int]: (the YYYYMMDDHHMMSS timestamp, the collision sequence
+        n; a bare <ts> file means n = 0).
     """
     parts = path.name[len(db_name):].split(".")
     return int(parts[1]), int(parts[2]) if len(parts) > 2 else 0
