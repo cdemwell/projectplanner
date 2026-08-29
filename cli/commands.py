@@ -21,13 +21,13 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from datetime import datetime
 from io import StringIO
 from pathlib import Path
 from typing import Any
 
 from backend import (
     _util,
+    backup,
     comments,
     config,
     db,
@@ -932,28 +932,6 @@ def _conn_db_path(conn) -> Path | None:
     return Path(row[2]) if row and row[2] else None
 
 
-def _backup_db_file(db_path: Path) -> Path:
-    """Copy ``db_path`` to a timestamped sibling file and return its path.
-
-    The name is ``<name>.<YYYYMMDDHHMMSS>``; when that name already exists
-    (two backups within the same second) a ``.N`` sequence is appended rather
-    than silently overwriting the earlier backup.
-
-    Args:
-        db_path: Path to the SQLite database file.
-    Returns:
-        Path of the newly written backup.
-    """
-    timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
-    backup_path = db_path.with_suffix(f"{db_path.suffix}.{timestamp}")
-    n = 1
-    while backup_path.exists():
-        backup_path = db_path.with_suffix(f"{db_path.suffix}.{timestamp}.{n}")
-        n += 1
-    shutil.copy2(db_path, backup_path)
-    return backup_path
-
-
 def h_plan_export(conn, a):
     """Handle ``plan export``; write a JSON snapshot to a file and return counts."""
     data = plan.export_to_file(conn, a.file)
@@ -984,7 +962,7 @@ def h_plan_import(conn, a):
     if not getattr(a, "dry_run", False):
         db_path = _conn_db_path(conn)
         if db_path is not None:
-            backup_path = _backup_db_file(db_path)
+            backup_path = backup.backup_db_file(db_path)
             print(f"pre-import backup: {backup_path}", file=sys.stderr)
     counts = plan.import_plan(conn, data)
     result: dict[str, Any] = {"file": a.file, "imported": counts}
@@ -994,21 +972,24 @@ def h_plan_import(conn, a):
 
 
 def h_plan_backup(conn, a):
-    """Handle ``plan backup``; copy DB to timestamped file and prune old backups."""
+    """Handle ``plan backup``; copy DB to timestamped file and prune old backups.
+
+    Pruning only ever removes the tool's own backup files (see
+    ``backend.backup.prune_backups``); other files next to the database are
+    never touched. A negative ``--keep`` is rejected rather than guessed at:
+    the alternatives (prune everything, or delete exactly one) would both
+    destroy backups the user did not ask to lose.
+    """
     db_path = Path(a.db) if getattr(a, "db", None) else Path("planner.db")
     if not db_path.exists():
         raise errors.PlannerError(f"Database file not found: {db_path}")
+    if a.keep is not None and a.keep < 0:
+        raise errors.ValidationError("--keep must be a non-negative integer")
 
-    backup_path = _backup_db_file(db_path)
+    backup_path = backup.backup_db_file(db_path)
 
     if a.keep is not None:
-        backups = sorted(
-            db_path.parent.glob(f"{db_path.name}.*"),
-            key=lambda p: p.stat().st_mtime,
-            reverse=True
-        )
-        for old_backup in backups[a.keep:]:
-            old_backup.unlink()
+        backup.prune_backups(db_path, a.keep)
 
     return {"backup": str(backup_path)}
 
@@ -1425,16 +1406,10 @@ def run(argv: list[str] | None = None) -> int:
 
     if args.rotate_backup > 0 and not is_dry_run:
         if db_path.exists():
-            backup_path = _backup_db_file(db_path)
-
-            backups = sorted(
-                db_path.parent.glob(f"{db_path.name}.*"),
-                key=lambda p: p.stat().st_mtime,
-                reverse=True
-            )
-            for old_backup in backups[args.rotate_backup:]:
-                old_backup.unlink()
-            print(f"Backed up to {backup_path.name} (keeping {args.rotate_backup} rotations)")
+            backup_path = backup.backup_db_file(db_path)
+            backup.prune_backups(db_path, args.rotate_backup)
+            print(f"Backed up to {backup_path.name} (keeping {args.rotate_backup} rotations)",
+                  file=sys.stderr)
 
     tmp_path = None
     if is_dry_run:

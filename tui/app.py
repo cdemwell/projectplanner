@@ -10,11 +10,9 @@ Run: ``python main.py`` (no args). Requires the ``textual`` package.
 
 from __future__ import annotations
 
-import shutil
 import sqlite3
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -41,6 +39,7 @@ from textual.widgets import Select as _Select
 from textual.widgets.option_list import Option
 
 from backend import (
+    backup,
     comments,
     config,
     db,
@@ -4318,23 +4317,19 @@ class PlanManagerScreen(ModalScreen[bool]):
         if not db_path.exists():
             self._status(f"Database file not found: {db_path}")
             return
-        timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
-        backup_path = db_path.with_suffix(f"{db_path.suffix}.{timestamp}")
         try:
-            shutil.copy2(db_path, backup_path)
+            backup_path = backup.backup_db_file(db_path)
         except OSError as e:
             self._status(f"error: {e}")
             return
-        # Prune old backups, keeping the most recent BACKUP_KEEP.
-        backups = sorted(
-            db_path.parent.glob(f"{db_path.name}.*"),
-            key=lambda p: p.stat().st_mtime,
-            reverse=True)
-        for old in backups[self.BACKUP_KEEP:]:
-            try:
-                old.unlink()
-            except OSError:
-                pass
+        try:
+            backup.prune_backups(db_path, self.BACKUP_KEEP)
+        except OSError as e:
+            # The backup itself succeeded; say so, then surface the prune
+            # failure instead of swallowing it under a success message.
+            self._status(f"Backup created: {backup_path.name}; "
+                         f"pruning failed: {e}")
+            return
         self._status(f"Backup created: {backup_path.name}")
 
     @on(Button.Pressed, "#plan-export")
