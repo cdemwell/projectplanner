@@ -10,6 +10,7 @@ from backend import (
     comments,
     db,
     epics,
+    errors,
     iterations,
     labels,
     plan,
@@ -91,13 +92,169 @@ def test_import_replaces_existing_content(tmp_path):
 
 
 def test_import_missing_table_errors(tmp_path):
-    """A snapshot missing a required table is rejected without touching the DB."""
+    """A snapshot missing its _meta header / schema_version is rejected untouched."""
     dst = tmp_path / "dst.db"
     bad = tmp_path / "bad.json"
     json.dump({"_meta": {"tables": []}}, open(bad, "w"))
     c = db.connect(dst)
-    with pytest.raises(ValueError):
+    with pytest.raises(errors.ValidationError):
         plan.import_from_file(c, str(bad))
     # DB untouched (no members were wiped-and-reinserted)
     assert c.execute("SELECT COUNT(*) FROM member").fetchone()[0] == 1
     c.close()
+
+
+# --------------------------------------------------------------------------- #
+# Untrusted-snapshot validation (story 109)
+# --------------------------------------------------------------------------- #
+
+def _snapshot_with_content(conn):
+    """Seed ``conn`` with a project, epic + story, and export a snapshot dict.
+
+    The story hangs off the epic so the snapshot carries a resolvable epic_id,
+    making a dangling-FK mutation hit the "not in the snapshot" branch.
+    """
+    p = projects.create_project(conn, "backend")
+    e = epics.create_epic(conn, "Auth", project_id=p.id)
+    stories.create_story(conn, "Fix login", project_id=p.id, epic_id=e.id)
+    return plan.export_plan(conn)
+
+
+def test_import_rejects_unsupported_schema_version(conn):
+    """A snapshot from an incompatible format version is refused, DB untouched."""
+    data = _snapshot_with_content(conn)
+    data["_meta"]["schema_version"] = 99
+    with pytest.raises(errors.ValidationError, match="schema_version"):
+        plan.import_plan(conn, data)
+    assert [s.name for s in stories.list_stories(conn)] == ["Fix login"]
+
+
+def test_import_rejects_missing_schema_version(conn):
+    data = _snapshot_with_content(conn)
+    del data["_meta"]["schema_version"]
+    with pytest.raises(errors.ValidationError, match="schema_version"):
+        plan.import_plan(conn, data)
+    assert [s.name for s in stories.list_stories(conn)] == ["Fix login"]
+
+
+def test_import_rejects_missing_meta_header(tmp_path, conn):
+    bad = tmp_path / "nometa.json"
+    bad.write_text(json.dumps({t: [] for t in plan._TABLES}))
+    with pytest.raises(errors.ValidationError, match="_meta"):
+        plan.import_from_file(conn, str(bad))
+
+
+def test_import_missing_table_listed(conn):
+    """A snapshot with a version header but no table bodies is refused."""
+    data = {"_meta": {"schema_version": plan.SNAPSHOT_FORMAT_VERSION}}
+    with pytest.raises(errors.ValidationError, match="missing tables"):
+        plan.import_plan(conn, data)
+
+
+@pytest.mark.parametrize("mutate,fragment", [
+    (lambda d: d["member"][0].__setitem__("mention_name", 123),
+     "mention_name"),
+    (lambda d: d["story"][0].__setitem__("name", None),
+     "NOT NULL"),
+    (lambda d: d["story"][0].__setitem__("story_type", "nonsense"),
+     "story_type"),
+    (lambda d: d["story"][0].__setitem__("epic_id", 999),
+     "not in the snapshot"),
+    (lambda d: d["workflow"][0].__setitem__("default_state_id", 4242),
+     "default_state_id"),
+])
+def test_import_rejects_malformed_values_pre_wipe(conn, mutate, fragment):
+    """Bad values/FKs abort before the wipe: existing rows survive."""
+    data = _snapshot_with_content(conn)
+    mutate(data)
+    before = [s.name for s in stories.list_stories(conn)]
+    with pytest.raises(errors.ValidationError, match=fragment):
+        plan.import_plan(conn, data)
+    assert [s.name for s in stories.list_stories(conn)] == before
+
+
+def test_import_rejects_missing_not_null_column(conn):
+    data = _snapshot_with_content(conn)
+    del data["story"][0]["name"]
+    with pytest.raises(errors.ValidationError, match="NOT NULL"):
+        plan.import_plan(conn, data)
+    assert [s.name for s in stories.list_stories(conn)] == ["Fix login"]
+
+
+def test_import_rejects_non_list_table(conn):
+    data = _snapshot_with_content(conn)
+    data["label"] = {"name": "not a list"}
+    with pytest.raises(errors.ValidationError, match="list of rows"):
+        plan.import_plan(conn, data)
+
+
+def test_import_rejects_non_row_object(conn):
+    data = _snapshot_with_content(conn)
+    data["label"] = ["not a row object"]
+    with pytest.raises(errors.ValidationError, match="row must be an object"):
+        plan.import_plan(conn, data)
+
+
+def test_import_rejects_bad_id_type(conn):
+    data = _snapshot_with_content(conn)
+    data["label"].append({"id": "one", "name": "x"})
+    with pytest.raises(errors.ValidationError, match=r"\bid\b"):
+        plan.import_plan(conn, data)
+
+
+def test_import_per_table_row_cap(conn, monkeypatch):
+    monkeypatch.setattr(plan, "MAX_ROWS_PER_TABLE", 2)
+    data = _snapshot_with_content(conn)
+    with pytest.raises(errors.ValidationError, match="row cap"):
+        plan.import_plan(conn, data)
+
+
+def test_import_total_row_cap(conn, monkeypatch):
+    monkeypatch.setattr(plan, "MAX_SNAPSHOT_ROWS", 3)
+    data = _snapshot_with_content(conn)
+    with pytest.raises(errors.ValidationError, match="row cap"):
+        plan.import_plan(conn, data)
+
+
+def test_import_rejects_non_object_json(tmp_path, conn):
+    bad = tmp_path / "arr.json"
+    bad.write_text("[]")
+    with pytest.raises(errors.ValidationError, match="JSON object"):
+        plan.import_from_file(conn, str(bad))
+
+
+def test_import_rejects_invalid_json(tmp_path, conn):
+    bad = tmp_path / "broken.json"
+    bad.write_text("{not json")
+    with pytest.raises(errors.ValidationError, match="invalid JSON"):
+        plan.import_from_file(conn, str(bad))
+
+
+def test_import_rejects_deeply_nested_json(tmp_path, conn):
+    bad = tmp_path / "deep.json"
+    # 50k nesting is past the json parser's recursion limit but under the
+    # byte cap, so this must be caught as a validation error, not a traceback.
+    bad.write_text("[" * 50_000 + "]" * 50_000)
+    with pytest.raises(errors.ValidationError, match="too deeply"):
+        plan.import_from_file(conn, str(bad))
+
+
+def test_import_rejects_oversized_file(tmp_path, conn, monkeypatch):
+    monkeypatch.setattr(plan, "MAX_SNAPSHOT_BYTES", 16)
+    big = tmp_path / "ok.json"
+    big.write_text(json.dumps({"_meta": {"schema_version": 1}}))
+    with pytest.raises(errors.ValidationError, match="byte cap"):
+        plan.import_from_file(conn, str(big))
+
+
+def test_import_rejects_missing_file(tmp_path, conn):
+    with pytest.raises(errors.ValidationError, match="not found"):
+        plan.import_from_file(conn, str(tmp_path / "nope.json"))
+
+
+def test_import_still_round_trips_valid_snapshot(conn):
+    """The happy path is unchanged: a valid export imports cleanly."""
+    data = _snapshot_with_content(conn)
+    counts = plan.import_plan(conn, data)
+    assert counts["story"] == 1
+    assert [s.name for s in stories.list_stories(conn)] == ["Fix login"]

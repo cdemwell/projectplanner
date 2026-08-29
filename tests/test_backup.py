@@ -1,9 +1,11 @@
+import re
 import sqlite3
 import time
 from pathlib import Path
 
 import pytest
 
+from backend import db, plan, projects, stories
 from cli.commands import run
 
 
@@ -51,3 +53,41 @@ def test_backup_pruning(tmp_path):
     # Only the most recent one should remain
     backups = list(tmp_path.glob("planner.db.*"))
     assert len(backups) == 1
+
+
+def _timestamped_backups(directory: Path, stem: str) -> list[Path]:
+    """Files in ``directory`` named ``<stem>.<14 digits>`` (tool-made backups)."""
+    pat = re.compile(rf"^{re.escape(stem)}\.\d{{14}}$")
+    return sorted(p for p in directory.iterdir() if pat.fullmatch(p.name))
+
+
+def test_plan_import_takes_pre_import_backup(tmp_path):
+    """`plan import` snapshots the database before its destructive replace."""
+    src = tmp_path / "src.db"
+    dst = tmp_path / "planner.db"
+    snap = tmp_path / "snap.json"
+
+    c = db.connect(src)
+    projects.create_project(c, "fresh")
+    stories.create_story(c, "imported story")
+    c.close()
+    plan.export_to_file(db.connect(src), str(snap))
+
+    # dst holds existing content that the import will replace.
+    run(["--db", str(dst), "story", "create", "--name", "old story"])
+
+    rc = run(["--db", str(dst), "plan", "import", "--file", str(snap)])
+    assert rc == 0
+
+    # Exactly one timestamped backup was written, holding the pre-import data.
+    backups = _timestamped_backups(tmp_path, "planner.db")
+    assert len(backups) == 1
+    old = sqlite3.connect(backups[0])
+    names = [r[0] for r in old.execute("SELECT name FROM story")]
+    old.close()
+    assert names == ["old story"]
+
+    # And the live DB now carries the imported content.
+    c = db.connect(dst)
+    assert [s.name for s in stories.list_stories(c)] == ["imported story"]
+    c.close()

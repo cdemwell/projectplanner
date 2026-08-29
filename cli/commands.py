@@ -904,6 +904,35 @@ def h_search(conn, a):
 
 
 # -- plan ----------------------------------------------------------------- #
+def _conn_db_path(conn) -> Path | None:
+    """Return the filesystem path of the connection's main database (or None).
+
+    Args:
+        conn: sqlite3.Connection from db.connect().
+    Returns:
+        Path to the main database file, or None for an in-memory connection.
+    """
+    row = conn.execute("PRAGMA database_list").fetchone()
+    return Path(row[2]) if row and row[2] else None
+
+
+def _backup_db_file(db_path: Path) -> Path:
+    """Copy ``db_path`` to a timestamped sibling file and return its path.
+
+    Single source for the backup naming used by ``--rotate-backup``, ``plan
+    backup``, and the pre-import safety backup.
+
+    Args:
+        db_path: Path to the SQLite database file.
+    Returns:
+        Path of the newly written backup (``<name>.<YYYYMMDDHHMMSS>``).
+    """
+    timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+    backup_path = db_path.with_suffix(f"{db_path.suffix}.{timestamp}")
+    shutil.copy2(db_path, backup_path)
+    return backup_path
+
+
 def h_plan_export(conn, a):
     """Handle ``plan export``; write a JSON snapshot to a file and return counts."""
     data = plan.export_to_file(conn, a.file)
@@ -912,9 +941,30 @@ def h_plan_export(conn, a):
 
 
 def h_plan_import(conn, a):
-    """Handle ``plan import``; restore a JSON snapshot and return counts."""
+    """Handle ``plan import``; back up, restore a JSON snapshot, return counts.
+
+    Import is a destructive replace-all, so a timestamped backup of the current
+    database is written first, alongside the DB (skipped for ``--dry-run``,
+    whose target is a throwaway copy). The result reports the backup path so an
+    agent or user can find it if the import went wrong.
+
+    Args:
+        conn: sqlite3.Connection from db.connect().
+        a: argparse.Namespace with ``file`` (snapshot path) and ``dry_run``.
+    Returns:
+        dict with the snapshot path, the pre-import backup path (when taken),
+        and the per-table import counts.
+    """
+    backup_path = None
+    if not getattr(a, "dry_run", False):
+        db_path = _conn_db_path(conn)
+        if db_path is not None:
+            backup_path = _backup_db_file(db_path)
     counts = plan.import_from_file(conn, a.file)
-    return {"file": a.file, "imported": counts}
+    result: dict[str, Any] = {"file": a.file, "imported": counts}
+    if backup_path is not None:
+        result["backup"] = str(backup_path)
+    return result
 
 
 def h_plan_backup(conn, a):
