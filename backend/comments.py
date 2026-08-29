@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 
-from . import _util, db, stories
+from . import _util, db, errors, stories
 from .models import StoryComment
 
 EDITABLE = {"text"}
@@ -61,7 +61,11 @@ def create_comment(conn: sqlite3.Connection, story_id: int, text: str, *,
     """
     stories.get_story(conn, story_id)
     if parent_id is not None:
-        get_comment(conn, parent_id)  # ensure parent comment exists
+        parent = get_comment(conn, parent_id)  # ensure parent comment exists
+        if parent.story_id != story_id:
+            raise errors.ValidationError(
+                f"parent comment {parent_id} belongs to story {parent.story_id}, "
+                f"not story {story_id}")
     ts = db.now()
     with db.tx_write(conn):
         new_id = _util.insert(conn, "story_comment", {

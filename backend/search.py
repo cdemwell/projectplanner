@@ -12,6 +12,8 @@ from __future__ import annotations
 import sqlite3
 from dataclasses import dataclass
 
+from . import _validate, errors
+
 # Maps an entity name -> (fts table, source table, display label, mirrored cols).
 # The first mirrored column is used as the result ``name``; a second (if any) as
 # ``description``. Comments and tasks have a single indexed column.
@@ -74,12 +76,16 @@ def search(conn: sqlite3.Connection, query: str, *, entity: str | None = None,
     Returns:
         list[SearchResult] — results ranked by relevance (optionally paged).
     Raises:
-        ValueError: if an unknown entity is provided or the MATCH syntax is invalid.
+        ValidationError: if an unknown entity is provided, the query is empty
+            or all whitespace, or the MATCH syntax is invalid.
     """
+    if not query or not query.strip():
+        raise errors.ValidationError("search query must not be empty")
+    _validate.check_limit_offset(limit, offset, resource="search")
     targets: list[tuple[str, str, str, tuple[str, ...]]]
     if entity is not None:
         if entity not in _ENTITIES:
-            raise ValueError(
+            raise errors.ValidationError(
                 f"unknown entity {entity!r}; choose from {sorted(_ENTITIES)}")
         targets = [_ENTITIES[entity]]
     else:
@@ -95,7 +101,7 @@ def search(conn: sqlite3.Connection, query: str, *, entity: str | None = None,
             rows = conn.execute(sql, (query,)).fetchall()
         except sqlite3.OperationalError:
             # Bad MATCH syntax (e.g. bare ':') — surface a clear error.
-            raise ValueError(f"invalid search query {query!r}")
+            raise errors.ValidationError(f"invalid search query {query!r}")
         for r in rows:
             name = r[1] or ""
             desc = (r[2] or "") if len(cols) > 1 else ""

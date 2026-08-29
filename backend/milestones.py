@@ -5,11 +5,16 @@ from __future__ import annotations
 
 import sqlite3
 
-from . import _util, db, errors
+from . import _util, _validate, db, errors
 from .models import Milestone
 
 STATES = ("planned", "in_progress", "done")
 EDITABLE = {"name", "description", "state"}
+
+
+def _completed_at(state: str) -> str | None:
+    """``completed_at`` for a given state (shared by create and update)."""
+    return db.now() if state == "done" else None
 
 
 def list_milestones(conn: sqlite3.Connection, *, state: str | None = None,
@@ -62,10 +67,11 @@ def create_milestone(conn: sqlite3.Connection, name: str, *, description: str = 
     """
     if state not in STATES:
         raise errors.ValidationError(f"unknown milestone state {state!r}")
+    _validate.require_name(name)
     with db.tx_write(conn):
         new_id = _util.insert(conn, "milestone", {
             "name": name, "description": description, "state": state,
-            "created_at": db.now(), "completed_at": None,
+            "created_at": db.now(), "completed_at": _completed_at(state),
         })
     return get_milestone(conn, new_id)
 
@@ -88,10 +94,12 @@ def update_milestone(conn: sqlite3.Connection, id, **fields) -> Milestone:
     """
     get_milestone(conn, id)
     fields = {k: v for k, v in fields.items() if k in EDITABLE}
+    if "name" in fields:
+        _validate.require_name(fields["name"])
     if "state" in fields:
         if fields["state"] not in STATES:
             raise errors.ValidationError(f"unknown milestone state {fields['state']!r}")
-        fields["completed_at"] = db.now() if fields["state"] == "done" else None
+        fields["completed_at"] = _completed_at(fields["state"])
     if fields:
         with db.tx_write(conn):
             _util.update(conn, "milestone", id, fields)

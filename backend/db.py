@@ -16,7 +16,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 # Schema version this code understands. Bump when adding a migration in MIGRATIONS.
-CURRENT_SCHEMA_VERSION = 4
+CURRENT_SCHEMA_VERSION = 5
 
 # Default DB location: next to main.py (repo root).
 DEFAULT_DB_PATH = Path(__file__).resolve().parent.parent / "planner.db"
@@ -394,11 +394,94 @@ _SCHEMA_V4 = [
     "ALTER TABLE workflow_state ADD COLUMN description TEXT NOT NULL DEFAULT ''",
 ]
 
+# v5: enforce case-insensitive name uniqueness at the database level.
+#
+# The name resolvers (CLI `resolve_*`) match case-insensitively, so a DB that
+# holds 'Bug' and 'bug' as separate labels (or two states named 'todo' in one
+# workflow) contains rows the resolver can never disambiguate. Both tables get
+# a collation-scoped UNIQUE index rather than a column-level COLLATE NOCASE,
+# which enforces the same write-time guarantee without rebuilding either table
+# (a DROP-based rebuild would fire ON DELETE SET NULL on story.workflow_state_id
+# and workflow.default_state_id under foreign_keys=ON).
+#
+# Any pre-existing case-variant collisions are merged first (deterministic
+# survivor: lowest id — its spelling wins; references are repointed), so the
+# index creation cannot fail on a dirty database. On a database created by v1
+# the dedup statements are no-ops.
+_SCHEMA_V5 = [
+    # --- label: merge case-variant duplicate names -------------------------
+    # Repoint story_label rows onto the survivor id (ignoring ones that would
+    # duplicate that (story, label) pair).
+    """
+    UPDATE OR IGNORE story_label
+    SET label_id = (
+        SELECT MIN(k.id) FROM label k
+        WHERE lower(k.name) = lower(
+            (SELECT cur.name FROM label cur WHERE cur.id = story_label.label_id))
+    )
+    WHERE label_id <> (
+        SELECT MIN(k.id) FROM label k
+        WHERE lower(k.name) = lower(
+            (SELECT cur.name FROM label cur WHERE cur.id = story_label.label_id))
+    )
+    """,
+    "DELETE FROM story_label "
+    "WHERE label_id NOT IN (SELECT MIN(id) FROM label GROUP BY lower(name))",
+    "DELETE FROM label "
+    "WHERE id NOT IN (SELECT MIN(id) FROM label GROUP BY lower(name))",
+    # --- workflow_state: merge case-variant duplicate names per workflow ----
+    """
+    UPDATE story
+    SET workflow_state_id = (
+        SELECT MIN(k.id) FROM workflow_state k
+        WHERE k.workflow_id = (SELECT ws.workflow_id FROM workflow_state ws
+                               WHERE ws.id = story.workflow_state_id)
+          AND lower(k.name) = lower(
+              (SELECT ws2.name FROM workflow_state ws2 WHERE ws2.id = story.workflow_state_id))
+    )
+    WHERE workflow_state_id IS NOT NULL
+      AND workflow_state_id <> (
+        SELECT MIN(k.id) FROM workflow_state k
+        WHERE k.workflow_id = (SELECT ws.workflow_id FROM workflow_state ws
+                               WHERE ws.id = story.workflow_state_id)
+          AND lower(k.name) = lower(
+              (SELECT ws2.name FROM workflow_state ws2 WHERE ws2.id = story.workflow_state_id))
+      )
+    """,
+    """
+    UPDATE workflow
+    SET default_state_id = (
+        SELECT MIN(k.id) FROM workflow_state k
+        WHERE k.workflow_id = workflow.id
+          AND lower(k.name) = lower(
+              (SELECT ws.name FROM workflow_state ws WHERE ws.id = workflow.default_state_id))
+    )
+    WHERE default_state_id IS NOT NULL
+      AND default_state_id <> (
+        SELECT MIN(k.id) FROM workflow_state k
+        WHERE k.workflow_id = workflow.id
+          AND lower(k.name) = lower(
+              (SELECT ws.name FROM workflow_state ws WHERE ws.id = workflow.default_state_id))
+      )
+    """,
+    "DELETE FROM workflow_state "
+    "WHERE id NOT IN (SELECT MIN(id) FROM workflow_state "
+    "GROUP BY workflow_id, lower(name))",
+    # --- the unique constraints --------------------------------------------
+    "CREATE UNIQUE INDEX IF NOT EXISTS label_name_ci ON label (name COLLATE NOCASE)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS workflow_state_wf_name_ci "
+    "ON workflow_state (workflow_id, name COLLATE NOCASE)",
+    # Re-sync the label full-text index after the merge (triggers keep it
+    # current, this is belt-and-braces for hand-edited databases).
+    "INSERT INTO label_fts(label_fts) VALUES ('rebuild')",
+]
+
 _MIGRATIONS = [
     (1, _SCHEMA_V1),
     (2, _SCHEMA_V2),
     (3, _SCHEMA_V3),
     (4, _SCHEMA_V4),
+    (5, _SCHEMA_V5),
 ]
 
 

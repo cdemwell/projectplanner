@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 
-from . import _util, db
+from . import _util, _validate, db
 from .models import Label
 
 EDITABLE = {"name", "color", "description"}
@@ -51,6 +51,7 @@ def create_label(conn: sqlite3.Connection, name: str, *, color: str = "",
     Returns:
         The created Label.
     """
+    _validate.require_name(name)
     with db.tx_write(conn):
         new_id = _util.insert(conn, "label", {
             "name": name, "color": color, "description": description,
@@ -73,6 +74,8 @@ def update_label(conn: sqlite3.Connection, id, **fields) -> Label:
     """
     get_label(conn, id)
     fields = {k: v for k, v in fields.items() if k in EDITABLE}
+    if "name" in fields:
+        _validate.require_name(fields["name"])
     if fields:
         with db.tx_write(conn):
             _util.update(conn, "label", id, fields)

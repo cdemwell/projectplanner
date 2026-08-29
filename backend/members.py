@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 
-from . import _util, db
+from . import _util, _validate, db
 from .models import Member
 
 EDITABLE = {"name", "mention_name"}
@@ -51,6 +51,7 @@ def create_member(conn: sqlite3.Connection, name: str, *, mention_name: str | No
     Returns:
         The created Member.
     """
+    _validate.require_name(name)
     mention_name = (mention_name or name).strip().lower().replace(" ", "_")
     with db.tx_write(conn):
         new_id = _util.insert(conn, "member", {
@@ -75,6 +76,8 @@ def update_member(conn: sqlite3.Connection, id, **fields) -> Member:
     """
     get_member(conn, id)  # raises NotFound if absent
     fields = {k: v for k, v in fields.items() if k in EDITABLE}
+    if "name" in fields:
+        _validate.require_name(fields["name"])
     if fields:
         with db.tx_write(conn):
             _util.update(conn, "member", id, fields)

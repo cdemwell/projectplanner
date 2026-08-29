@@ -54,8 +54,17 @@ def test_fts_tables_and_triggers_exist(conn):
     assert n_triggers == 24
 
 
-def test_schema_version_is_4(conn):
-    assert conn.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == 4
+def test_schema_version_matches_current(conn):
+    assert conn.execute(
+        "SELECT MAX(version) FROM schema_version").fetchone()[0] == db.CURRENT_SCHEMA_VERSION
+
+
+def test_v5_migration_adds_case_insensitive_unique_indexes(conn):
+    """The v5 migration must add the CI-unique indexes for label and state names."""
+    idx = {r["name"] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='index'")}
+    assert "label_name_ci" in idx
+    assert "workflow_state_wf_name_ci" in idx
 
 
 def test_v4_migration_adds_description_column(conn):
@@ -67,12 +76,13 @@ def test_v4_migration_adds_description_column(conn):
         assert r["description"] == ""
 
 
-def test_v4_migration_idempotent(db_path):
-    """Reconnecting to an already-migrated v4 DB must not re-run ALTER TABLE."""
+def test_migrations_idempotent(db_path):
+    """Reconnecting to an already-migrated DB must be a no-op."""
     db.connect(db_path).close()
-    db.connect(db_path).close()  # second connect: schema_version already 4
+    db.connect(db_path).close()  # second connect: schema_version already current
     c = db.connect(db_path)
-    assert c.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == 4
+    assert c.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == \
+        db.CURRENT_SCHEMA_VERSION
     c.close()
 
 

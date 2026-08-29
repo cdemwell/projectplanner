@@ -5,11 +5,16 @@ from __future__ import annotations
 
 import sqlite3
 
-from . import _util, db, errors
+from . import _util, _validate, db, errors
 from .models import Epic
 
 STATES = ("planned", "in_progress", "done")
 EDITABLE = {"name", "description", "state", "milestone_id", "project_id"}
+
+
+def _completed_at(state: str) -> str | None:
+    """``completed_at`` for a given state (shared by create and update)."""
+    return db.now() if state == "done" else None
 
 
 def list_epics(conn: sqlite3.Connection, *, project_id=None, milestone_id=None,
@@ -67,11 +72,12 @@ def create_epic(conn: sqlite3.Connection, name: str, *, description: str = "",
     """
     if state not in STATES:
         raise errors.ValidationError(f"unknown epic state {state!r}")
+    _validate.require_name(name)
     with db.tx_write(conn):
         new_id = _util.insert(conn, "epic", {
             "name": name, "description": description, "state": state,
             "milestone_id": milestone_id, "project_id": project_id,
-            "created_at": db.now(), "completed_at": None,
+            "created_at": db.now(), "completed_at": _completed_at(state),
         })
     return get_epic(conn, new_id)
 
@@ -94,11 +100,13 @@ def update_epic(conn: sqlite3.Connection, id, **fields) -> Epic:
     """
     epic = get_epic(conn, id)
     fields = {k: v for k, v in fields.items() if k in EDITABLE}
+    if "name" in fields:
+        _validate.require_name(fields["name"])
     # Automate completed_at when state changes to/from 'done'.
     if "state" in fields:
         if fields["state"] not in STATES:
             raise errors.ValidationError(f"unknown epic state {fields['state']!r}")
-        fields["completed_at"] = db.now() if fields["state"] == "done" else None
+        fields["completed_at"] = _completed_at(fields["state"])
     elif epic.state != "done" and not fields:
         pass
     if fields:

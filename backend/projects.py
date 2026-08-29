@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 
-from . import _util, db
+from . import _util, _validate, db
 from .models import Project, Story
 
 EDITABLE = {"name", "description", "abbreviation", "color", "archived"}
@@ -58,6 +58,7 @@ def create_project(conn: sqlite3.Connection, name: str, *, description: str = ""
     Invariants:
         archived is initialized to 0.
     """
+    _validate.require_name(name)
     with db.tx_write(conn):
         new_id = _util.insert(conn, "project", {
             "name": name, "description": description, "abbreviation": abbreviation,
@@ -80,6 +81,8 @@ def update_project(conn: sqlite3.Connection, id, **fields) -> Project:
     """
     get_project(conn, id)
     fields = {k: v for k, v in fields.items() if k in EDITABLE}
+    if "name" in fields:
+        _validate.require_name(fields["name"])
     if fields:
         with db.tx_write(conn):
             _util.update(conn, "project", id, fields)

@@ -4,11 +4,27 @@ from __future__ import annotations
 
 import sqlite3
 
-from . import _util, db, errors
+from . import _util, _validate, db, errors
 from .models import Iteration
 
 STATUSES = ("planned", "active", "done")
 EDITABLE = {"name", "description", "status", "start_date", "end_date"}
+
+
+def _check_dates(start_date, end_date) -> None:
+    """Validate both dates as ISO and reject start > end.
+
+    Args:
+        start_date: str | None — iteration start (ISO date).
+        end_date: str | None — iteration end (ISO date).
+    Raises:
+        ValidationError: on a malformed date or an inverted range.
+    """
+    _validate.require_iso_date(start_date, "start_date")
+    _validate.require_iso_date(end_date, "end_date")
+    if start_date and end_date and start_date > end_date:
+        raise errors.ValidationError(
+            f"start_date {start_date!r} is after end_date {end_date!r}")
 
 
 def list_iterations(conn: sqlite3.Connection, *, status: str | None = None,
@@ -64,6 +80,8 @@ def create_iteration(conn: sqlite3.Connection, name: str, *, description: str = 
     """
     if status not in STATUSES:
         raise errors.ValidationError(f"unknown iteration status {status!r}")
+    _validate.require_name(name)
+    _check_dates(start_date, end_date)
     with db.tx_write(conn):
         new_id = _util.insert(conn, "iteration", {
             "name": name, "description": description, "status": status,
@@ -85,10 +103,16 @@ def update_iteration(conn: sqlite3.Connection, id, **fields) -> Iteration:
         NotFound: if the iteration does not exist.
         ValidationError: if the provided status is unknown.
     """
-    get_iteration(conn, id)
+    iteration = get_iteration(conn, id)
     fields = {k: v for k, v in fields.items() if k in EDITABLE}
     if "status" in fields and fields["status"] not in STATUSES:
         raise errors.ValidationError(f"unknown iteration status {fields['status']!r}")
+    # Validate the *effective* range: a new start must not exceed the existing
+    # end, and vice versa.
+    _check_dates(fields.get("start_date", iteration.start_date),
+                 fields.get("end_date", iteration.end_date))
+    if "name" in fields:
+        _validate.require_name(fields["name"])
     if fields:
         with db.tx_write(conn):
             _util.update(conn, "iteration", id, fields)

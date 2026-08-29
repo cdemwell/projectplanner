@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import sqlite3
 
-from . import _util, db, errors
+from . import _util, _validate, db, errors
 from .models import Workflow, WorkflowState
 
 STATE_TYPES = ("unstarted", "started", "done")
@@ -54,6 +54,7 @@ def create_workflow(conn: sqlite3.Connection, name: str, *,
     Raises:
         ValidationError: if a state has an unknown type.
     """
+    _validate.require_name(name)
     with db.tx_write(conn):
         new_id = _util.insert(conn, "workflow", {"name": name, "default_state_id": None,
                                                  "created_at": db.now()})
@@ -88,6 +89,8 @@ def update_workflow(conn: sqlite3.Connection, id, **fields) -> Workflow:
     """
     get_workflow(conn, id)
     fields = {k: v for k, v in fields.items() if k in _WORKFLOW_EDITABLE}
+    if "name" in fields:
+        _validate.require_name(fields["name"])
     if fields:
         with db.tx_write(conn):
             _util.update(conn, "workflow", id, fields)
@@ -169,6 +172,7 @@ def create_workflow_state(conn: sqlite3.Connection, workflow_id, name: str, type
     """
     if type not in STATE_TYPES:
         raise errors.ValidationError(f"unknown state type {type!r}")
+    _validate.require_name(name)
     get_workflow(conn, workflow_id)  # ensure parent exists
     if position is None:
         maxpos = conn.execute(

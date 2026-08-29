@@ -116,16 +116,24 @@ def import_plan(conn: sqlite3.Connection, data: dict[str, Any]) -> dict[str, int
         workflow_defaults: list[tuple[int, int | None]] = []  # (new_id, old_default)
         for table, (cols, fk_map) in _TABLES.items():
             n = 0
+            # A self-referential FK (e.g. story_comment.parent_id) cannot rely
+            # on row order: a child row may list its parent ahead of it. Those
+            # columns are deferred — the row is inserted with the FK unset, and
+            # it is filled in once the whole table is staged.
+            self_fk_cols = [c for c in cols if fk_map.get(c) == table]
+            deferred_self_fk: list[tuple[int, str, int]] = []  # (new_id, col, old_val)
             for row in data[table]:
                 values: dict[str, Any] = {}
                 for c in cols:
                     v = row.get(c)
-                    if v is not None and c in fk_map:
+                    if v is not None and c in fk_map and c not in self_fk_cols:
                         ref_table = fk_map[c]
                         if v not in id_map[ref_table]:
                             raise KeyError(f"FK remap failed: table={table}, col={c}, ref_table={ref_table}, old_id={v}, available_ids={list(id_map[ref_table].keys())}")
                         v = id_map[ref_table][v]  # remap FK to new id
                     values[c] = v
+                deferred_rows: dict[str, int | None] = {
+                    c: values.pop(c) for c in self_fk_cols}
                 if table == "workflow":
                     # default_state_id points at a state not created yet.
                     new_id = _util.insert(conn, table, values)
@@ -136,7 +144,18 @@ def import_plan(conn: sqlite3.Connection, data: dict[str, Any]) -> dict[str, int
                     new_id = _util.insert(conn, table, values)
                     if "id" in row:
                         id_map[table][row["id"]] = new_id
+                for c, old in deferred_rows.items():
+                    if old is not None:
+                        deferred_self_fk.append((new_id, c, old))
                 n += 1
+            # Fill in the deferred self-referential links (parents now mapped).
+            for new_id, col, old in deferred_self_fk:
+                ref_table = fk_map[col]
+                if old not in id_map[ref_table]:
+                    raise KeyError(f"FK remap failed: table={table}, col={col}, "
+                                   f"ref_table={ref_table}, old_id={old}")
+                conn.execute(f'UPDATE "{table}" SET {col} = ? WHERE id = ?',
+                             (id_map[ref_table][old], new_id))
             counts[table] = n
         # 3) Point workflows at their (remapped) default state.
         for new_wf_id, old_default in workflow_defaults:

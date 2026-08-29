@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from backend import epics, labels, projects, search, stories
+from backend import epics, errors, labels, projects, search, stories
 
 
 def test_search_finds_by_name_and_description(conn):
@@ -60,12 +60,13 @@ def test_search_boolean_and_prefix(conn):
 
 
 def test_search_unknown_entity(conn):
-    with pytest.raises(ValueError):
+    # Backend errors are PlannerErrors (errors.ValidationError), not bare ValueError.
+    with pytest.raises(errors.ValidationError):
         search.search(conn, "x", entity="bogus")
 
 
 def test_search_bad_query(conn):
-    with pytest.raises(ValueError):
+    with pytest.raises(errors.ValidationError):
         search.search(conn, "not a valid : query")
 
 

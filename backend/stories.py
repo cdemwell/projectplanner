@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import sqlite3
 
-from . import _util, db, errors, workflows
+from . import _util, _validate, db, errors, workflows
 from .models import Label, Member, Story, StoryDetail, Task, WorkflowState
 
 STORY_TYPES = ("bug", "feature", "chore")
@@ -18,6 +18,16 @@ EDITABLE = {
     "iteration_id", "project_id", "group_id", "requested_by_id", "deadline",
     "position",
 }
+
+
+def _completed_at_for_state(conn: sqlite3.Connection, workflow_state_id) -> str | None:
+    """``completed_at`` for a story in a given workflow state (shared helper).
+
+    Stamps ``now()`` for done-typed states, ``None`` otherwise — the single
+    derivation used by create_story, update_story, and move_story_state.
+    """
+    state = workflows.get_workflow_state(conn, workflow_state_id)
+    return db.now() if state.type == "done" else None
 
 
 def list_stories(conn: sqlite3.Connection, *, project_id=None, epic_id=None,
@@ -81,14 +91,16 @@ def list_stories(conn: sqlite3.Connection, *, project_id=None, epic_id=None,
                      "WHERE e.id = s.epic_id AND e.milestone_id = ?)")
         params.append(milestone_id)
     if q is not None:
-        where.append("(s.name LIKE ? OR s.description LIKE ?)")
-        params += [f"%{q}%", f"%{q}%"]
+        q_esc = _validate.escape_like(q)
+        where.append("(s.name LIKE ? ESCAPE '\\' OR s.description LIKE ? ESCAPE '\\')")
+        params += [f"%{q_esc}%", f"%{q_esc}%"]
     if not include_completed:
         where.append("s.completed_at IS NULL")
     sql = "SELECT s.* FROM story s"
     if where:
         sql += " WHERE " + " AND ".join(where)
     sql += " ORDER BY s.position, s.id"
+    _validate.check_limit_offset(limit, offset, resource="story")
     if limit is not None or offset is not None:
         sql += " LIMIT ? OFFSET ?"
         params += [limit if limit is not None else -1,
@@ -198,6 +210,8 @@ def create_story(conn: sqlite3.Connection, name: str, *, description: str = "",
     """
     if story_type not in STORY_TYPES:
         raise errors.ValidationError(f"unknown story_type {story_type!r}")
+    _validate.require_name(name)
+    _validate.require_iso_date(deadline, "deadline")
     ts = db.now()
     if position is None:
         position = _next_position(conn, project_id)
@@ -206,6 +220,9 @@ def create_story(conn: sqlite3.Connection, name: str, *, description: str = "",
         wf = conn.execute("SELECT default_state_id FROM workflow ORDER BY id LIMIT 1").fetchone()
         if wf is not None:
             workflow_state_id = wf["default_state_id"]
+    # Automate completed_at: a story born in a done-typed state is complete.
+    completed_at = _completed_at_for_state(conn, workflow_state_id) \
+        if workflow_state_id is not None else None
     with db.tx_write(conn):
         new_id = _util.insert(conn, "story", {
             "name": name, "description": description, "story_type": story_type,
@@ -213,6 +230,7 @@ def create_story(conn: sqlite3.Connection, name: str, *, description: str = "",
             "iteration_id": iteration_id, "project_id": project_id, "group_id": group_id,
             "requested_by_id": requested_by_id, "deadline": deadline,
             "position": position, "created_at": ts, "updated_at": ts,
+            "completed_at": completed_at,
         })
         for mid in owner_ids or []:
             _util.insert(conn, "story_owner", {"story_id": new_id, "member_id": mid})
@@ -238,6 +256,14 @@ def update_story(conn: sqlite3.Connection, id, **fields) -> Story:
     """
     get_story(conn, id)  # raises NotFound if absent
     fields = {k: v for k, v in fields.items() if k in EDITABLE}
+    if "name" in fields:
+        _validate.require_name(fields["name"])
+    if "deadline" in fields:
+        _validate.require_iso_date(fields["deadline"], "deadline")
+    # Automate completed_at when the state is changed directly here (the same
+    # invariant move_story_state enforces).
+    if "workflow_state_id" in fields and fields["workflow_state_id"] is not None:
+        fields["completed_at"] = _completed_at_for_state(conn, fields["workflow_state_id"])
     if fields:
         fields["updated_at"] = db.now()
         with db.tx_write(conn):
@@ -263,10 +289,10 @@ def move_story_state(conn: sqlite3.Connection, id, new_state_id) -> Story:
         completed_at is stamped with the current time when moving into a
         'done' state and cleared otherwise.
     """
-    state = workflows.get_workflow_state(conn, new_state_id)
+    workflows.get_workflow_state(conn, new_state_id)  # raises NotFound if absent
     with db.tx_write(conn):
         fields = {"workflow_state_id": new_state_id, "updated_at": db.now()}
-        fields["completed_at"] = db.now() if state.type == "done" else None
+        fields["completed_at"] = _completed_at_for_state(conn, new_state_id)
         if not _util.update(conn, "story", id, fields):
             raise errors.NotFound("story", id)
     return get_story(conn, id)

@@ -101,3 +101,94 @@ def test_import_missing_table_errors(tmp_path):
     # DB untouched (no members were wiped-and-reinserted)
     assert c.execute("SELECT COUNT(*) FROM member").fetchone()[0] == 1
     c.close()
+
+
+def _threaded_snapshot(src) -> dict:
+    """Export a snapshot with a threaded comment (child -> parent), including
+    tasks, owners, labels, and a story link so cross-FK paths are exercised."""
+    c = db.connect(src)
+    p = projects.create_project(c, "backend")
+    s1 = stories.create_story(c, "Fix login", project_id=p.id)
+    s2 = stories.create_story(c, "Add 2FA", project_id=p.id)
+    parent = comments.create_comment(c, s1.id, "root", author_id=1)
+    comments.create_comment(c, s1.id, "reply", author_id=1, parent_id=parent.id)
+    comments.create_comment(c, s2.id, "on other story", author_id=1)
+    story_links.create_link(c, s1.id, "blocks", s2.id)
+    data = plan.export_plan(c)
+    c.close()
+    return data
+
+
+def _thread_parent_links(conn) -> dict[int, int]:
+    """Map each non-root comment id to its parent id in a database."""
+    return {
+        r["id"]: r["parent_id"]
+        for r in conn.execute("SELECT id, parent_id FROM story_comment WHERE parent_id IS NOT NULL")
+    }
+
+
+def test_import_story_comment_child_before_parent(tmp_path):
+    """A snapshot whose threaded comments are listed child-first must import,
+    not abort with an FK-remap failure (bug 100)."""
+    src, dst = tmp_path / "src.db", tmp_path / "dst.db"
+    data = _threaded_snapshot(src)
+    data["story_comment"] = list(reversed(data["story_comment"]))  # child before parent
+    c2 = db.connect(dst)
+    counts = plan.import_plan(c2, data)
+    assert counts["story_comment"] == 3
+    # Every parent link survives the remap and points at a real row.
+    by_new_id = {r["id"] for r in c2.execute("SELECT id FROM story_comment")}
+    for child, parent in _thread_parent_links(c2).items():
+        assert parent in by_new_id
+    c2.close()
+
+
+def test_import_is_order_invariant_within_tables(tmp_path):
+    """Import must not depend on row order within any table.
+
+    Shuffles every table's row list (deterministic seeds, several rounds) and
+    asserts import succeeds with threading intact — covering self-FKs and
+    any future intra-table ordering assumption.
+    """
+    import random
+
+    src = tmp_path / "src.db"
+    data = _threaded_snapshot(src)
+    old_parents = set(_thread_parent_links(db.connect(src)))
+    assert old_parents  # the threaded fixture above
+
+    for round_number in range(5):
+        shuffled = {"_meta": data["_meta"]}
+        rng = random.Random(round_number)
+        for table in plan._TABLES:
+            rows = list(data[table])
+            rng.shuffle(rows)
+            shuffled[table] = rows
+        target = tmp_path / f"dst-round-{round_number}.db"
+        c2 = db.connect(target)
+        counts = plan.import_plan(c2, shuffled)
+        assert counts["story_comment"] == 3
+        # Same shape of threaded links, all pointing inside the new table.
+        links = _thread_parent_links(c2)
+        assert len(links) == len(old_parents)
+        live_ids = {r["id"] for r in c2.execute("SELECT id FROM story_comment")}
+        for parent in links.values():
+            assert parent in live_ids
+        c2.close()
+
+
+def test_import_self_fk_missing_parent_fails_cleanly(tmp_path):
+    """A comment referencing a parent id that isn't in the snapshot errors
+    (not a silent mis-link) and leaves the target DB unchanged."""
+    src, dst = tmp_path / "src.db", tmp_path / "dst.db"
+    data = _threaded_snapshot(src)
+    for row in data["story_comment"]:
+        if row["parent_id"] is not None:
+            row["parent_id"] = 4242  # dangling: no such old id anywhere
+    c2 = db.connect(dst)
+    with pytest.raises(KeyError):
+        plan.import_plan(c2, data)
+    # Rolled back: the destination still has its seeded content only.
+    assert c2.execute("SELECT COUNT(*) FROM story_comment").fetchone()[0] == 0
+    assert c2.execute("SELECT COUNT(*) FROM member").fetchone()[0] == 1
+    c2.close()

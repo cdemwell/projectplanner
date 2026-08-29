@@ -33,7 +33,7 @@ def get_fresh_conn():
 
 
 @settings(max_examples=50)
-@given(st.text(min_size=1))
+@given(st.text(min_size=1).filter(lambda s: s.strip()))  # blank names are rejected
 def test_prop_completed_at_automation(name):
     """Verify that move_story_state handles completed_at based on state type."""
     with get_fresh_conn() as conn:
@@ -112,7 +112,7 @@ def test_prop_story_link_uniqueness(s_idx, o_idx, verb):
 
 
 @settings(max_examples=50)
-@given(st.text(min_size=1))
+@given(st.text(min_size=1).filter(lambda s: s.strip()))  # blank names are rejected
 def test_prop_delete_cascade(name):
     """Verify that deleting a story removes all child entities (tasks, comments, links, etc.)."""
     with get_fresh_conn() as conn:

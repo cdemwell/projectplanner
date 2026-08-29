@@ -91,6 +91,11 @@ def update_task(conn: sqlite3.Connection, id, **fields) -> Task:
     """
     get_task(conn, id)
     fields = {k: v for k, v in fields.items() if k in EDITABLE}
+    # Automate completed_at whenever completion is toggled through here,
+    # matching complete_task (same invariant, one derivation).
+    if "complete" in fields:
+        fields["complete"] = 1 if fields["complete"] else 0
+        fields["completed_at"] = db.now() if fields["complete"] else None
     if fields:
         with db.tx_write(conn):
             _util.update(conn, "task", id, fields)
@@ -100,8 +105,8 @@ def update_task(conn: sqlite3.Connection, id, **fields) -> Task:
 def complete_task(conn: sqlite3.Connection, id, complete: bool = True) -> Task:
     """Toggle a task's completion, stamping ``completed_at`` accordingly.
 
-    Note: This function updates ``completed_at`` directly because it is not
-    included in update_task's EDITABLE whitelist.
+    Thin wrapper over update_task, which derives ``completed_at`` from
+    ``complete`` (single derivation shared by both entry points).
 
     Args:
         conn: sqlite3.Connection from db.connect().
@@ -114,13 +119,7 @@ def complete_task(conn: sqlite3.Connection, id, complete: bool = True) -> Task:
     Invariants:
         completed_at is set to now() if complete is True, else cleared (NULL).
     """
-    get_task(conn, id)  # raises NotFound
-    with db.tx_write(conn):
-        _util.update(conn, "task", id, {
-            "complete": 1 if complete else 0,
-            "completed_at": db.now() if complete else None,
-        })
-    return get_task(conn, id)
+    return update_task(conn, id, complete=complete)
 
 
 def delete_task(conn: sqlite3.Connection, id) -> None:

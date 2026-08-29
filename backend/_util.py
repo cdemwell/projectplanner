@@ -69,6 +69,8 @@ def list_rows(conn, model, table: str, *, where: str | None = None,
     Returns:
         list: A list of mapped dataclass instances.
     """
+    from . import _validate
+    _validate.check_limit_offset(limit, offset, resource=table)
     sql = f"SELECT * FROM {_q(table)}"
     if where:
         sql += f" WHERE {where}"
