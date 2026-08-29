@@ -1420,8 +1420,11 @@ def run(argv: list[str] | None = None) -> int:
                 shutil.copy2(db_path, tmp_path)
 
     conn_path = tmp_path if is_dry_run else db_path
-    conn = db.connect(conn_path)
+    conn = None
     try:
+        # Inside the try: connect() refuses non-planner --db targets with a
+        # PlannerError, which must reach the user as `error: ...`, not a traceback.
+        conn = db.connect(conn_path)
         value = args.func(conn, args)
         # Always use emit for consistent format handling (--json is deprecated alias for --format json)
         # The custom formatter is passed to emit for text mode
@@ -1433,7 +1436,8 @@ def run(argv: list[str] | None = None) -> int:
         print(f"error: {e}", file=sys.stderr)
         return 1
     finally:
-        conn.close()
+        if conn is not None:
+            conn.close()
         if tmp_path:
             try:
                 os.unlink(tmp_path)
