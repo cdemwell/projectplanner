@@ -385,7 +385,7 @@ def test_import_rejects_cross_workflow_default_state(conn):
         plan.import_plan(conn, data)
 
 
-def test_import_rejects_id_iless_cross_workflow_default_state(conn):
+def test_import_rejects_idless_cross_workflow_default_state(conn):
     """The ownership check must not skip id-less workflow rows."""
     data = _snapshot_with_content(conn)
     state_id = data["workflow_state"][0]["id"]
