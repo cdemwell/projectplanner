@@ -68,10 +68,15 @@ def _read_db_state(path: Path) -> tuple[set[str], int | None]:
         tables = {r[0] for r in rows}
         version: int | None = None
         if "schema_version" in tables:
-            # MAX() of NULL returns None. Text deliberately stored in the
-            # version column can only mean "not our database" — validated by
-            # the caller, which refuses rather than guessing.
-            row = probe.execute("SELECT MAX(version) FROM schema_version").fetchone()
+            # MAX() of NULL returns None. Anything unreadable or non-integer
+            # here means a name collision with some other app's convention —
+            # the caller refuses rather than guessing.
+            try:
+                row = probe.execute("SELECT MAX(version) FROM schema_version").fetchone()
+            except sqlite3.DatabaseError as e:
+                raise errors.ValidationError(
+                    f"refusing to open {path}: its schema_version table is not "
+                    f"ours (unreadable as a schema version: {e})") from e
             version = row[0]
     except sqlite3.DatabaseError as e:
         # Covers "cannot be opened at all" (a directory, bad permissions) and
@@ -118,6 +123,16 @@ def connect(db_path: str | os.PathLike[str] | None = None) -> sqlite3.Connection
         raise errors.ValidationError(
             f"refusing to open {path}: it is not a planner database "
             f"(no schema_version table; contains tables: {sorted(tables)[:8]})")
+    if tables and (stored_version is None or stored_version == 0) \
+            and tables != {"schema_version"}:
+        # A real planner DB always stores a version >= 1 (the first migration
+        # stamps it in the same transaction that creates the tables), and the
+        # only legal no-version-rows shape is the v1-crash window: exactly
+        # schema_version and nothing else. A name-collision with other tables
+        # is someone else's database — refuse it.
+        raise errors.ValidationError(
+            f"refusing to open {path}: its schema_version table has no usable "
+            "version row, but other tables exist — not a planner database")
     if stored_version is not None:
         if not isinstance(stored_version, int):
             raise errors.ValidationError(

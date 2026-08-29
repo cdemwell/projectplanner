@@ -198,6 +198,31 @@ def test_connect_refuses_future_schema_version(tmp_path):
         db.connect(p)
 
 
+def test_connect_refuses_versionless_schema_version_collision(tmp_path):
+    """A foreign `schema_version` table with no usable version row (empty, or
+    0 — a real planner DB stores 1..N) alongside other tables is a collision,
+    not a first run: refused untouched. Only `schema_version` alone (the
+    v1-crash window) self-heals."""
+    for name, version_value in (("empty", None), ("zero", 0)):
+        p = tmp_path / f"collide-{name}.db"
+        collide = sqlite3.connect(p)
+        collide.execute("CREATE TABLE schema_version (version INTEGER)")
+        if version_value is not None:
+            collide.execute("INSERT INTO schema_version VALUES (?)", (version_value,))
+        collide.execute("CREATE TABLE app_data (id INTEGER)")
+        collide.commit()
+        collide.close()
+
+        with pytest.raises(errors.ValidationError, match="not a planner database"):
+            db.connect(p)
+
+        check = sqlite3.connect(p)
+        tables = {r[0] for r in check.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+        check.close()
+        assert tables == {"schema_version", "app_data"}, f"{name} file was modified"
+
+
 def test_connect_seeds_v1_crash_window(tmp_path):
     """A DB holding only schema_version (crashed during first-run v1: the
     out-of-transaction CREATE committed, the v1 tx rolled back) self-heals on
