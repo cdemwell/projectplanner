@@ -133,10 +133,91 @@ def test_plan_import_dry_run_skips_backup_and_writes_nothing(tmp_path):
 
 def test_backup_db_file_collides_safely(tmp_path):
     """Two backups within the same second must not overwrite each other."""
-    from cli.commands import _backup_db_file
+    from backend.backup import backup_db_file
 
     db_file = tmp_path / "planner.db"
     db_file.write_bytes(b"x")
-    first = _backup_db_file(db_file)
-    second = _backup_db_file(db_file)
+    first = backup_db_file(db_file)
+    second = backup_db_file(db_file)
     assert first.exists() and second.exists() and first != second
+
+
+# --------------------------------------------------------------------------- #
+# Backup pruning must never delete non-backup files (story 110)
+# --------------------------------------------------------------------------- #
+
+def test_prune_keeps_non_backup_siblings(tmp_path):
+    """--keep 0 deletes only the tool's own timestamped backups; manual copies
+    and unrelated files matching the db name survive (the story-110 bug)."""
+    import os
+
+    from backend.backup import prune_backups
+
+    db_file = tmp_path / "planner.db"
+    db_file.write_bytes(b"x")
+    survivors = [
+        tmp_path / "planner.db.backup",      # manual full copy
+        tmp_path / "planner.db.backup.1",    # manual numbered copy
+        tmp_path / "planner.db.2",           # unrelated sibling
+        tmp_path / "planner.db.notes",       # anything else
+    ]
+    tool_backups = []
+    for i, ts in enumerate(("20250101000000", "20250101000001", "20250101000002")):
+        p = tmp_path / f"planner.db.{ts}"
+        p.write_bytes(b"x")
+        os.utime(p, (1_600_000_000.0 + i, 1_600_000_000.0 + i))
+        tool_backups.append(p)
+    for s in survivors:
+        s.write_bytes(b"x")
+
+    pruned = prune_backups(db_file, 0)
+
+    # Deleted newest-first (mtime sort); survivors are never in the list.
+    assert [p.name for p in pruned] == [p.name for p in reversed(tool_backups)]
+    assert not any(p.exists() for p in tool_backups)
+    for s in survivors:
+        assert s.exists(), f"{s.name} was wrongly deleted"
+    assert db_file.exists()
+
+
+def test_prune_counts_collision_suffixes_as_backups(tmp_path):
+    """``.N``-suffixed same-second backups are tool backups: rotation prunes
+    them too, so they cannot accumulate forever."""
+    import os
+
+    from backend.backup import backup_db_file, prune_backups
+
+    db_file = tmp_path / "planner.db"
+    db_file.write_bytes(b"x")
+    made = [backup_db_file(db_file) for _ in range(3)]  # <ts>, <ts>.1, <ts>.2
+    # Distinct mtimes so "newest" is deterministic even within one second.
+    for i, p in enumerate(made):
+        os.utime(p, (1_600_000_000.0 + i, 1_600_000_000.0 + i))
+        assert p.exists()
+
+    pruned = prune_backups(db_file, 1)
+    assert len(pruned) == 2
+    assert sorted(p.name for p in pruned) == sorted([made[0].name, made[1].name])
+    assert made[2].exists()
+
+
+def test_rotate_backup_does_not_touch_foreign_files(tmp_path):
+    """The --rotate-backup path prunes via the same strict matcher."""
+    import time
+
+    db_file = tmp_path / "planner.db"
+    foreign = tmp_path / "planner.db.backup"
+    foreign.write_bytes(b"keep me")
+
+    for i in range(3):
+        rc = run(["--db", str(db_file), "--rotate-backup", "2",
+                  "story", "create", "--name", f"rotation {i}"])
+        assert rc == 0
+        time.sleep(1.1)
+    foreign.write_bytes(b"still keep")
+
+    backups = [p for p in tmp_path.iterdir()
+               if p.name.startswith("planner.db.") and p != foreign]
+    assert len(backups) <= 2  # rotated down to --rotate-backup 2
+    assert foreign.read_bytes() == b"still keep"  # never deleted
+    assert db_file.exists()
