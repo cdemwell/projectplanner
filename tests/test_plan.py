@@ -367,6 +367,20 @@ def test_export_file_is_owner_only(tmp_path, conn):
     assert stat.S_IMODE(os.stat(out).st_mode) == 0o600
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX file modes")
+def test_reexport_tightens_existing_wide_file(tmp_path, conn):
+    """Re-exporting over an existing snapshot tightens it to 0600 — the safe
+    default (fail-closed) for a plaintext copy of the whole plan."""
+    p = projects.create_project(conn, "backend")
+    stories.create_story(conn, "Fix login", project_id=p.id)
+    out = tmp_path / "export.json"
+    out.write_text("previously widened artifact\n")
+    os.chmod(out, 0o644)
+    plan.export_to_file(conn, str(out))
+    assert stat.S_IMODE(os.stat(out).st_mode) == 0o600
+    assert "Fix login" in out.read_text()  # and the export still worked
+
+
 # --------------------------------------------------------------------------- #
 # Responses to the first review (duplicates, ordering, ownership)
 # --------------------------------------------------------------------------- #

@@ -120,9 +120,12 @@ depending on a hosted service, a network, or an account.
 **File privacy:** the planner stores your data in plaintext — `planner.db` is
 created with owner-only permissions (`0600`), as are its timestamped backups
 and `plan export` snapshots, so other users on a shared machine cannot read
-them through normal file access. There is no at-rest encryption: anyone with
-root, or access to your account, can read the contents. Keep the file (and its
-backups) out of directories you do not trust.
+them through normal file access. This is best-effort (filesystems without
+chmod support keep their mount default), and a database that already existed
+before the change keeps its previous mode — run `chmod 600 planner.db` once
+after upgrading if it predates it. There is no at-rest encryption: anyone
+with root, or access to your account, can read the contents. Keep the file
+(and its backups) out of directories you do not trust.
 
 ---
 

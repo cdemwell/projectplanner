@@ -300,6 +300,22 @@ def test_new_db_is_owner_only(db_path):
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX file modes")
+def test_zero_byte_file_is_treated_new_and_owner_only(db_path):
+    """A pre-existing 0-byte planner.db (aborted first create, or a touch'd
+    blank) is classified fresh: it is seeded AND restricted to 0600."""
+    p = Path(db_path)
+    p.touch()
+    os.chmod(p, 0o644)
+    c = db.connect(db_path)  # classify: no tables => fresh; mode: brand-new
+    c.close()
+    assert stat.S_IMODE(os.stat(db_path).st_mode) == 0o600
+    c = db.connect(db_path)
+    members = c.execute("SELECT COUNT(*) FROM member").fetchone()[0]
+    c.close()
+    assert members == 1  # seeded, like a genuine first run
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX file modes")
 def test_existing_db_mode_untouched(db_path):
     """Reconnecting never rewrites a mode the user has explicitly widened."""
     c = db.connect(db_path)

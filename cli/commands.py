@@ -1417,7 +1417,11 @@ def run(argv: list[str] | None = None) -> int:
         with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp:
             tmp_path = tmp.name
             if os.path.exists(db_path):
-                shutil.copy2(db_path, tmp_path)
+                # copyfile, not copy2: the temp copy belongs to this process
+                # and already sits at 0600 from NamedTemporaryFile — copying
+                # the source mode would put a possibly world-readable full
+                # plaintext copy of the plan in $TMPDIR.
+                shutil.copyfile(db_path, tmp_path)
 
     conn_path = tmp_path if is_dry_run else db_path
     conn = None

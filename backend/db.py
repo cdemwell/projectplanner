@@ -91,12 +91,15 @@ def _read_db_state(path: Path) -> tuple[set[str], int | None]:
 
 
 def restrict_to_owner(path: os.PathLike[str] | str) -> None:
-    """Set owner-only (0600) permissions on a file this tool just created.
+    """Set owner-only (0600) permissions on a planner file.
 
-    Planner files hold the whole plan in plaintext, so freshly created
-    databases, backups, and export snapshots are written owner-only. This is
-    best-effort and applies to NEW files only — an existing file's mode is
-    left alone, so a user who deliberately widened permissions keeps them.
+    Planner files hold the whole plan in plaintext, so this is applied on
+    every write the tool makes: `connect` for a newly created database (an
+    existing database's mode is left alone, so a deliberately widened mode
+    survives), `backup_db_file` for every backup copy, and `export_to_file`
+    for every export write — including re-exports over an existing snapshot,
+    where tightening is the safer default. Best-effort: exotic filesystems
+    that cannot chmod keep their mount default rather than failing the run.
 
     Args:
         path: File to restrict.
@@ -135,7 +138,12 @@ def connect(db_path: str | os.PathLike[str] | None = None) -> sqlite3.Connection
             schema version newer than this build understands).
     """
     path = Path(db_path) if db_path is not None else DEFAULT_DB_PATH
-    created = not path.exists()
+    try:
+        # A missing file is created; an existing 0-byte file (e.g. an aborted
+        # first create, or a touch'd blank) is equally "brand new" to us.
+        created = not path.exists() or path.stat().st_size == 0
+    except OSError:
+        created = False
     # Classify before mutating: read-only, so nothing is created by the probe.
     tables, stored_version = _read_db_state(path)
     if tables and "schema_version" not in tables:
