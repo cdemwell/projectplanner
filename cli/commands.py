@@ -920,6 +920,40 @@ def h_search(conn, a):
 
 
 # -- plan ----------------------------------------------------------------- #
+def _conn_db_path(conn) -> Path | None:
+    """Return the filesystem path of the connection's main database (or None).
+
+    Args:
+        conn: sqlite3.Connection from db.connect().
+    Returns:
+        Path to the main database file, or None for an in-memory connection.
+    """
+    row = conn.execute("PRAGMA database_list").fetchone()
+    return Path(row[2]) if row and row[2] else None
+
+
+def _backup_db_file(db_path: Path) -> Path:
+    """Copy ``db_path`` to a timestamped sibling file and return its path.
+
+    The name is ``<name>.<YYYYMMDDHHMMSS>``; when that name already exists
+    (two backups within the same second) a ``.N`` sequence is appended rather
+    than silently overwriting the earlier backup.
+
+    Args:
+        db_path: Path to the SQLite database file.
+    Returns:
+        Path of the newly written backup.
+    """
+    timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+    backup_path = db_path.with_suffix(f"{db_path.suffix}.{timestamp}")
+    n = 1
+    while backup_path.exists():
+        backup_path = db_path.with_suffix(f"{db_path.suffix}.{timestamp}.{n}")
+        n += 1
+    shutil.copy2(db_path, backup_path)
+    return backup_path
+
+
 def h_plan_export(conn, a):
     """Handle ``plan export``; write a JSON snapshot to a file and return counts."""
     data = plan.export_to_file(conn, a.file)
@@ -928,9 +962,35 @@ def h_plan_export(conn, a):
 
 
 def h_plan_import(conn, a):
-    """Handle ``plan import``; restore a JSON snapshot and return counts."""
-    counts = plan.import_from_file(conn, a.file)
-    return {"file": a.file, "imported": counts}
+    """Handle ``plan import``; validate, back up, restore, return counts.
+
+    The snapshot is loaded and fully validated *before* the backup and the
+    wipe, so a malformed snapshot fails without writing stray backup copies
+    or touching existing rows. For a live (non ``--dry-run``) target, a
+    timestamped backup of the current database is written first; its path is
+    echoed to stderr — so a failed import still says where its "before" copy
+    is — and included in the result dict.
+
+    Args:
+        conn: sqlite3.Connection from db.connect().
+        a: argparse.Namespace with ``file`` (snapshot path) and ``dry_run``.
+    Returns:
+        dict with the snapshot path, the pre-import backup path (when taken),
+        and the per-table import counts.
+    """
+    data = plan.load_snapshot(a.file)
+    plan.validate_snapshot(conn, data)
+    backup_path = None
+    if not getattr(a, "dry_run", False):
+        db_path = _conn_db_path(conn)
+        if db_path is not None:
+            backup_path = _backup_db_file(db_path)
+            print(f"pre-import backup: {backup_path}", file=sys.stderr)
+    counts = plan.import_plan(conn, data)
+    result: dict[str, Any] = {"file": a.file, "imported": counts}
+    if backup_path is not None:
+        result["backup"] = str(backup_path)
+    return result
 
 
 def h_plan_backup(conn, a):
@@ -939,9 +999,7 @@ def h_plan_backup(conn, a):
     if not db_path.exists():
         raise errors.PlannerError(f"Database file not found: {db_path}")
 
-    timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
-    backup_path = db_path.with_suffix(f"{db_path.suffix}.{timestamp}")
-    shutil.copy2(db_path, backup_path)
+    backup_path = _backup_db_file(db_path)
 
     if a.keep is not None:
         backups = sorted(
@@ -1367,9 +1425,7 @@ def run(argv: list[str] | None = None) -> int:
 
     if args.rotate_backup > 0 and not is_dry_run:
         if db_path.exists():
-            timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
-            backup_path = db_path.with_suffix(f"{db_path.suffix}.{timestamp}")
-            shutil.copy2(db_path, backup_path)
+            backup_path = _backup_db_file(db_path)
 
             backups = sorted(
                 db_path.parent.glob(f"{db_path.name}.*"),
