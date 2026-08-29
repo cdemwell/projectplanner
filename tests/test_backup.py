@@ -1,5 +1,7 @@
+import os
 import re
 import sqlite3
+import stat
 import time
 from pathlib import Path
 
@@ -137,6 +139,19 @@ def test_backup_db_file_collides_safely(tmp_path):
     first = backup_db_file(db_file)
     second = backup_db_file(db_file)
     assert first.exists() and second.exists() and first != second
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX file modes")
+def test_backup_files_are_owner_only(tmp_path):
+    """Backups are plaintext copies of the whole plan: owner-only (0600),
+    regardless of the source database's mode."""
+    from backend.backup import backup_db_file
+
+    db_file = tmp_path / "planner.db"
+    db_file.write_bytes(b"x")
+    os.chmod(db_file, 0o644)  # deliberately wide source mode
+    backup = backup_db_file(db_file)
+    assert stat.S_IMODE(os.stat(backup).st_mode) == 0o600
 
 
 # --------------------------------------------------------------------------- #

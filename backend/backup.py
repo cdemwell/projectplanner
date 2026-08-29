@@ -16,6 +16,8 @@ import shutil
 from datetime import datetime
 from pathlib import Path
 
+from .db import restrict_to_owner
+
 # Files the tool itself produced: ``<db name>.<14-digit timestamp>[.N]``.
 # Anything else — manual copies, similarly named files — must never be pruned.
 # The ``.N`` suffix is the same-second collision sequence from backup_db_file.
@@ -62,6 +64,9 @@ def backup_db_file(db_path: Path) -> Path:
         backup_path = db_path.with_suffix(f"{db_path.suffix}.{timestamp}.{n}")
         n += 1
     shutil.copy2(db_path, backup_path)
+    # copy2 borrows the source mode; a backup is a plaintext copy of the whole
+    # plan, so it is owner-only regardless of what the source mode is.
+    restrict_to_owner(backup_path)
     return backup_path
 
 

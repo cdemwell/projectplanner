@@ -90,6 +90,27 @@ def _read_db_state(path: Path) -> tuple[set[str], int | None]:
     return tables, version
 
 
+def restrict_to_owner(path: os.PathLike[str] | str) -> None:
+    """Set owner-only (0600) permissions on a planner file.
+
+    Planner files hold the whole plan in plaintext, so this is applied on
+    every write the tool makes: `connect` for a newly created database (an
+    existing database's mode is left alone, so a deliberately widened mode
+    survives), `backup_db_file` for every backup copy, and `export_to_file`
+    for every export write — including re-exports over an existing snapshot,
+    where tightening is the safer default. Best-effort: exotic filesystems
+    that cannot chmod keep their mount default rather than failing the run.
+
+    Args:
+        path: File to restrict.
+    """
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        # Exotic filesystems may not support chmod; the tool works regardless.
+        pass
+
+
 def connect(db_path: str | os.PathLike[str] | None = None) -> sqlite3.Connection:
     """Open (and, if needed, create + migrate + seed) the planner database.
 
@@ -117,6 +138,12 @@ def connect(db_path: str | os.PathLike[str] | None = None) -> sqlite3.Connection
             schema version newer than this build understands).
     """
     path = Path(db_path) if db_path is not None else DEFAULT_DB_PATH
+    try:
+        # A missing file is created; an existing 0-byte file (e.g. an aborted
+        # first create, or a touch'd blank) is equally "brand new" to us.
+        created = not path.exists() or path.stat().st_size == 0
+    except OSError:
+        created = False
     # Classify before mutating: read-only, so nothing is created by the probe.
     tables, stored_version = _read_db_state(path)
     if tables and "schema_version" not in tables:
@@ -151,6 +178,10 @@ def connect(db_path: str | os.PathLike[str] | None = None) -> sqlite3.Connection
     # block for up to 5s instead of raising SQLITE_BUSY immediately.
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA busy_timeout = 5000")
+    if created:
+        # A brand-new database holds the whole plan in plaintext; created
+        # files are owner-only. Existing files keep their set mode.
+        restrict_to_owner(path)
     # Seed when the member table is absent: it exists in every migrated
     # planner DB (v1 creates it with schema_version), so its absence means
     # first-run or a v1-crash window — both of which want seeding. A present

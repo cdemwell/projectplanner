@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import stat
 
 import pytest
 
@@ -353,6 +355,30 @@ def test_import_still_round_trips_valid_snapshot(conn):
     counts = plan.import_plan(conn, data)
     assert counts["story"] == 1
     assert [s.name for s in stories.list_stories(conn)] == ["Fix login"]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX file modes")
+def test_export_file_is_owner_only(tmp_path, conn):
+    """Export snapshots carry the whole plan in plaintext: owner-only (0600)."""
+    p = projects.create_project(conn, "backend")
+    stories.create_story(conn, "Fix login", project_id=p.id)
+    out = tmp_path / "export.json"
+    plan.export_to_file(conn, str(out))
+    assert stat.S_IMODE(os.stat(out).st_mode) == 0o600
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX file modes")
+def test_reexport_tightens_existing_wide_file(tmp_path, conn):
+    """Re-exporting over an existing snapshot tightens it to 0600 — the safe
+    default (fail-closed) for a plaintext copy of the whole plan."""
+    p = projects.create_project(conn, "backend")
+    stories.create_story(conn, "Fix login", project_id=p.id)
+    out = tmp_path / "export.json"
+    out.write_text("previously widened artifact\n")
+    os.chmod(out, 0o644)
+    plan.export_to_file(conn, str(out))
+    assert stat.S_IMODE(os.stat(out).st_mode) == 0o600
+    assert "Fix login" in out.read_text()  # and the export still worked
 
 
 # --------------------------------------------------------------------------- #
