@@ -138,12 +138,17 @@ def test_delete_status_json(run_cli):
     assert json.loads(out) == [{"deleted": "story", "id": 1}]
 
 
-def test_ambiguous_name_error(run_cli):
+def test_duplicate_label_name_conflicts(run_cli):
+    # Migration v5 enforces case-insensitive unique label names at the DB, so a
+    # duplicate is rejected at creation (exit 1, Conflict) instead of leaving a
+    # name the case-insensitive resolver could never disambiguate.
     run_cli("label", "create", "--name", "auth")
-    run_cli("label", "create", "--name", "auth")  # duplicate name allowed for labels
-    rc, out, err = run_cli("story", "create", "--name", "x", "--labels", "auth")
+    rc, out, err = run_cli("label", "create", "--name", "auth")
     assert rc == 1
-    assert "ambiguous" in err
+    assert "conflict" in err.lower() or "unique" in err.lower()
+    # A case-variant is also rejected.
+    rc, out, err = run_cli("label", "create", "--name", "AUTH")
+    assert rc == 1
 
 
 # --- $EDITOR flow --------------------------------------------------------- #
@@ -307,3 +312,45 @@ def test_story_deadlines(run_cli):
     # status column is last, should be empty for future
     assert "OVERDUE" not in data[2]
     assert "DUE" not in data[2]
+
+
+def test_story_update_clears_nullable_fks(run_cli, db_path):
+    """Bug 103: --no-project/--no-epic/--no-iteration/--no-group clear the
+    association (the CLI counterpart of the TUI's '(no …)' option)."""
+    from backend import db, epics, groups, iterations, projects, stories
+    c = db.connect(db_path)
+    p = projects.create_project(c, "P")
+    e = epics.create_epic(c, "E")
+    it = iterations.create_iteration(c, "I")
+    g = groups.create_group(c, "G")
+    out = run_cli("--json", "story", "create", "--name", "x",
+                  "--project", str(p.id), "--epic", str(e.id),
+                  "--iteration", str(it.id), "--group", str(g.id))[1]
+    sid = json.loads(out)["id"]
+    c.close()
+
+    rc, out, err = run_cli("--json", "story", "update", str(sid),
+                           "--no-project", "--no-epic", "--no-iteration", "--no-group")
+    assert rc == 0, err
+    c = db.connect(db_path)
+    s = stories.get_story(c, sid)
+    assert (s.project_id, s.epic_id, s.iteration_id, s.group_id) == (None, None, None, None)
+    c.close()
+
+
+def test_epic_update_clears_project_and_milestone(run_cli, db_path):
+    from backend import db, epics, milestones, projects
+    c = db.connect(db_path)
+    p = projects.create_project(c, "P")
+    m = milestones.create_milestone(c, "M")
+    out = run_cli("--json", "epic", "create", "--name", "E",
+                  "--project", str(p.id), "--milestone", str(m.id))[1]
+    eid = json.loads(out)["id"]
+    c.close()
+    rc, out, err = run_cli("--json", "epic", "update", str(eid),
+                           "--no-project", "--no-milestone")
+    assert rc == 0, err
+    c = db.connect(db_path)
+    e = epics.get_epic(c, eid)
+    assert (e.project_id, e.milestone_id) == (None, None)
+    c.close()

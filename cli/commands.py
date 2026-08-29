@@ -574,7 +574,12 @@ def h_story_create(conn, a):
 
 
 def h_story_update(conn, a):
-    """Handle ``story update``; map provided flags to editable fields and return the stories."""
+    """Handle ``story update``; map provided flags to editable fields and return the stories.
+
+    ``--no-project`` / ``--no-epic`` / ``--no-iteration`` / ``--no-group`` clear
+    those nullable associations (bug 103) — the CLI counterpart of the TUI's
+    "(no …)" select entries and the backend's ``update_story(field=None)``.
+    """
     fields = {}
     if a.name is not None: fields["name"] = a.name
     if a.desc is not None: fields["description"] = a.desc
@@ -583,6 +588,12 @@ def h_story_update(conn, a):
     if a.epic is not None: fields["epic_id"] = resolve_epic(conn, a.epic)
     if a.iteration is not None: fields["iteration_id"] = resolve_iteration(conn, a.iteration)
     if a.group is not None: fields["group_id"] = resolve_group(conn, a.group)
+    # Clearing flags (must come after the setters so an explicit value wins if
+    # both are somehow passed — argparse makes that possible).
+    if getattr(a, "no_project", False): fields["project_id"] = None
+    if getattr(a, "no_epic", False): fields["epic_id"] = None
+    if getattr(a, "no_iteration", False): fields["iteration_id"] = None
+    if getattr(a, "no_group", False): fields["group_id"] = None
     if a.deadline is not None: fields["deadline"] = a.deadline
     if a.position is not None: fields["position"] = a.position
 
@@ -714,11 +725,16 @@ def h_epic_create(conn, a):
 
 
 def h_epic_update(conn, a):
-    """Handle ``epic update``; map provided flags to fields and return the epic."""
+    """Handle ``epic update``; map provided flags to fields and return the epic.
+
+    ``--no-project`` / ``--no-milestone`` clear those associations (bug 103).
+    """
     fields = {k: v for k, v in dict(name=a.name, description=a.desc, state=a.state,
              project_id=resolve_project(conn, a.project) if a.project else None,
              milestone_id=resolve_milestone(conn, a.milestone) if a.milestone else None).items()
              if v is not None}
+    if getattr(a, "no_project", False): fields["project_id"] = None
+    if getattr(a, "no_milestone", False): fields["milestone_id"] = None
     return epics.update_epic(conn, int(a.id), **fields)
 
 
@@ -1043,6 +1059,10 @@ def build_parser() -> argparse.ArgumentParser:
     p = _sp(asp, "update"); _ids_arg(p)
     for f in ("--name", "--desc", "--project", "--epic", "--iteration", "--group", "--deadline"):
         p.add_argument(f)
+    # Clear a nullable association (bug 103): --no-project & friends map to
+    # None so the FK is cleared, mirroring the TUI's (no …) select option.
+    for f in ("--no-project", "--no-epic", "--no-iteration", "--no-group"):
+        p.add_argument(f, action="store_true", help="clear this association")
     p.add_argument("--type", choices=list(stories.STORY_TYPES))
     p.add_argument("--position", type=float)
     p.set_defaults(func=h_story_update, fmt=_fmt_bulk)
@@ -1071,6 +1091,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=h_epic_create, fmt=_fmt_one)
     p = _sp(asp, "update"); _id_arg(p); p.add_argument("--name"); p.add_argument("--desc")
     p.add_argument("--state"); p.add_argument("--project"); p.add_argument("--milestone")
+    p.add_argument("--no-project", action="store_true", help="clear the project")
+    p.add_argument("--no-milestone", action="store_true", help="clear the milestone")
     p.set_defaults(func=h_epic_update, fmt=_fmt_one)
     p = _sp(asp, "delete"); _id_arg(p)
     p.set_defaults(func=lambda c, a: (epics.delete_epic(c, int(a.id)), {"deleted": "epic", "id": int(a.id)})[1], fmt=_fmt_one)
