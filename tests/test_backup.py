@@ -91,3 +91,52 @@ def test_plan_import_takes_pre_import_backup(tmp_path):
     c = db.connect(dst)
     assert [s.name for s in stories.list_stories(c)] == ["imported story"]
     c.close()
+
+
+def test_failed_import_leaves_no_backup(tmp_path):
+    """A snapshot rejected at validation time must not write a backup copy."""
+    import json
+
+    dst = tmp_path / "planner.db"
+    run(["--db", str(dst), "story", "create", "--name", "old story"])
+    bad = tmp_path / "bad.json"
+    bad.write_text(json.dumps({"_meta": {"schema_version": 99}}))
+
+    rc = run(["--db", str(dst), "plan", "import", "--file", str(bad)])
+    assert rc == 1
+    assert _timestamped_backups(tmp_path, "planner.db") == []
+
+    c = db.connect(dst)
+    assert [s.name for s in stories.list_stories(c)] == ["old story"]
+    c.close()
+
+
+def test_plan_import_dry_run_skips_backup_and_writes_nothing(tmp_path):
+    src = tmp_path / "src.db"
+    dst = tmp_path / "planner.db"
+    snap = tmp_path / "snap.json"
+
+    c = db.connect(src)
+    projects.create_project(c, "fresh")
+    stories.create_story(c, "imported story")
+    c.close()
+    plan.export_to_file(db.connect(src), str(snap))
+    run(["--db", str(dst), "story", "create", "--name", "old story"])
+
+    rc = run(["--db", str(dst), "plan", "import", "--file", str(snap), "--dry-run"])
+    assert rc == 0
+    assert _timestamped_backups(tmp_path, "planner.db") == []
+    c = db.connect(dst)
+    assert [s.name for s in stories.list_stories(c)] == ["old story"]
+    c.close()
+
+
+def test_backup_db_file_collides_safely(tmp_path):
+    """Two backups within the same second must not overwrite each other."""
+    from cli.commands import _backup_db_file
+
+    db_file = tmp_path / "planner.db"
+    db_file.write_bytes(b"x")
+    first = _backup_db_file(db_file)
+    second = _backup_db_file(db_file)
+    assert first.exists() and second.exists() and first != second

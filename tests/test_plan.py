@@ -18,7 +18,15 @@ from backend import (
     stories,
     story_links,
     tasks,
+    workflows,
 )
+
+
+def _row_set(table: str, index: int, col: str, value):
+    """Return a mutate function setting one snapshot column, for parametrize."""
+    def mutate(data):
+        data[table][index][col] = value
+    return mutate
 
 
 def test_export_import_round_trip(tmp_path):
@@ -109,7 +117,8 @@ def test_import_missing_table_errors(tmp_path):
 # --------------------------------------------------------------------------- #
 
 def _snapshot_with_content(conn):
-    """Seed ``conn`` with a project, epic + story, and export a snapshot dict.
+    """Seed ``conn`` (the fixture's already-seeded DB) with a project, epic and
+    story, and export a snapshot dict.
 
     The story hangs off the epic so the snapshot carries a resolvable epic_id,
     making a dangling-FK mutation hit the "not in the snapshot" branch.
@@ -152,16 +161,11 @@ def test_import_missing_table_listed(conn):
 
 
 @pytest.mark.parametrize("mutate,fragment", [
-    (lambda d: d["member"][0].__setitem__("mention_name", 123),
-     "mention_name"),
-    (lambda d: d["story"][0].__setitem__("name", None),
-     "NOT NULL"),
-    (lambda d: d["story"][0].__setitem__("story_type", "nonsense"),
-     "story_type"),
-    (lambda d: d["story"][0].__setitem__("epic_id", 999),
-     "not in the snapshot"),
-    (lambda d: d["workflow"][0].__setitem__("default_state_id", 4242),
-     "default_state_id"),
+    (_row_set("member", 0, "mention_name", 123), "mention_name"),
+    (_row_set("story", 0, "name", None), "NOT NULL"),
+    (_row_set("story", 0, "story_type", "nonsense"), "story_type"),
+    (_row_set("story", 0, "epic_id", 999), "not in the snapshot"),
+    (_row_set("workflow", 0, "default_state_id", 4242), "default_state_id"),
 ])
 def test_import_rejects_malformed_values_pre_wipe(conn, mutate, fragment):
     """Bad values/FKs abort before the wipe: existing rows survive."""
@@ -258,3 +262,154 @@ def test_import_still_round_trips_valid_snapshot(conn):
     counts = plan.import_plan(conn, data)
     assert counts["story"] == 1
     assert [s.name for s in stories.list_stories(conn)] == ["Fix login"]
+
+
+# --------------------------------------------------------------------------- #
+# Responses to the first review (duplicates, ordering, ownership)
+# --------------------------------------------------------------------------- #
+
+def test_export_writes_snapshot_format_version(conn):
+    """The writer emits the same version constant the reader gates on."""
+    data = plan.export_plan(conn)
+    assert data["_meta"]["schema_version"] == plan.SNAPSHOT_FORMAT_VERSION
+
+
+def test_import_rejects_boolean_schema_version(conn):
+    """True == 1 in Python, so the version gate must reject bools explicitly."""
+    data = _snapshot_with_content(conn)
+    data["_meta"]["schema_version"] = True
+    with pytest.raises(errors.ValidationError, match="must be an int"):
+        plan.import_plan(conn, data)
+
+
+def test_import_rejects_duplicate_ids(conn):
+    data = _snapshot_with_content(conn)
+    dup = dict(data["member"][0])
+    data["member"].append(dup)  # same id, different row
+    with pytest.raises(errors.ValidationError, match="duplicate id"):
+        plan.import_plan(conn, data)
+
+
+def test_import_rejects_reply_before_parent(conn):
+    """A reply listed before its parent would fail the FK mid-import; reject."""
+    data = _snapshot_with_content(conn)
+    sid = data["story"][0]["id"]
+    ts = db.now()
+    data["story_comment"] = [
+        {"id": 2, "story_id": sid, "author_id": None, "text": "reply",
+         "parent_id": 1, "created_at": ts, "updated_at": ts},
+        {"id": 1, "story_id": sid, "author_id": None, "text": "parent",
+         "parent_id": None, "created_at": ts, "updated_at": ts},
+    ]
+    with pytest.raises(errors.ValidationError, match="before its parent"):
+        plan.import_plan(conn, data)
+
+
+def test_import_rejects_self_parent_comment(conn):
+    data = _snapshot_with_content(conn)
+    sid = data["story"][0]["id"]
+    ts = db.now()
+    data["story_comment"] = [{"id": 1, "story_id": sid, "author_id": None,
+                             "text": "solo", "parent_id": 1,
+                             "created_at": ts, "updated_at": ts}]
+    with pytest.raises(errors.ValidationError, match="own parent"):
+        plan.import_plan(conn, data)
+
+
+def test_import_accepts_parent_before_child_reply(conn):
+    """The valid ordering (parent listed first) imports cleanly."""
+    data = _snapshot_with_content(conn)
+    sid = data["story"][0]["id"]
+    ts = db.now()
+    data["story_comment"] = [
+        {"id": 1, "story_id": sid, "author_id": None, "text": "parent",
+         "parent_id": None, "created_at": ts, "updated_at": ts},
+        {"id": 2, "story_id": sid, "author_id": None, "text": "reply",
+         "parent_id": 1, "created_at": ts, "updated_at": ts},
+    ]
+    plan.import_plan(conn, data)
+    # Import remaps ids, so find the imported story fresh.
+    imported = next(s for s in stories.list_stories(conn) if s.name == "Fix login")
+    texts = sorted(c.text for c in comments.list_comments(conn, imported.id))
+    assert texts == ["parent", "reply"]
+
+
+def test_import_rejects_duplicate_mention_name(conn):
+    data = _snapshot_with_content(conn)
+    mention = data["member"][0]["mention_name"]
+    data["member"].append({"id": 99, "name": "other", "mention_name": mention,
+                           "created_at": db.now()})
+    with pytest.raises(errors.ValidationError, match="duplicate mention_name"):
+        plan.import_plan(conn, data)
+
+
+def test_import_rejects_duplicate_junction_pair(conn):
+    data = _snapshot_with_content(conn)
+    sid, mid = data["story"][0]["id"], data["member"][0]["id"]
+    row = {"id": 1, "story_id": sid, "member_id": mid}
+    data["story_owner"] = [row, dict(row, id=2)]
+    with pytest.raises(errors.ValidationError, match="duplicate"):
+        plan.import_plan(conn, data)
+
+
+def test_import_rejects_self_link(conn):
+    data = _snapshot_with_content(conn)
+    sid = data["story"][0]["id"]
+    data["story_link"] = [{"id": 1, "subject_story_id": sid, "verb": "relates_to",
+                           "object_story_id": sid, "created_at": db.now()}]
+    with pytest.raises(errors.ValidationError, match="link to itself"):
+        plan.import_plan(conn, data)
+
+
+def test_import_rejects_duplicate_link_triple(conn):
+    data = _snapshot_with_content(conn)
+    sid = data["story"][0]["id"]
+    # A second story row so the link target is inside the snapshot.
+    second = dict(data["story"][0], id=99, name="Add 2FA")
+    data["story"].append(second)
+    row = {"id": 1, "subject_story_id": sid, "verb": "relates_to",
+           "object_story_id": 99, "created_at": db.now()}
+    data["story_link"] = [row, dict(row, id=2)]
+    with pytest.raises(errors.ValidationError, match="duplicate"):
+        plan.import_plan(conn, data)
+
+
+def test_import_rejects_cross_workflow_default_state(conn):
+    """A workflow's default state must belong to that same workflow."""
+    data = _snapshot_with_content(conn)
+    state_id = data["workflow_state"][0]["id"]
+    data["workflow"].append({"id": 99, "name": "Other",
+                             "default_state_id": state_id,
+                             "created_at": db.now()})
+    with pytest.raises(errors.ValidationError, match="different workflow"):
+        plan.import_plan(conn, data)
+
+
+def test_import_preserves_workflow_state_description(tmp_path):
+    """schema v4's workflow_state.description must survive the round-trip."""
+    src = tmp_path / "src.db"
+    dst = tmp_path / "dst.db"
+    c = db.connect(src)
+    p = projects.create_project(c, "backend")
+    stories.create_story(c, "Fix login", project_id=p.id)
+    wf_id = c.execute("SELECT id FROM workflow LIMIT 1").fetchone()[0]
+    workflows.create_workflow_state(c, wf_id, "In Review", "started",
+                                    description="keep me")
+    data = plan.export_plan(c)
+    c.close()
+
+    c2 = db.connect(dst)
+    plan.import_plan(c2, data)
+    rows = [(r["name"], r["description"]) for r in
+            c2.execute("SELECT name, description FROM workflow_state")]
+    c2.close()
+    assert ("In Review", "keep me") in rows
+
+
+def test_import_accepts_pre_v4_snapshot_without_state_description(conn):
+    """Old exports lack workflow_state.description; the DB default applies."""
+    data = _snapshot_with_content(conn)
+    for row in data["workflow_state"]:
+        del row["description"]
+    plan.import_plan(conn, data)
+    assert {r[0] for r in conn.execute("SELECT description FROM workflow_state")} == {""}

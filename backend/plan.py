@@ -66,7 +66,8 @@ _TABLES: dict[str, tuple[list[str], dict[str, str]]] = {
     "member": (["name", "mention_name", "created_at"], {}),
     "group": (["name", "description", "archived", "created_at"], {}),
     "workflow": (["name", "created_at"], {}),  # default_state_id set post-states
-    "workflow_state": (["workflow_id", "name", "type", "position", "created_at"],
+    "workflow_state": (["workflow_id", "name", "type", "position", "created_at",
+                        "description"],
                        {"workflow_id": "workflow"}),
     "project": (["name", "description", "abbreviation", "color", "archived", "created_at"], {}),
     "label": (["name", "color", "description", "created_at"], {}),
@@ -105,7 +106,9 @@ def export_plan(conn: sqlite3.Connection) -> dict[str, Any]:
     Returns:
         dict mapping table name -> list of row dicts (with ``id`` and all columns).
     """
-    data: dict[str, Any] = {"_meta": {"schema_version": 1, "tables": list(_TABLES)}}
+    data: dict[str, Any] = {
+        "_meta": {"schema_version": SNAPSHOT_FORMAT_VERSION, "tables": list(_TABLES)}
+    }
     for table in _TABLES:
         rows = conn.execute(f'SELECT * FROM "{table}"').fetchall()
         data[table] = [dict(r) for r in rows]
@@ -136,22 +139,23 @@ def _invalid(where: str, msg: str) -> errors.ValidationError:
     return errors.ValidationError(f"invalid snapshot: {where}: {msg}")
 
 
-def _table_kinds(conn: sqlite3.Connection) -> dict[str, dict[str, tuple[str, bool]]]:
+def _table_kinds(conn: sqlite3.Connection) -> dict[str, dict[str, tuple[str, bool, bool]]]:
     """Declared column kinds per snapshot table, read from the live schema.
 
-    Returns ``table -> column -> (kind, notnull)`` where ``kind`` is one of
-    ``"text"``/``"int"``/``"real"`` (derived from the SQLite declared type).
+    Returns ``table -> column -> (kind, notnull, has_default)`` where ``kind``
+    is one of ``"text"``/``"int"``/``"real"`` (derived from the SQLite declared
+    type) and ``has_default`` says whether the column declares a SQL DEFAULT.
     Reading this from the target database keeps validation in sync with the
     schema the import actually writes into.
 
     Args:
         conn: sqlite3.Connection from db.connect().
     Returns:
-        dict mapping table -> column -> (kind, notnull) tuples.
+        dict mapping table -> column -> (kind, notnull, has_default) tuples.
     """
-    kinds: dict[str, dict[str, tuple[str, bool]]] = {}
+    kinds: dict[str, dict[str, tuple[str, bool, bool]]] = {}
     for table in _TABLES:
-        cols: dict[str, tuple[str, bool]] = {}
+        cols: dict[str, tuple[str, bool, bool]] = {}
         for row in conn.execute(f"PRAGMA table_info({_util._q(table)})"):
             decl = (row["type"] or "").upper()
             if "INT" in decl:
@@ -160,7 +164,8 @@ def _table_kinds(conn: sqlite3.Connection) -> dict[str, dict[str, tuple[str, boo
                 kind = "real"
             else:
                 kind = "text"
-            cols[row["name"]] = (kind, bool(row["notnull"]))
+            cols[row["name"]] = (kind, bool(row["notnull"]),
+                                 row["dflt_value"] is not None)
         kinds[table] = cols
     return kinds
 
@@ -194,12 +199,11 @@ def _check_value(table: str, col: str, kind: str, v: Any) -> None:
                        f"expected {kind}, got {type(v).__name__} ({v!r})")
 
 
-def _check_fk(table: str, col: str, where: str, v: Any,
+def _check_fk(col: str, where: str, v: Any,
               ref_table: str, id_sets: dict[str, set[int]]) -> None:
     """Check that a snapshot FK value points at a row inside the snapshot.
 
     Args:
-        table: The table the referencing row came from.
         col: The referencing column.
         where: Human-readable row locator for error messages.
         v: The FK value (may be None, which is always allowed).
@@ -221,15 +225,116 @@ def _check_fk(table: str, col: str, where: str, v: Any,
                        f"references {ref_table} id {v}, which is not in the snapshot")
 
 
-def _validate_snapshot(conn: sqlite3.Connection, data: dict[str, Any]) -> None:
+def _check_workflow_default(row: dict[str, Any], where: str,
+                            state_owner: dict[int, Any], id_sets: dict[str, set[int]]) -> None:
+    """Check ``workflow.default_state_id`` exists, and belongs to this workflow.
+
+    The DB schema cannot express this constraint (the FK points at
+    workflow_state, regardless of workflow), so it is enforced here instead:
+    an imported default state belonging to another workflow would silently
+    steer new stories into the wrong lane.
+
+    Args:
+        row: The workflow row from the snapshot.
+        where: Human-readable row locator for error messages.
+        state_owner: workflow_state snapshot id -> its snapshot ``workflow_id``.
+        id_sets: Map of table -> set of ids present in the snapshot.
+    Raises:
+        errors.ValidationError: if the default is missing or cross-workflow.
+    """
+    default = row.get("default_state_id")
+    if default is None:
+        # A workflow with no default falls back to "no state"; stories then
+        # get the first workflow's default on create. Allowed-ish, but only
+        # when the row simply does not set it.
+        return
+    _check_fk("default_state_id", where, default, "workflow_state", id_sets)
+    own_id = row.get("id")
+    if own_id is not None and state_owner.get(default) != own_id:
+        raise _invalid(f"{where}.default_state_id",
+                       f"state {default} belongs to a different workflow")
+
+
+def _check_comment_parent(row: dict[str, Any], where: str, index: int,
+                          id_positions: dict[str, dict[int, int]]) -> None:
+    """Check a threaded comment's parent occurs earlier in the snapshot.
+
+    Rows are inserted in snapshot order, so a reply listed before its parent
+    would pass existence validation yet still fail the FK mid-import (after
+    the wipe). Reject that ordering here, plus the self-parent cycle.
+
+    Args:
+        row: The story_comment row from the snapshot.
+        where: Human-readable row locator for error messages.
+        index: The row's position within the snapshot's story_comment list.
+        id_positions: Map of table -> snapshot id -> row index.
+    Raises:
+        errors.ValidationError: on a self-parent or a child-before-parent row.
+    """
+    parent = row.get("parent_id")
+    if parent is None:
+        return
+    if parent == row.get("id"):
+        raise _invalid(f"{where}.parent_id", "a comment cannot be its own parent")
+    parent_index = id_positions["story_comment"].get(parent)
+    if parent_index is not None and parent_index > index:
+        raise _invalid(f"{where}.parent_id",
+                       f"reply appears before its parent (row {parent_index})")
+
+
+def _check_uniqueness(data: dict[str, Any]) -> None:
+    """Mirror the DB UNIQUE constraints the importer relies on.
+
+    A violation would otherwise fail the insert mid-import (after the wipe);
+    rolled back, but with a raw constraint message — here it fails validation
+    instead, before anything is touched.
+
+    Args:
+        data: The parsed snapshot (a dict keyed by table name).
+    Raises:
+        errors.ValidationError: on the first duplicate found.
+    """
+    seen_names: set[str] = set()
+    for i, row in enumerate(data["member"]):
+        name = row.get("mention_name")
+        if name is None:
+            continue
+        if name in seen_names:
+            raise _invalid(f"member[{i}].mention_name",
+                           f"duplicate mention_name {name!r} (UNIQUE)")
+        seen_names.add(name)
+
+    for table, key in (("story_owner", ("story_id", "member_id")),
+                       ("story_label", ("story_id", "label_id")),
+                       ("story_link", ("subject_story_id", "verb", "object_story_id"))):
+        seen_pairs: set[tuple] = set()
+        for i, row in enumerate(data[table]):
+            parts = tuple(row.get(k) for k in key)
+            if any(p is None for p in parts):
+                continue  # caught by the NOT NULL column checks
+            if parts in seen_pairs:
+                raise _invalid(f"{table}[{i}]", f"duplicate {key} (UNIQUE)")
+            seen_pairs.add(parts)
+
+    for i, row in enumerate(data["story_link"]):
+        if row.get("subject_story_id") is not None \
+                and row.get("subject_story_id") == row.get("object_story_id"):
+            raise _invalid(f"story_link[{i}]",
+                           "a story cannot link to itself")
+
+
+def validate_snapshot(conn: sqlite3.Connection, data: dict[str, Any]) -> None:
     """Validate an untrusted snapshot before any destructive step.
 
     Checks, in order: the ``_meta`` header and its ``schema_version``; that
     every required table is present and is a list; per-table and total row
-    caps; that every row is an object whose values fit the target schema
-    (types, NOT NULL, enum columns); and that every foreign key — including
-    ``workflow.default_state_id``, which is resolved late — points at a row
-    inside the snapshot. Nothing here mutates the database.
+    caps; row shape, ids (unique) and column types/NOT NULL/enum constraints;
+    every FK — including ``workflow.default_state_id`` — points at a row
+    *inside the snapshot*; that a workflow's default state belongs to that
+    workflow; parent-before-child ordering for threaded comments; and the
+    uniqueness constraints the importer relies on (member mention names,
+    junction-table pairs, story-link triples). Nothing here mutates the
+    database, so a snapshot that fails here can never corrupt or wipe it.
 
     Args:
         conn: sqlite3.Connection from db.connect().
@@ -248,6 +353,10 @@ def _validate_snapshot(conn: sqlite3.Connection, data: dict[str, Any]) -> None:
         raise errors.ValidationError(
             "invalid snapshot: _meta.schema_version is missing "
             f"(expected {SNAPSHOT_FORMAT_VERSION})")
+    if not isinstance(version, int) or isinstance(version, bool):
+        raise errors.ValidationError(
+            "invalid snapshot: _meta.schema_version must be an int, got "
+            f"{type(version).__name__} ({version!r})")
     if version != SNAPSHOT_FORMAT_VERSION:
         raise errors.ValidationError(
             f"unsupported snapshot schema_version {version!r}; expected "
@@ -271,10 +380,13 @@ def _validate_snapshot(conn: sqlite3.Connection, data: dict[str, Any]) -> None:
         raise errors.ValidationError(
             f"invalid snapshot: {total} rows exceeds the {MAX_SNAPSHOT_ROWS} row cap")
 
-    # Snapshot ids, used to verify that every FK points inside the snapshot.
+    # Snapshot ids (which must be unique per table), used to verify that every
+    # FK points inside the snapshot and to locate rows for ordering checks.
     id_sets: dict[str, set[int]] = {}
+    id_positions: dict[str, dict[int, int]] = {}
     for table in _TABLES:
         ids: set[int] = set()
+        positions: dict[int, int] = {}
         for i, row in enumerate(data[table]):
             if not isinstance(row, dict):
                 raise _invalid(f"{table}[{i}]", "row must be an object")
@@ -284,8 +396,20 @@ def _validate_snapshot(conn: sqlite3.Connection, data: dict[str, Any]) -> None:
             if not isinstance(rid, int) or isinstance(rid, bool):
                 raise _invalid(f"{table}[{i}].id",
                                f"expected int, got {type(rid).__name__} ({rid!r})")
+            if rid in ids:
+                raise _invalid(f"{table}[{i}].id",
+                               f"duplicate id {rid} in table {table!r}")
             ids.add(rid)
+            positions[rid] = i
         id_sets[table] = ids
+        id_positions[table] = positions
+
+    # The (snapshot) workflow each snapshot state belongs to, so the importer
+    # can reject a default_state_id that points at another workflow's state.
+    state_owner: dict[int, Any] = {}
+    for row in data["workflow_state"]:
+        if row.get("id") is not None:
+            state_owner[row["id"]] = row.get("workflow_id")
 
     kinds = _table_kinds(conn)
     for table in _TABLES:
@@ -294,9 +418,9 @@ def _validate_snapshot(conn: sqlite3.Connection, data: dict[str, Any]) -> None:
         for i, row in enumerate(data[table]):
             where = f"{table}[{i}]"
             for c in cols:
-                kind, notnull = decls[c]
+                kind, notnull, _has_default = decls[c]
                 if c not in row:
-                    if notnull:
+                    if notnull and not decls[c][2]:
                         raise _invalid(f"{where}.{c}",
                                        "missing value for a NOT NULL column")
                     continue
@@ -311,11 +435,13 @@ def _validate_snapshot(conn: sqlite3.Connection, data: dict[str, Any]) -> None:
                     raise _invalid(f"{where}.{c}",
                                    f"{v!r} is not one of {sorted(enumeration)}")
             for c, ref_table in fk_map.items():
-                _check_fk(table, c, where, row.get(c), ref_table, id_sets)
+                _check_fk(c, where, row.get(c), ref_table, id_sets)
             if table == "workflow":
-                # Resolved after the states are inserted; validated like any FK.
-                _check_fk(table, "default_state_id", where,
-                          row.get("default_state_id"), "workflow_state", id_sets)
+                _check_workflow_default(row, where, state_owner, id_sets)
+            if table == "story_comment":
+                _check_comment_parent(row, where, i, id_positions)
+
+    _check_uniqueness(data)
 
 
 def import_plan(conn: sqlite3.Connection, data: dict[str, Any]) -> dict[str, int]:
@@ -340,9 +466,10 @@ def import_plan(conn: sqlite3.Connection, data: dict[str, Any]) -> dict[str, int
         raise errors.ValidationError(
             "invalid snapshot: expected a JSON object keyed by table name, "
             f"got {type(data).__name__}")
-    _validate_snapshot(conn, data)
+    validate_snapshot(conn, data)
 
     counts: dict[str, int] = {}
+    kinds = _table_kinds(conn)
     with db.tx_write(conn):
         # 1) Wipe existing content (children before parents).
         for table in _WIPE_ORDER:
@@ -355,11 +482,18 @@ def import_plan(conn: sqlite3.Connection, data: dict[str, Any]) -> dict[str, int
             for row in data[table]:
                 values: dict[str, Any] = {}
                 for c in cols:
+                    if c not in row and kinds[table][c][2]:
+                        continue  # absent optional-with-default column: keep DB default
                     v = row.get(c)
                     if v is not None and c in fk_map:
                         ref_table = fk_map[c]
                         if v not in id_map[ref_table]:
-                            raise KeyError(f"FK remap failed: table={table}, col={c}, ref_table={ref_table}, old_id={v}, available_ids={list(id_map[ref_table].keys())}")
+                            # validate_snapshot makes this unreachable for any
+                            # v2-validated snapshot; kept as a backstop for
+                            # direct callers with hand-built dicts.
+                            raise errors.ValidationError(
+                                f"invalid snapshot: {table}.{c} references "
+                                f"{ref_table} id {v}, which cannot be remapped")
                         v = id_map[ref_table][v]  # remap FK to new id
                     values[c] = v
                 if table == "workflow":
@@ -382,22 +516,23 @@ def import_plan(conn: sqlite3.Connection, data: dict[str, Any]) -> dict[str, int
     return counts
 
 
-def import_from_file(conn: sqlite3.Connection, path: str) -> dict[str, int]:
-    """Load a JSON snapshot from ``path`` and import it.
+def load_snapshot(path: str) -> dict[str, Any]:
+    """Load a snapshot JSON file without touching any database.
 
-    The file size is capped (:data:`MAX_SNAPSHOT_BYTES`) before decoding, so an
-    oversized file is rejected before it can consume memory. JSON parse errors
-    (including pathologically nested documents) surface as clear
-    :class:`~backend.errors.ValidationError` messages rather than tracebacks.
+    The byte cap (:data:`MAX_SNAPSHOT_BYTES`) is applied to the *encoded*
+    file before decoding — the parse itself is what allocates memory, so the
+    per-table/total row caps applied in :func:`validate_snapshot` are what
+    bound the decoded object. JSON parse errors (including pathologically
+    nested documents) surface as clear :class:`~backend.errors.ValidationError`
+    messages rather than tracebacks.
 
     Args:
-        conn: sqlite3.Connection from db.connect().
         path: Source JSON file path.
     Returns:
-        The import counts (from :func:`import_plan`).
+        The parsed snapshot (a dict keyed by table name).
     Raises:
         errors.ValidationError: if the file is missing, oversized, not valid
-            JSON, or fails snapshot validation.
+            JSON, or is not a JSON object.
     """
     snapshot = Path(path)
     if not snapshot.is_file():
@@ -415,4 +550,27 @@ def import_from_file(conn: sqlite3.Connection, path: str) -> dict[str, int]:
     except RecursionError as e:
         raise errors.ValidationError(
             f"invalid snapshot: {path} is nested too deeply to parse") from e
-    return import_plan(conn, data)
+    if not isinstance(data, dict):
+        raise errors.ValidationError(
+            "invalid snapshot: expected a JSON object keyed by table name, "
+            f"got {type(data).__name__}")
+    return data
+
+
+def import_from_file(conn: sqlite3.Connection, path: str) -> dict[str, int]:
+    """Load a JSON snapshot from ``path``, validate it, and import it.
+
+    Convenience composition of :func:`load_snapshot` and :func:`import_plan`
+    for backend/programmatic use; the CLI splits the two so it can validate
+    before taking its pre-import backup.
+
+    Args:
+        conn: sqlite3.Connection from db.connect().
+        path: Source JSON file path.
+    Returns:
+        The import counts (from :func:`import_plan`).
+    Raises:
+        errors.ValidationError: if the file is missing, oversized, not valid
+            JSON, or fails snapshot validation.
+    """
+    return import_plan(conn, load_snapshot(path))
