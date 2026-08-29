@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 import sqlite3
+import stat
 from pathlib import Path
 
 import pytest
@@ -282,3 +284,26 @@ def test_reconnect_never_reseeds(db_path):
     assert c2.execute("SELECT COUNT(*) FROM member").fetchone()[0] == 0
     assert c2.execute("SELECT COUNT(*) FROM workflow").fetchone()[0] == 0
     c2.close()
+
+
+# --------------------------------------------------------------------------- #
+# File permissions (story 112)
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX file modes")
+def test_new_db_is_owner_only(db_path):
+    """A freshly created planner database is 0600 (contents are plaintext)."""
+    c = db.connect(db_path)
+    c.close()
+    mode = stat.S_IMODE(os.stat(db_path).st_mode)
+    assert mode == 0o600
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX file modes")
+def test_existing_db_mode_untouched(db_path):
+    """Reconnecting never rewrites a mode the user has explicitly widened."""
+    c = db.connect(db_path)
+    c.close()
+    os.chmod(db_path, 0o644)
+    db.connect(db_path).close()  # existing file: no mode change
+    assert stat.S_IMODE(os.stat(db_path).st_mode) == 0o644

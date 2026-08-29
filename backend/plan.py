@@ -131,6 +131,9 @@ def export_plan(conn: sqlite3.Connection) -> dict[str, Any]:
 def export_to_file(conn: sqlite3.Connection, path: str) -> dict[str, Any]:
     """Export the plan to ``path`` as JSON and return the export dict.
 
+    The snapshot carries the whole plan in plaintext, so the file is written
+    owner-only (see :func:`db.restrict_to_owner`).
+
     Args:
         conn: sqlite3.Connection from db.connect().
         path: Destination file path.
@@ -140,6 +143,7 @@ def export_to_file(conn: sqlite3.Connection, path: str) -> dict[str, Any]:
     data = export_plan(conn)
     with open(path, "w") as f:
         json.dump(data, f, indent=2)
+    db.restrict_to_owner(path)
     return data
 
 

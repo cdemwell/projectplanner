@@ -117,6 +117,13 @@ depending on a hosted service, a network, or an account.
 > No `.env`, config file, or auth is required. There is a single implicit local
 > user (the seeded member, id 1).
 
+**File privacy:** the planner stores your data in plaintext — `planner.db` is
+created with owner-only permissions (`0600`), as are its timestamped backups
+and `plan export` snapshots, so other users on a shared machine cannot read
+them through normal file access. There is no at-rest encryption: anyone with
+root, or access to your account, can read the contents. Keep the file (and its
+backups) out of directories you do not trust.
+
 ---
 
 ## Quick Start
